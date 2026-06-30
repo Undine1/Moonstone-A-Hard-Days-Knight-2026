@@ -1,0 +1,63 @@
+# ============================================================
+#  Moonstone Reborn — .gitignore
+#  Repo holds OUR SOURCE ONLY. Never game data, binaries, or state.
+# ============================================================
+
+# --- Copyrighted Amiga game data (Mindscape) — NEVER commit ---
+*.adf
+/dist/MoonstoneNative/data/
+# extracted/decompressed game HDD contents (sprites, backgrounds, tiles, modules)
+/portable/
+# game-asset file types (defensive, wherever they appear)
+*.cel
+*.CEL
+*.piv
+*.PIV
+*.cmp
+*.stile
+*.hit
+*.ob
+# original game modules (in case they're ever placed loose)
+nb
+program
+mog
+crystal
+Crystal
+mindscape
+# scanned/derived game media
+*.jpg
+*.jpeg
+
+# --- Game state, logs, captures (per-run, not source) ---
+*.sav
+*.log
+*.ppm
+*.wav
+
+# --- Built binaries (shipped via GitHub Releases, not the source tree) ---
+*.exe
+*.dll
+*.a
+*.lib
+*.res
+*.o
+*.obj
+*.pdb
+
+# --- Build output / caches ---
+/recomp/build/
+__pycache__/
+*.pyc
+
+# --- Third-party toolchains & libs (download per README; not ours to version) ---
+/recomp/tools/zig-*/
+/recomp/vendor/
+
+# --- Editor / OS / local tooling ---
+/.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak

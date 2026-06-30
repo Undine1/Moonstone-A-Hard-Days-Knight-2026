@@ -1,0 +1,10 @@
+# Normalize text to LF in the repo; keep shell scripts LF; mark binaries.
+* text=auto
+*.sh    text eol=lf
+*.c     text eol=lf
+*.h     text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.png   binary
+*.ico   binary
+*.res   binary
