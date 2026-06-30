@@ -1,0 +1,8 @@
+# Moonstone Reborn regression goldens.  Columns are TAB-separated:
+#   name <tab> kind <tab> input <tab> frame <tab> golden
+# kind=ramfnv : cold-boot to <frame>, FNV-1a hash of all RAM == golden  (engine/behaviour)
+#   input is "cold" (ignored).  Catches any unintended change to game behaviour.
+# kind=framesha : loadstate <input>.sav, render frame <frame>, SHA-256 == golden  (display)
+#   input is a save filename under dist/MoonstoneNative/ (local, not in repo).
+# Re-baseline after an INTENTIONAL change:  python recomp/regress/check.py --update
+determinism	ramfnv	cold	500	4452388c
