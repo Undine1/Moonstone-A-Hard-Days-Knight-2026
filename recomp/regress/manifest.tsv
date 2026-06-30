@@ -6,3 +6,5 @@
 #   input is a save filename under dist/MoonstoneNative/ (local, not in repo).
 # Re-baseline after an INTENTIONAL change:  python recomp/regress/check.py --update
 determinism	ramfnv	cold	500	4452388c
+combat	framesha	moonstone_goodcombat.sav	0	9e5057c52ed11aed
+overland	framesha	moonstone_prebug_backup.sav	0	66646f883aac4567
