@@ -1820,6 +1820,11 @@ static void audio_advance(int upto) {
                 rx2=rx1; rx1=orr; ry2=ry1; ry1=nr;
                 ol = (int32_t)nl; orr = (int32_t)nr;
             }
+            /* SATURATE to int16 -- the Butterworth can ring ~4% past a full-scale
+             * clipped edge; a raw cast would WRAP that to a sign-flipped spike (click).
+             * Clamping only ever replaces a wrap-spike with a clean flat-top: no-loss. */
+            if (ol  >  32767) ol  =  32767; else if (ol  < -32768) ol  = -32768;
+            if (orr >  32767) orr =  32767; else if (orr < -32768) orr = -32768;
             g_frame_buf[i*2]   = (int16_t)ol;
             g_frame_buf[i*2+1] = (int16_t)orr;
         }
