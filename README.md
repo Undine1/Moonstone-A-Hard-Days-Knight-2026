@@ -41,5 +41,7 @@ them automatically.
 
 ## License
 
-Port runtime code: see repository license. The original *Moonstone* game code and data are
-© 1991 Mindscape International / Rob Anderson and are not distributed here.
+Copyright © 2026 Undine1. The port's runtime code in this repository is licensed under the
+**GNU General Public License v3.0 (GPL-3.0)** — see [LICENSE](LICENSE). The original *Moonstone*
+game code, data, and artwork are © 1991 Mindscape International / Rob Anderson and are **not**
+distributed here.
