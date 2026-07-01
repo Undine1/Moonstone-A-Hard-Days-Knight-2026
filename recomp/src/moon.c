@@ -2443,6 +2443,17 @@ static int      g_aud1_dmafix = 1;    /* ROOT FIX 2026-06-30: the Mog sound-star
                                        * copy/paste slip in the original game.  It chops any one-shot SFX that
                                        * happens to be on AUD1 (the "sound cut short" bug).  Fix = skip that one
                                        * 6-byte instruction (PC 0x4371c -> 0x43722).  --noaud1fix A/B. */
+static int      g_choke_haul_fix = 1;  /* ROOT FIX 2026-07-01: the canopy-choke "haul to canopy" launch
+                                       * (0x27278) builds the arc destination X as curX + 0x96 (+150) with an
+                                       * UNCONDITIONAL rightward add (0x272a8 `addi.w #$96,(A0)+`) and no
+                                       * facing/arena term; the arc integrator then writes actor.X unbounded.
+                                       * On the 320-wide, non-scrolling combat arena a monkey grabbing the
+                                       * player on the RIGHT half hauls off the edge (choker lands X=340) ->
+                                       * invisible choker, choke SFX + 1-HP/tick drain from off-screen, escape
+                                       * stab clipped away, player choked to death -> inventory.  Root fix:
+                                       * swing the haul toward the arena INTERIOR (centre 160) so it can never
+                                       * exit -- left half keeps +150 (unchanged), right half gets -150; only
+                                       * the previously-off-screen case changes.  --nochokefix A/B. */
 static int      g_taskdedup_n = 0;
 /* (Removed 2026-06-25: g_lifeguard / the @0x260a4 +0x82 clear.  It was REDUNDANT -- the new-game
  * per-record init already clears +0x82 at 0x260d8 -- so it did nothing for the random life loss,
@@ -2631,6 +2642,20 @@ void moon_instr_hook(unsigned int pc) {
      * starts a voice on another channel.  Skip the 6-byte stray write (-> the epilogue). */
     if (g_aud1_dmafix && g_os && pc == 0x4371cu) {
         m68k_set_reg(M68K_REG_PC, 0x43722u);
+        return;
+    }
+    /* Canopy-choke off-screen haul: replace the unconditional +150 destX with an inward swing
+     * (toward arena centre 160), so a right-side grab hauls the monkey ON-screen instead of past
+     * the 320-wide edge.  A0 points at the arc-block destX field (already holding curX from 0x272a4);
+     * A1 = the hauled monkey ([0x2ebd0]).  We write the corrected destX and skip the +150 add. */
+    if (g_choke_haul_fix && g_os && pc == 0x272a8u) {
+        uint32_t a0 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A0);   /* -> arc-block destX (holds curX) */
+        uint32_t a1 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A1);   /* the monkey being hauled          */
+        int16_t curx = (int16_t)m68k_read_memory_16(a1 + 4u);      /* monkey.X                         */
+        int16_t dest = (int16_t)(curx <= 160 ? curx + 150 : curx - 150);  /* swing toward centre       */
+        m68k_write_memory_16(a0, (unsigned)(uint16_t)dest);        /* corrected destX                  */
+        m68k_set_reg(M68K_REG_A0, a0 + 2u);                        /* mimic the addi.w #,(A0)+ post-inc */
+        m68k_set_reg(M68K_REG_PC, 0x272acu);                       /* skip the original +150 add        */
         return;
     }
     if (g_os && pc == 0x2171cu) {                 /* (2) day-end dock reached only when +0x82 set:  */
@@ -5419,6 +5444,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nosfxdblguard")) g_sfx_dblguard=0;  /* A/B: disable the SFX one-shot double-guard */
         else if (!strcmp(argv[i],"--notaskfix")) g_tasklist_fix=0;           /* A/B: disable the task-list root fix (dedup + effect-only removal) */
         else if (!strcmp(argv[i],"--noaud1fix")) g_aud1_dmafix=0;            /* A/B: disable the AUD1 stray-DMACON-disable fix (0x4371c) */
+        else if (!strcmp(argv[i],"--nochokefix")) g_choke_haul_fix=0;        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
         else if (!strcmp(argv[i],"--boomlp")&&i+1<argc) { double fc=atof(argv[++i]); g_boomlp_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* per-channel de-click LP on the AUD2 boom, Hz (0=off) */
