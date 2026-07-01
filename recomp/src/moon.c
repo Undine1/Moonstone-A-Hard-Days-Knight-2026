@@ -31,6 +31,7 @@
 #include <SDL2/SDL.h>
 #include "moon_icon.h"   /* embedded credit-scene moon, set as the SDL window/taskbar icon */
 #include "splash_image.h" /* embedded boot splash, shown during the black disk-load */
+#include "qoi_dec.h"      /* ~60-line QOI decoder for the splash (no external image lib) */
 #define SPLASH_BOOT_NZ 2000  /* nonzero display bytes that mean "intro is up" -> hand off the splash */
 
 /* Project identity / attribution.  Printed at startup (to the log) and via
@@ -4264,6 +4265,27 @@ static LONG WINAPI moon_crash_filter(EXCEPTION_POINTERS *ep) {
 }
 #endif
 
+/* Minimal base64 decoder for the embedded boot splash (output-only asset).
+ * Skips any non-base64 chars (newlines etc.); '=' padding is a no-op. */
+static inline int b64val(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+static int b64decode(const char *s, uint8_t *out, int cap) {
+    int acc = 0, bits = 0, n = 0;
+    for (; *s; s++) {
+        int v = b64val((unsigned char)*s);
+        if (v < 0) continue;
+        acc = (acc << 6) | v; bits += 6;
+        if (bits >= 8) { bits -= 8; if (n < cap) out[n++] = (uint8_t)((acc >> bits) & 0xff); }
+    }
+    return n;
+}
+
 /* ----------------------------------------------------------- SDL host loop */
 static int run_sdl(int scale) {
     g_sdl_mode = 1;   /* live play: crash reporter may show a dialog box */
@@ -4324,13 +4346,16 @@ static int run_sdl(int scale) {
      * present block below.  Output-only; never touches game state. */
     SDL_Texture *splash_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, SPLASH_W, SPLASH_H);
     if (splash_tex) {
-        uint8_t *sb = (uint8_t*)malloc((size_t)SPLASH_W*SPLASH_H*3);
-        if (sb) {
-            const uint8_t *p = splash_rle, *e = splash_rle + SPLASH_RLE_LEN; uint8_t *o = sb;
-            while (p < e) { int c = p[0] | (p[1]<<8); uint8_t r=p[2],g=p[3],b=p[4]; p+=5; while (c--) { *o++=r; *o++=g; *o++=b; } }
-            SDL_UpdateTexture(splash_tex, NULL, sb, SPLASH_W*3);
-            free(sb);
+        SDL_SetTextureScaleMode(splash_tex, SDL_ScaleModeLinear);  /* smooth if the window is resized off 1:1 */
+        int b64len = (int)strlen(splash_b64), cap = SPLASH_W*SPLASH_H*3;
+        uint8_t *qoi = (uint8_t*)malloc((size_t)b64len);           /* >= decoded QOI size */
+        uint8_t *sb  = (uint8_t*)malloc((size_t)cap);              /* RGB24 pixels */
+        if (qoi && sb) {
+            int qn = b64decode(splash_b64, qoi, b64len);           /* base64 -> QOI bytes */
+            if (qoi_decode_rgb(qoi, qn, sb, cap) == cap)           /* QOI -> RGB24 */
+                SDL_UpdateTexture(splash_tex, NULL, sb, SPLASH_W*3);
         }
+        free(qoi); free(sb);
     }
     int boot_splash_done = 0;
     /* open the first attached game controller (hot-plug handled in the loop) */
