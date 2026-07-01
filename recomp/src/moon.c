@@ -1799,15 +1799,21 @@ static void audio_advance(int upto) {
     if (upto <= g_smp_done) return;
     int n = upto - g_smp_done;
     paula_generate(&g_frame_buf[g_smp_done*2], n);
-    if (g_lpf_a) {                       /* Amiga fixed output RC filter (de-clicks attack edges) */
-        static int32_t yl = 0, yr = 0;   /* persists across the in-frame increments + frames */
+    /* Amiga output filters -- two INDEPENDENT cascaded stages: RC 1-pole (always-on analog)
+     * then LED Butterworth 2-pole.  Each toggles on its own (--lpf 0 / --ledfilter 0);
+     * previously the LED was nested inside the RC's gate, so --lpf 0 killed both. */
+    { static int led_init = 0; if (!led_init) { led_set_cutoff(g_led_fc); led_init = 1; } }
+    if (g_lpf_a || g_led_on) {
+        static int32_t yl = 0, yr = 0;   /* RC 1-pole state (persists across frames) */
         static double lx1=0,lx2=0,ly1=0,ly2=0, rx1=0,rx2=0,ry1=0,ry2=0;  /* LED Butterworth biquad state */
-        static int led_init=0; if (!led_init) { led_set_cutoff(g_led_fc); led_init=1; }
         for (int i = g_smp_done; i < upto; i++) {
-            yl += (int32_t)(((int64_t)(g_frame_buf[i*2]   - yl) * g_lpf_a) >> 16);
-            yr += (int32_t)(((int64_t)(g_frame_buf[i*2+1] - yr) * g_lpf_a) >> 16);
-            int32_t ol = yl, orr = yr;
-            if (g_led_on) {              /* A500 "LED" Butterworth 2-pole: rounds attack edges; flat passband keeps it bright */
+            int32_t ol = g_frame_buf[i*2], orr = g_frame_buf[i*2+1];
+            if (g_lpf_a) {               /* stage 1: A500 fixed output RC (de-clicks attack edges) */
+                yl += (int32_t)(((int64_t)(ol  - yl) * g_lpf_a) >> 16);
+                yr += (int32_t)(((int64_t)(orr - yr) * g_lpf_a) >> 16);
+                ol = yl; orr = yr;
+            }
+            if (g_led_on) {              /* stage 2: A500 "LED" Butterworth 2-pole: rounds attack edges; flat passband keeps it bright */
                 double nl = g_led_b0*ol  + g_led_b1*lx1 + g_led_b2*lx2 - g_led_a1*ly1 - g_led_a2*ly2;
                 lx2=lx1; lx1=ol;  ly2=ly1; ly1=nl;
                 double nr = g_led_b0*orr + g_led_b1*rx1 + g_led_b2*rx2 - g_led_a1*ry1 - g_led_a2*ry2;
