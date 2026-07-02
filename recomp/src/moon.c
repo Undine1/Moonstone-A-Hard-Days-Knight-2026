@@ -5690,12 +5690,17 @@ int main(int argc, char **argv) {
 
     fprintf(g_log, "--- run: pc=%06x sp=%06x sr=%04x frames=%d sdl=%d ---\n", m.entry, sp, sr, frames, sdl);
     (void)steps;
-    if (sdl) { int rc = run_sdl(scale); if (g_log!=stderr) fclose(g_log); return rc; }
-    if (loadstate_path && loadstate_at < 0) {   /* cold-boot load (validation) */
+    /* Cold-boot load: thaw a save BEFORE entering either run loop.  Was headless-only
+     * (the sdl dispatch came first, silently ignoring --loadstate in windowed mode);
+     * shared now so a live window can boot straight into a save -- e.g. straight into
+     * a mid-combat repro without hand-navigating the menus.  The warmed variant
+     * (--loadstate-at FRAME) stays headless-only. */
+    if (loadstate_path && loadstate_at < 0) {
         if (!load_state(loadstate_path)) { fprintf(stderr, "loadstate failed: %s\n", loadstate_path); return 1; }
         fprintf(g_log, "--- loadstate %s -> ic=%llu pc=%06x ---\n",
                 loadstate_path, (unsigned long long)g_icount, (unsigned)m68k_get_reg(NULL,M68K_REG_PC));
     }
+    if (sdl) { int rc = run_sdl(scale); if (g_log!=stderr) fclose(g_log); return rc; }
     LARGE_INTEGER pf; QueryPerformanceFrequency(&pf);
     double pf_ms = 1000.0 / (double)pf.QuadPart;
     double emu_max=0, emu_sum=0, ren_max=0, ren_sum=0; int ftn=0;
