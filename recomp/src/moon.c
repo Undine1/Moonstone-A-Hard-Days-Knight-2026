@@ -1552,6 +1552,35 @@ static void paula_update_dma(void) {
     }
 }
 
+/* Rebuild the reload-protocol SIDECAR statics after a savestate load.  These
+ * (g_len_armed / g_play_loc0 / g_play_len0 / g_first_pass) live outside the
+ * save blob (a new PaulaCh field would break save-version compat -- see the
+ * g_len_armed decl), yet PaulaCh.reload_pending/reload_isr_wait ARE restored,
+ * so a load mid-reload used to run the protocol on whatever the loading
+ * process's statics happened to hold: a stale g_len_armed=1 re-opened the
+ * pre-fix mid-install latch race (the combat screech class), and stale
+ * loc0/len0 either disarmed the SFX double-guard (cold --loadstate) or falsely
+ * armed it (same-session F9).  Conservative reconstruction from the restored
+ * registers:
+ *   - g_len_armed=0: an ISR-wait reload must see a FRESH AUDxLEN write before
+ *     latching; if the save caught a silent-loop install mid-flight the
+ *     resumed ISR provides it, else the bounded 64-tick held-DAC commits the
+ *     (coherently snapshotted) registers.  Never the mixed old-LEN latch.
+ *   - loc0/len0 = the restored AUDxLC/LEN: if the registers still point at
+ *     the just-played one-shot (the replay hazard the guard exists for) the
+ *     guard arms exactly as it should; a silent loop already installed
+ *     differs (len<=1) and leaves the guard quiet.
+ *   - g_first_pass=0: diag-only (CUT-OFF watch) -- no bogus lines post-load. */
+static void paula_sidecar_reset(void) {
+    for (int ch = 0; ch < 4; ch++) {
+        uint32_t b = 0x0a0 + ch*0x10;
+        g_len_armed[ch]  = 0;
+        g_play_loc0[ch]  = (((uint32_t)g_custom[b>>1]<<16)|g_custom[(b+2)>>1]) & (RAM_SIZE-2);
+        g_play_len0[ch]  = (int)g_custom[(b+4)>>1];
+        g_first_pass[ch] = 0;
+    }
+}
+
 /* Generate `nframes` stereo output samples (interleaved L,R) into out[] from the
  * current Paula state, advancing each channel by Paula sample-ticks.  Each host
  * sample we add `step` (16.16) to each channel's accumulator and tick it once
@@ -5390,6 +5419,8 @@ static int load_state(const char *path) {
          * to the correct stack), then all other registers.  Pure values, no pointers. */
         for (int i = 0; i < SAVE_NREGS; i++) if (SAVE_REGS[i]==M68K_REG_SR) m68k_set_reg(M68K_REG_SR, regs[i]);
         for (int i = 0; i < SAVE_NREGS; i++) if (SAVE_REGS[i]!=M68K_REG_SR) m68k_set_reg(SAVE_REGS[i], regs[i]);
+        paula_sidecar_reset();   /* Paula reload-protocol statics live outside the blob: rebuild them
+                                  * from the just-restored registers (see paula_sidecar_reset) */
     }
     /* Rebuild the streamer's in-memory file copy: g_loadbuf is a host pointer that
      * wasn't serialized -- re-read the (deterministic) dataset file by name and
