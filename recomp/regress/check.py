@@ -33,6 +33,7 @@ ap.add_argument("--data",     default=at("dist", "MoonstoneNative", "data"))
 ap.add_argument("--saves",    default=at("dist", "MoonstoneNative"))
 ap.add_argument("--manifest", default=os.path.join(HERE, "manifest.tsv"))
 ap.add_argument("--update",   action="store_true", help="rewrite goldens with current values")
+ap.add_argument("--no-audio", action="store_true", help="skip the live SDL audio-cushion check (no game window)")
 args = ap.parse_args()
 
 if not os.path.exists(args.exe):
@@ -70,6 +71,40 @@ def measure(kind, inp, frame):
         return sha16(ppm) if os.path.exists(ppm) else "ERR:no-frame"
     return "ERR:bad-kind"
 
+def check_audio():
+    """Live SDL audio-cushion check — the one thing the golden hashes CANNOT see:
+    audio_reprime and the stall-resync top-up only execute with a real audio device
+    (headless runs never open one, never tick the SDL queue).  Boots the game
+    windowed, auto-skips the intro at frame 250 and simulates a ~0.5 s window-drag
+    stall at frame 600 (--skipat / --stallat), then asserts from the scratch log
+    that the cushion was primed at boot, re-primed at BOTH clear/stall events, and
+    never chronically starved (a regressed build logs hundreds of AQ-UNDERRUN
+    lines; a small tolerance absorbs one-off host hiccups).  Takes ~35 s and a game
+    window appears + closes by itself; --no-audio skips it.  SKIPs cleanly when no
+    audio device exists."""
+    logp = os.path.join(tmp, "audio.log")
+    cmd = [args.exe, "--sdl", "--os", "--mod", os.path.join(args.data, "nb"),
+           "--diskdir", args.data, "--dataset", args.data,
+           "--skipat", "250", "--stallat", "600", "--log", logp]
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        p.wait(timeout=34)              # the live loop never exits by itself...
+    except subprocess.TimeoutExpired:
+        p.kill(); p.wait()              # ...so the kill IS the normal path
+    try:
+        log = open(logp, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return ("FAIL", "no engine log written")
+    if "AUDIO-DEV" not in log:
+        return ("SKIP", "no audio device on this host")
+    reprimes  = log.count("AQ-REPRIME")
+    underruns = log.count("AQ-UNDERRUN")
+    if "AQ-PRIME" not in log:      return ("FAIL", "boot prime missing")
+    if "AUDIO-UNPAUSE" not in log: return ("FAIL", "device never unpaused (load/skip path broken?)")
+    if reprimes < 2:               return ("FAIL", f"expected >=2 AQ-REPRIME (skip + stall), got {reprimes}")
+    if underruns > 10:             return ("FAIL", f"{underruns} AQ-UNDERRUN lines (cushion not holding)")
+    return ("PASS", f"reprimes={reprimes} underruns={underruns}")
+
 rows, fails, out = [], 0, []
 for raw in open(args.manifest, encoding="utf-8"):
     line = raw.rstrip("\n")
@@ -87,6 +122,14 @@ for raw in open(args.manifest, encoding="utf-8"):
     tag = "PASS" if ok else "FAIL"
     print(f"  [{tag}] {name:14} {kind:8} got={got:18} golden={golden}")
 
+audio_ran = False
+if not args.update and not args.no_audio:
+    tag, detail = check_audio()
+    audio_ran = (tag != "SKIP")
+    print(f"  [{tag}] {'audio-cushion':14} {'livelog':8} {detail}")
+    if tag == "FAIL":
+        fails += 1
+
 shutil.rmtree(tmp, ignore_errors=True)
 
 if args.update:
@@ -95,7 +138,7 @@ if args.update:
     print("\nmanifest re-baselined.")
     sys.exit(0)
 
-total = sum(1 for r in rows if r)
+total = sum(1 for r in rows if r) + (1 if audio_ran else 0)
 if fails:
     print(f"\n{fails}/{total} REGRESSED. If the change was intentional, eyeball it then: --update")
     sys.exit(1)
