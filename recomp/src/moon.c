@@ -5,7 +5,7 @@
  * trackdisk).  No emulator, no Kickstart ROM.
  *
  * Copyright (C) 2026 Undine1  <github.com/Undine1>
- * Project home: https://github.com/Undine1/moonstone-reborn
+ * Project home: https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026
  *
  * This program is free software: you can redistribute it and/or modify it under
  * the terms of the GNU General Public License version 3 as published by the Free
@@ -36,9 +36,9 @@
 
 /* Project identity / attribution.  Printed at startup (to the log) and via
  * --version; also serves as the binary's attribution string. */
-#define MOON_ATTRIB "Moonstone Reborn v1.0.0 - native (no-emulator) port of " \
-    "Moonstone: A Hard Days Knight (Amiga 1991) - (C) 2026 Undine1, " \
-    "github.com/Undine1/moonstone-reborn - GPL-3.0"
+#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.0.0 - " \
+    "no-emulator port of the Amiga 1991 original - (C) 2026 Undine1, " \
+    "github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026 - GPL-3.0"
 /* Compile timestamp, shown in the window title + log so it's unambiguous WHICH
  * build is actually running (no more "did my change take effect?" guesswork). */
 #define MOON_BUILD (__DATE__ " " __TIME__)
@@ -97,6 +97,8 @@ static int g_inv_pending = 0;       /* Space injected; verify it was honored on 
 static int g_rest_tries = 0, g_inv_tries = 0;   /* bounded re-arm counters */
 static uint16_t g_rest_idx0 = 0;    /* turn index [0x2f9da] at REST injection (change = honored) */
 static uint16_t g_popup_injected = 0; /* rawkey our popup injection left in [0x3bf74] (retracted at the next map poll) */
+static int g_pause_request = 0;     /* host Space edge -> feed the walk/day-animation PAUSE gate (faithful restore) */
+static int g_walk_live = 0;         /* g_cur_frame stamp of the last pause-gate poll (capture scope for Space-pause) */
 /* MOONSTONE-DELIVERY garbled-map latch (2026-06-24).  The "return matching Moonstone to its home
  * village" handler (node 0x1b) branches to 0x22820 when the returned token matches; from 0x22876 it
  * displays the overland map (scene 9), waits for fire (0x2288a), then 0x231e6 + the 0x2289e relaunch
@@ -2844,7 +2846,16 @@ void moon_instr_hook(unsigned int pc) {
          * The moonstone-click crash is instead trapped PRECISELY at its deref (0x2a1b8, garbage A2)
          * below, which cannot false-positive on setup code. */
         int code = (pc >= 0x400u && pc < 0x800u) || (pc >= 0x9000u && pc < 0x10000u)
-                || (pc >= 0x21000u && pc < 0x68000u) || (pc >= 0x1c0000u && pc < 0x1f0000u);
+                || (pc >= 0x21000u && pc < 0x68000u) || (pc >= 0x1c0000u && pc < 0x1f0000u)
+                || (pc >= 0x75000u && pc < 0x76000u);  /* the 0x75xxx loader/decruncher overlay IS
+                                                        * legit code (its own comment above said so,
+                                                        * but the whitelist omitted it): 6 false
+                                                        * positives during every disk-1 load burned
+                                                        * the whole dump budget, so the one detector
+                                                        * that could catch an in-RAM wild jump (the
+                                                        * vanish-class signature) was dead before
+                                                        * gameplay in every session (audit 2026-07-02,
+                                                        * confirmed in the operator's log). */
         if (!code) dump_derail("PC in non-code region (logged)", pc, 0);
     }
     /* TARGETED moonstone-crash trap (2026-06-26): the inventory menu over-walk derefs the current
@@ -3124,6 +3135,25 @@ void moon_instr_hook(unsigned int pc) {
      * ASCII 0x20) so the poll opens it.  The open-map inventory was otherwise unreachable
      * (Space was wired to fire; no pad button was bound).  Gated to that one poll PC, so
      * it's inert everywhere else (combat/menus/towns use different polls). */
+    /* SPACE-PAUSE (faithful feature restore, 2026-07-02 audit): the walk/day-transition
+     * animation loop (0x2173c front-end / byte-identical Mog copy) polls a pause gate
+     * every iteration: [0x3bf74] -> 0x3ff42 translate -> ASCII 0x20 pauses, then
+     * busy-waits for the NEXT key.  On hardware the CIA keyboard ISR feeds the buffer;
+     * the port never did, so the original pause feature was unreachable dead code (and
+     * would have hung forever if entered -- nothing could release the wait).  Feed it:
+     * a host Space edge (captured only while the gate is actually polling, g_walk_live)
+     * injects scancode 0x39 at the gate read; the next Space edge is injected at the
+     * busy-wait to release it (the loop's own follow-up clears the buffer).  Both PCs
+     * opcode-guarded: gate reads 0x21a8c/0x1c755c (`move.w $3bf74,D0` = 0x3039), waits
+     * 0x21aa4/0x1c7574 (`tst.w $3bf74` = 0x4a79). */
+    if (g_os && (pc == 0x21a8cu || pc == 0x1c755cu) && r16(pc) == 0x3039u) {
+        g_walk_live = g_cur_frame;          /* the pause gate is polling NOW (capture scope) */
+        if (g_pause_request && r16(0x3bf74u) == 0) { w16(0x3bf74u, 0x39); g_pause_request = 0; }
+    }
+    if (g_os && (pc == 0x21aa4u || pc == 0x1c7574u) && r16(pc) == 0x4a79u) {
+        g_walk_live = g_cur_frame;          /* paused (busy-wait): keep the capture scope live */
+        if (g_pause_request) { w16(0x3bf74u, 0x39); g_pause_request = 0; }  /* release the wait */
+    }
     if (g_os && pc == 0x4024cu) {           /* overland-map keyboard poll */
         g_mappoll_hot = 1;                  /* the normal map turn-loop ran this frame (distinguishes it from the delivery overview) */
         g_map_live = g_cur_frame;           /* request-capture gate: the map loop is live NOW */
@@ -4721,7 +4751,13 @@ static int run_sdl(int scale) {
                      * in-game so Space still SKIPS the attract intro. */
                     case SDLK_SPACE: case SDLK_i:
                         if (d && !g_blt_busy_scope && !g_in_inventory
-                            && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1; break;
+                            && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
+                        /* Space during the walk/day ANIMATION = the original PAUSE key
+                         * (gate polling stamps g_walk_live; mutually exclusive with the
+                         * map poll, so one key serves both faithfully). */
+                        if (d && sym == SDLK_SPACE && !g_blt_busy_scope
+                            && g_walk_live && (g_cur_frame - g_walk_live) < 3) g_pause_request = 1;
+                        break;
                     /* E = REST / skip to the next turn on the overland map (the faithful Amiga
                      * key).  Edge-only (keydown), in-game; inert during the attract/inventory. */
                     case SDLK_e:
@@ -4903,6 +4939,8 @@ static int run_sdl(int scale) {
             g_rest_request = g_inv_request = 0;
             g_rest_tries = g_inv_tries = 0;
         }
+        if (g_pause_request && (g_cur_frame - g_walk_live) > 5)
+            g_pause_request = 0;   /* walk animation ended before we could inject: drop the stale pause */
         /* Render via capture_frame so the live window gets the same vblank-aligned
          * snapshot + empty-backbuffer recovery + scene-transition hold as the dump
          * path (clean scene switches, no half-decoded frames). */
@@ -5164,7 +5202,10 @@ static uint32_t dos_lvo(int lvo) {
         case 42: {                            /* Read: D1=h D2=buf D3=len -> D0=actual */
             int h=hle_reg(M68K_REG_D1); uint32_t buf=hle_reg(M68K_REG_D2), len=hle_reg(M68K_REG_D3);
             if (h<=0||h>=64||!g_files[h].fp){hle_setd0(-1);return -1;}
-            uint8_t *tmp=malloc(len); size_t got=fread(tmp,1,len,g_files[h].fp);
+            if (!len){hle_setd0(0);return 0;}
+            uint8_t *tmp=malloc(len);
+            if (!tmp){hle_setd0(-1);return -1;}   /* len is game-controlled: don't fread through NULL */
+            size_t got=fread(tmp,1,len,g_files[h].fp);
             for(size_t i=0;i<got;i++) w8(buf+i,tmp[i]); free(tmp);
             if (g_oslog&&g_log) fprintf(g_log,"  dos Read(h%d,%06x,%u) -> %zu\n",h,buf,len,got);
             hle_setd0((uint32_t)got); return (uint32_t)got;
@@ -5244,7 +5285,17 @@ static void hle_load_by_name(void) {
         return;
     }
     FILE *f = fopen(path, "rb");
-    g_loadbuf = (uint8_t*)malloc(sz);
+    g_loadbuf = f ? (uint8_t*)malloc(sz) : NULL;
+    if (!f || !g_loadbuf) {                       /* open/alloc failed (file vanished mid-session,
+                                                   * OOM): fail exactly like NOT FOUND -- never
+                                                   * fread through NULL */
+        if (f) fclose(f);
+        if (g_loadbuf) { free(g_loadbuf); g_loadbuf = NULL; }
+        if (g_log) fprintf(g_log, "HLE load-by-name \"%s\" -> open/alloc FAILED\n", nm);
+        w16(0x2ca22, 0xffff); w16(0x2ad4a, 0xffff);
+        hle_rts();
+        return;
+    }
     g_loadsize = (long)fread(g_loadbuf, 1, sz, f);
     fclose(f);
     snprintf(g_loadname, sizeof(g_loadname), "%s", nm);
@@ -5542,6 +5593,22 @@ static const int SAVE_REGS[] = {
 };
 #define SAVE_NREGS ((int)(sizeof(SAVE_REGS)/sizeof(SAVE_REGS[0])))
 
+/* SIDECAR-STATE CHECKLIST (2026-07-02 audit).  Every mutable file-scope static
+ * falls in one of these buckets -- new state MUST pick one consciously:
+ *   1. IN THE BLOB (below): machine state the 68k can observe.
+ *   2. RESET ON LOAD: reconstructable protocol gates -> paula_sidecar_reset()
+ *      (adding to the blob would break save-version compat).
+ *   3. HOST-INPUT state (the g_rest_, g_inv_, g_pause_ families, plus
+ *      g_popup_injected / keyq / g_menusel_prev): scoped by liveness stamps
+ *      (g_map_live, g_walk_live) with scene-change retracts -- self-healing
+ *      across loads, keep it that way.
+ *   4. DIAG-ONLY (watch counters, log dedup state): stale values only cost log
+ *      noise; never let one feed an emulation decision.
+ * Known benign exceptions (audited): g_snd_loaded (cold load -> guard disarmed
+ * until the first sound dispatch re-arms it, sub-second) and g_in_inventory
+ * (stale after loading an inventory-open save; neutralized by the g_map_live
+ * capture gate).  If you add state that feeds EMULATION and fits none of the
+ * buckets, it belongs in the blob with a SAVE_VERSION bump. */
 /* ONE (de)serializer drives both directions so save & load can never drift out
  * of sync.  dir=1 => write, dir=0 => read.  Returns 1 on full success. */
 static int sv_blob(FILE *f, int dir, void *p, size_t n) {
