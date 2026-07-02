@@ -206,7 +206,17 @@ static void inlog(const char *what, uint16_t v);  /* fwd */
 #define CIA_LO     0xA00000u
 #define CIA_HI     0xC00000u
 
-static uint8_t  g_ram[RAM_SIZE];
+static uint8_t  g_ram[RAM_SIZE + 4];    /* +4 GUARD bytes (2026-07-02): several helpers mask
+                                         * the base index once and then touch a+1..a+3
+                                         * (r16/r32, w16/w32, blt_r16/blt_w16, the Paula
+                                         * OVER-READ detector), so an access at the top word
+                                         * of chip RAM spills up to 3 bytes past RAM_SIZE --
+                                         * an OOB read, or worse a WRITE into g_custom (next
+                                         * object).  The guard absorbs those spills: reads
+                                         * see 0, writes land in dead space.  Every bulk op
+                                         * (save blob, ram dumps, memset, load_hunk) sizes
+                                         * itself with RAM_SIZE explicitly, so formats and
+                                         * determinism are unchanged. */
 static uint16_t g_custom[0x100];        /* word registers at DFF000.. */
 static uint8_t  g_ciaa[16], g_ciab[16];
 static int      g_os;                   /* fwd: AmigaOS HLE enabled (defined below) */
