@@ -5,6 +5,14 @@
 # kind=framesha : loadstate <input>.sav, render frame <frame>, SHA-256 == golden  (display)
 #   input is a save filename under dist/MoonstoneNative/ (local, not in repo).
 # Re-baseline after an INTENTIONAL change:  python recomp/regress/check.py --update
+# kind=savefnv : loadstate <input>.sav (frozen fixture, under dist/MoonstoneNative/),
+#   run <frame> frames with --os, FNV-1a of all RAM == golden.  Exercises GAMEPLAY
+#   paths (combat AI, sound protocol, PC hooks) the cold goldens never reach.
+# ramfnv input "os" = full HLE boot running the real attract; frame 4000 covers the
+#   window (2000-3000) where an unguarded hook misfire once hid from the 500-frame golden.
 determinism	ramfnv	cold	500	4452388c
+attract	ramfnv	os	4000	e5c2462d
+combatrun	savefnv	moonstone_combatrun.sav	600	7f911e77
+vanishrun	savefnv	moonstone_bug.sav	600	84ad0aeb
 combat	framesha	moonstone_goodcombat.sav	0	9e5057c52ed11aed
 overland	framesha	moonstone_prebug_backup.sav	0	66646f883aac4567

@@ -58,7 +58,22 @@ def sha16(path):
 
 def measure(kind, inp, frame):
     if kind == "ramfnv":
-        r = run(["--savestate-at", str(frame), os.path.join(tmp, "d.sav")])
+        # input "cold" = legacy bare boot (no --os, default 600 frames -- keeps the
+        # original golden); input "os" = full HLE boot, runs the real attract.  A
+        # frame past 600 extends the run (the long attract golden exists because a
+        # hook misfire at frames 2000-3000 was once invisible to the 500-frame one).
+        extra = (["--os"] if inp == "os" else []) + ["--frames", str(max(600, int(frame)))]
+        r = run(extra + ["--savestate-at", str(frame), os.path.join(tmp, "d.sav")])
+        m = re.search(r"ram_fnv=([0-9a-f]+)", r.stdout)
+        return m.group(1) if m else "ERR:no-hash"
+    if kind == "savefnv":
+        # loadstate a frozen fixture save, run <frame> frames with full HLE, hash RAM.
+        # Catches behavioural drift in GAMEPLAY paths (combat AI, sound protocol,
+        # hooks) that the cold-boot goldens never execute.
+        save = os.path.join(args.saves, inp)
+        if not os.path.exists(save):
+            return "ERR:no-save"
+        r = run(["--os", "--loadstate", save, "--frames", str(frame)])
         m = re.search(r"ram_fnv=([0-9a-f]+)", r.stdout)
         return m.group(1) if m else "ERR:no-hash"
     if kind == "framesha":
