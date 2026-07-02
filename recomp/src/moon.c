@@ -1304,11 +1304,17 @@ static void paula_tick_one(int ch) {
             }
         }
         /* COMBAT AUDIO TRACE (reload/swap path) -- see g_audtrace_* decl.  The screech
-         * may ride in via underflow-reload (no DMACON enable edge), so trace it here too. */
+         * may ride in via underflow-reload (no DMACON enable edge), so trace it here too.
+         * Loc-CHANGE only (no time-based re-arm, unlike the enable-edge trace): this path
+         * runs on EVERY deferred-reload commit, and a channel parked on its silent loop
+         * (or a looping instrument) at note-level volume commits one per word forever --
+         * the old 50000-ic re-arm re-logged the SAME loc ~14 lines/sec of fprintf+fflush
+         * into every shipping session (2026-07-02 audit; the operator's log carried 210
+         * identical loc=00c2a4 lines).  A distinct loc still logs immediately. */
         {
             uint32_t vol = g_custom[(0x0a8 + ch*0x10)>>1] & 0x7f;
             if (g_log && g_os && !g_blt_busy_scope && g_audtrace_n < 6000
-                && vol >= 24 && (c->loc != g_audtrace_loc[ch] || (g_icount - g_audtrace_ic[ch]) > 50000ull)) {
+                && vol >= 24 && c->loc != g_audtrace_loc[ch]) {
                 uint32_t per = g_custom[(0x0a6 + ch*0x10)>>1];
                 fprintf(g_log, "AUDTRACE-RL AUD%d loc=%06x len=%u per=%u vol=%u ic=%llu\n",
                         ch, c->loc, (unsigned)c->len, per, vol, (unsigned long long)g_icount);
@@ -1679,8 +1685,9 @@ static void paula_generate(int16_t *out, int nframes) {
         int32_t L = (left*(100 - g_xfeed) + right*g_xfeed) / 100;
         int32_t R = (right*(100 - g_xfeed) + left*g_xfeed) / 100;
         /* 2 channels/side * 8192 peak = +-16384; scale up ~*2 for headroom-safe
-         * 16-bit output, then clamp */
-        L <<= 1; R <<= 1;
+         * 16-bit output, then clamp.  (*2, not <<1: left-shifting a negative
+         * signed value is undefined in ISO C -- C99 6.5.7p4.) */
+        L *= 2; R *= 2;
         if (L >  32767) L =  32767; else if (L < -32768) L = -32768;
         if (R >  32767) R =  32767; else if (R < -32768) R = -32768;
         out[2*n]   = (int16_t)L;
@@ -1869,8 +1876,17 @@ static void audio_advance(int upto) {
         for (int i = g_smp_done; i < upto; i++) {
             int32_t ol = g_frame_buf[i*2], orr = g_frame_buf[i*2+1];
             if (g_lpf_a) {               /* stage 1: A500 fixed output RC (de-clicks attack edges) */
-                yl += (int32_t)(((int64_t)(ol  - yl) * g_lpf_a) >> 16);
-                yr += (int32_t)(((int64_t)(orr - yr) * g_lpf_a) >> 16);
+                int32_t dl = (int32_t)(((int64_t)(ol  - yl) * g_lpf_a) >> 16);
+                int32_t dr = (int32_t)(((int64_t)(orr - yr) * g_lpf_a) >> 16);
+                /* the arithmetic >>16 floors toward -inf, so a state 1-2 LSB BELOW the
+                 * input computes a zero step and sticks there forever (e.g. yl=-1 on
+                 * silence: (1*27265)>>16 == 0) -- a permanent -1 LSB DC tail after any
+                 * negative-side decay that also poisoned the g_a_nonzero stat and WAV
+                 * A/B silence tails.  Force a 1-LSB step whenever the state hasn't
+                 * converged: symmetric terminal behavior, exact convergence to input. */
+                if (dl == 0 && ol != yl) dl = (ol > yl) ? 1 : -1;
+                if (dr == 0 && orr != yr) dr = (orr > yr) ? 1 : -1;
+                yl += dl; yr += dr;
                 ol = yl; orr = yr;
             }
             if (g_led_on) {              /* stage 2: A500 "LED" Butterworth 2-pole: rounds attack edges; flat passband keeps it bright */
