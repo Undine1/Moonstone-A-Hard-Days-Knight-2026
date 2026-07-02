@@ -66,6 +66,19 @@ def measure(kind, inp, frame):
         r = run(extra + ["--savestate-at", str(frame), os.path.join(tmp, "d.sav")])
         m = re.search(r"ram_fnv=([0-9a-f]+)", r.stdout)
         return m.group(1) if m else "ERR:no-hash"
+    if kind == "scriptfnv":
+        # loadstate a fixture and drive scripted input: input is "SAVE|SCRIPT" (the
+        # --script frame:keys timeline).  The townday row walks the near-town map save
+        # INTO the town (fire), down the menu to Exit, and back out -- asserting the
+        # whole town-entry/exit + day-advance + map-return flow the operator's
+        # intermittent day-end bug lives in.
+        save_name, script = (inp.split("|", 1) + [""])[:2]
+        save = os.path.join(args.saves, save_name)
+        if not os.path.exists(save):
+            return "ERR:no-save"
+        r = run(["--os", "--loadstate", save, "--frames", str(frame), "--script", script])
+        m = re.search(r"ram_fnv=([0-9a-f]+)", r.stdout)
+        return m.group(1) if m else "ERR:no-hash"
     if kind == "savefnv":
         # loadstate a frozen fixture save, run <frame> frames with full HLE, hash RAM.
         # Catches behavioural drift in GAMEPLAY paths (combat AI, sound protocol,

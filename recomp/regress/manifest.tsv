@@ -14,5 +14,6 @@ determinism	ramfnv	cold	500	4452388c
 attract	ramfnv	os	4000	e5c2462d
 combatrun	savefnv	moonstone_combatrun.sav	600	7f911e77
 vanishrun	savefnv	moonstone_bug.sav	600	84ad0aeb
+townday	scriptfnv	moonstone_townmap.sav|10:f,16:.,450:d,494:.,504:f,510:.	800	2317ea00
 combat	framesha	moonstone_goodcombat.sav	0	9e5057c52ed11aed
 overland	framesha	moonstone_prebug_backup.sav	0	66646f883aac4567
