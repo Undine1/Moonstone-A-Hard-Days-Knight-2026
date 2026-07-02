@@ -744,6 +744,7 @@ static int       g_autoswap_settle = 0; /* frames to let the new disk settle bef
  * during the attract intro, so the confirmed lightning/audio sync is untouched, and
  * they only run while a disk read is in progress, never in settled gameplay). */
 static int       g_dsk_fastwait = 1;    /* 1 = skip the floppy motor/seek dead time (--noflopdelay disables) */
+static int       g_skipat = 0;          /* --skipat N (diag): auto-trigger the intro-skip at host frame N (0=off) */
 #define ADF_BYTES   901120              /* 80*2*11*512 */
 #define ADF_TRACKS  160                 /* 80 cyl * 2 heads */
 #define SEC_PER_TRK 11
@@ -1753,6 +1754,26 @@ static void toggle_record(SDL_Window *win) {
 static int16_t g_frame_buf[SMP_PER_FRAME*2];
 static int     g_smp_done = 0;     /* samples of the current frame already generated */
 
+/* Re-prime the SDL queue with N frames of silence.  The boot path establishes the
+ * anti-underrun cushion ONCE (run_sdl's prime); after that, generation == playback
+ * (1 frame per video frame), so a cushion can never rebuild by itself -- the
+ * audio_flush queue cap only LIMITS pushes, it never adds any.  Every
+ * SDL_ClearQueuedAudio site therefore left the session permanently at <1 frame of
+ * queue with periodic hard-zero underruns (root-caused 2026-07-02: the operator's
+ * chronic AQ-UNDERRUN log was an intro-skip session; repro'd exactly with
+ * --skipat).  Silence, not duplicated audio: a one-time ~N*20ms latency step, no
+ * audible splice, same trade the boot prime already makes. */
+static void audio_reprime(int frames) {
+    if (!g_audio_dev || frames <= 0) return;
+    size_t n = (size_t)frames * SMP_PER_FRAME * 2;
+    int16_t *sil = (int16_t *)calloc(n, sizeof(int16_t));
+    if (!sil) return;
+    SDL_QueueAudio(g_audio_dev, sil, (Uint32)(n * sizeof(int16_t)));
+    free(sil);
+    if (g_log) { fprintf(g_log, "AQ-REPRIME frames=%d q=%u bytes\n", frames,
+                         (unsigned)SDL_GetQueuedAudioSize(g_audio_dev)); fflush(g_log); }
+}
+
 /* One-pole low-pass on the final mix, modelling the Amiga's FIXED analog output
  * RC filter (~5 kHz, always on -- distinct from the switchable "LED" filter) that
  * our raw-sample Paula model omits.  Without it, hard VOL/DMA-restart steps at note
@@ -1863,6 +1884,17 @@ static void audio_flush(void) {
          * so jitter no longer drains it to empty.  Live-only; headless/WAV (no device)
          * is untouched, so determinism is unaffected. */
         if (g_audio_paused) {
+            /* AQ-PAUSED diag (cushion-loss hunt 2026-07-02): sample the queue depth during the
+             * paused load.  A paused SDL device must not consume the queue -- if q shrinks
+             * across these lines the open-paused assumption is broken (or something cleared
+             * the queue); if it starts at 0 the prime never landed.  Bounded + log-only. */
+            static int aqp_n = 0;
+            if (g_log && (aqp_n % 100) == 0 && aqp_n < 10000) {
+                fprintf(g_log, "AQ-PAUSED fr=%d q=%.2ff\n", g_cur_frame,
+                        (double)SDL_GetQueuedAudioSize(g_audio_dev)/(double)frame_bytes);
+                fflush(g_log);
+            }
+            aqp_n++;
             if (g_a_min < 0 || g_a_max > 0) {        /* sound has started (frame not pure silence) */
                 SDL_PauseAudioDevice(g_audio_dev, 0); g_audio_paused = 0;
                 if (g_log) { fprintf(g_log, "AUDIO-UNPAUSE fr=%d ic=%llu\n", g_cur_frame, (unsigned long long)g_icount); fflush(g_log); }
@@ -2885,6 +2917,9 @@ void moon_instr_hook(unsigned int pc) {
         if (g_av_attract_audio) {
             g_av_attract_audio = 0;
             if (g_audio_dev) SDL_ClearQueuedAudio(g_audio_dev);
+            audio_reprime(4);   /* the cap never refills a cleared queue (it only limits
+                                 * pushes) -- rebuild the cushion here too, or gameplay
+                                 * runs starved after the attract drain */
         }
         g_av_drain = 1;           /* drain the buffered intro tail over the loader, THEN go live
                                    * (instead of snapping straight to the black load screen) */
@@ -4356,8 +4391,15 @@ static int run_sdl(int scale) {
         const Uint32 frame_bytes = (Uint32)(SMP_PER_FRAME*2*sizeof(int16_t));
         int16_t *prime = (int16_t *)calloc((size_t)prime_frames * SMP_PER_FRAME * 2, sizeof(int16_t));
         if (prime) {
-            SDL_QueueAudio(g_audio_dev, prime, frame_bytes * (Uint32)prime_frames);
+            /* AQ-PRIME diag (cushion-loss hunt 2026-07-02): the shipped log showed q=0.00 at
+             * AUDIO-UNPAUSE, i.e. this prime was gone by the end of the load.  Log the queue
+             * call's outcome + the actual device queue depth so a failed queue can be told
+             * apart from a device that consumes while nominally paused. */
+            int rc = SDL_QueueAudio(g_audio_dev, prime, frame_bytes * (Uint32)prime_frames);
             free(prime);
+            if (g_log) { fprintf(g_log, "AQ-PRIME frames=%d rc=%d err=%s q=%u bytes\n",
+                                 prime_frames, rc, rc ? SDL_GetError() : "-",
+                                 (unsigned)SDL_GetQueuedAudioSize(g_audio_dev)); fflush(g_log); }
         }
         /* Start PAUSED: audio_flush unpauses on the first audible frame so the prime
          * cushion survives the disk-load instead of draining to empty (the intro tick). */
@@ -4571,6 +4613,11 @@ static int run_sdl(int scale) {
         if (g_blt_busy_scope && (pad_fire|pad_rmb))
             skip_intro = 1;   /* a controller BUTTON (A/B/RB/RT/Start) skips the intro
                                * (not stick/d-pad nudges, so drift can't skip it) */
+        /* --skipat N (diag, cushion-loss repro 2026-07-02): trigger the intro-skip
+         * automatically at host frame N, so the post-skip audio-queue state can be
+         * reproduced/verified headlessly (no manual keypress).  0 = off. */
+        if (g_skipat && g_blt_busy_scope && g_cur_frame >= g_skipat)
+            skip_intro = 1;
 
         /* combine keyboard + mouse-button + pad into the chipset input globals */
         g_ji_up = kb_u | pad_u;  g_ji_dn = kb_d | pad_d;
@@ -4606,6 +4653,7 @@ static int run_sdl(int scale) {
             g_av_attract_video = 0; g_av_drain = 0;   /* stay live post-skip (no tail drain) */
             g_audio_mute = 0;                              /* resume audio for live play */
             if (g_audio_dev) SDL_ClearQueuedAudio(g_audio_dev);
+            audio_reprime(4);   /* rebuild the anti-underrun cushion the clear just destroyed */
             next_deadline = (double)SDL_GetPerformanceCounter() + frame_ticks;  /* resync pacing */
             continue;          /* next iteration renders the live post-intro frame */
         }
@@ -4623,6 +4671,7 @@ static int run_sdl(int scale) {
                 if (load_state(savepath)) {
                     msg = "GAME LOADED (F9)";
                     if (g_audio_dev) SDL_ClearQueuedAudio(g_audio_dev);   /* drop now-stale queued audio */
+                    audio_reprime(4);   /* rebuild the anti-underrun cushion the clear just destroyed */
                     next_deadline = (double)SDL_GetPerformanceCounter() + frame_ticks;  /* resync pacing */
                 } else {
                     msg = "NO SAVE TO LOAD";
@@ -5414,6 +5463,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--diskdir")&&i+1<argc) { g_diskdir=argv[++i]; diskdir_set=1; }
         else if (!strcmp(argv[i],"--noautoswap")) g_autoswap=0;   /* disable seamless disk-swap */
         else if (!strcmp(argv[i],"--noflopdelay")) g_dsk_fastwait=0; /* keep the real ~8s floppy motor/seek waits */
+        else if (!strcmp(argv[i],"--skipat")&&i+1<argc) g_skipat=atoi(argv[++i]); /* diag: auto intro-skip at frame N */
         else if (!strcmp(argv[i],"--flopdelay")) g_dsk_fastwait=0;   /* alias */
         else if (!strcmp(argv[i],"--watch")&&i+1<argc) g_watch=(uint32_t)strtoul(argv[++i],0,0);
         else if (!strcmp(argv[i],"--watchrd")&&i+1<argc) g_watchrd=(uint32_t)strtoul(argv[++i],0,0);
