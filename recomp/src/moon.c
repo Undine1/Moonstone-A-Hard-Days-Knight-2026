@@ -2522,7 +2522,30 @@ static uint32_t g_pcring_i = 0;
 static int      g_derail_n = 0;
 static int      g_tasklist_fix = 1;   /* ROOT FIX 2026-06-21: per-vblank task-list integrity -- idempotent
                                        * screen-effect (0x2a10c) registration + effect-only removal.  Fixes
-                                       * the two-troll crash AND the cursor-menu freeze.  --notaskfix A/B. */
+                                       * the two-troll crash AND the cursor-menu freeze.  Hardened 2026-07-02
+                                       * (audit): opcode-guarded hooks, value-based cursor removal, bounded
+                                       * divergence log.  --notaskfix A/B disables the whole set. */
+static int      g_taskhook_n = 0;     /* bounded TASKFIX divergence-log line count */
+/* Compact-remove one slot from the per-vblank task list [0x3c096,0x3c0ba): shift
+ * later entries down one, zero-fill the tail.  The dispatcher (0x3b906) stops at
+ * the FIRST NULL slot, so a hole in the middle would silently disable every
+ * handler after it (incl. the Mog sound tick 0x43316) -- compaction keeps the
+ * list contiguous.  Returns 1 if entries AFTER the slot existed (their addresses
+ * SHIFTED -- the one case where a saved-slot pointer elsewhere goes stale; every
+ * remover below is value-based, so staleness self-heals, and we log it). */
+static int tasklist_compact(uint32_t slot) {
+    int shifted = 0;
+    uint32_t s = slot;
+    while (s + 4u < 0x3c0bau) {
+        uint32_t nxt = r32(s + 4u);
+        if (nxt) shifted = 1;
+        w32(s, nxt);
+        if (nxt == 0u) break;
+        s += 4u;
+    }
+    if (s + 4u >= 0x3c0bau) w32(s, 0u);
+    return shifted;
+}
 static int      g_aud1_dmafix = 1;    /* ROOT FIX 2026-06-30: the Mog sound-start routine (entry 0x4366c)
                                        * ends with a STRAY hard-coded `move.w #$2,DMACON` @0x4371c that clears
                                        * AUD1's DMA on EVERY voice (re)start, regardless of which channel is
@@ -2854,7 +2877,11 @@ void moon_instr_hook(unsigned int pc) {
      * list, skip the duplicate append and point [0x2a15e] at the existing slot so removal still
      * clears the one real entry.  The list then holds at most one 0x2a10c, never overflows, and
      * is removed correctly.  Inert for non-overlapping effects (it's removed between them). */
-    if (g_os && g_tasklist_fix && pc == 0x2a0eau) {
+    /* Opcode guard (hardening 2026-07-02): this 0x2xxxx program region gets OVERLAID by
+     * other scene code (see the legend hook below, which checks r16(pc) for the same
+     * reason).  Only act when the REAL append instruction (`move.l #$2a10c,(a0)` =
+     * 0x20bc) is resident, so an overlay executing through this address is untouched. */
+    if (g_os && g_tasklist_fix && pc == 0x2a0eau && r16(pc) == 0x20bcu) {
         for (uint32_t s = 0x3c096u; s < 0x3c0bau; s += 4u) {
             if (r32(s) == 0x2a10cu) {                  /* effect handler already registered -> dedup */
                 w32(0x2a15eu, s);                      /* removal target = the existing single slot */
@@ -2878,20 +2905,53 @@ void moon_instr_hook(unsigned int pc) {
      * cblist).  FIX: the effect-removal must only ever drop an EFFECT handler (0x2a10c).  If 0x2a15e
      * points at a 0x2a10c, remove that (compacting); otherwise it's mis-aimed at the cursor /
      * another task -- find a real 0x2a10c to remove instead and leave 0x2d61c (and friends) alone. */
-    if (g_os && g_tasklist_fix && pc == 0x2a108u) {
+    if (g_os && g_tasklist_fix && pc == 0x2a108u && r16(pc) == 0x4290u) {  /* opcode-guarded: `clr.l (a0)` resident */
         uint32_t a0 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A0);    /* = [0x2a15e], the intended slot */
         uint32_t slot = a0;
-        if (a0 < 0x3c096u || a0 >= 0x3c0bau || r32(a0) != 0x2a10cu) {   /* mis-aimed -> pick a real effect slot */
+        int misaim = (a0 < 0x3c096u || a0 >= 0x3c0bau || r32(a0) != 0x2a10cu);
+        if (misaim) {                                                /* mis-aimed -> pick a real effect slot */
             slot = 0;
             for (uint32_t s = 0x3c096u; s < 0x3c0bau; s += 4u) if (r32(s) == 0x2a10cu) slot = s;
         }
-        if (slot >= 0x3c096u && slot < 0x3c0bau) {                  /* compact-remove the chosen 0x2a10c */
-            uint32_t s = slot;
-            while (s + 4u < 0x3c0bau) { uint32_t nxt = r32(s + 4u); w32(s, nxt); if (nxt == 0u) break; s += 4u; }
-            if (s + 4u >= 0x3c0bau) w32(s, 0u);
-        }
+        int shifted = 0;
+        if (slot >= 0x3c096u && slot < 0x3c0bau)                    /* compact-remove the chosen 0x2a10c */
+            shifted = tasklist_compact(slot);
         /* slot==0 (no 0x2a10c present) -> remove nothing, just skip the clr.l (preserve all). */
+        /* Divergence log (hardening 2026-07-02): mis-aimed removal and non-tail compaction
+         * are the ONLY cases where this hook's outcome differs from the original clr.l --
+         * the 2026-07-02 audit found zero occurrences in all probed flows, so if either
+         * ever fires in real play we want the evidence.  Bounded. */
+        if ((misaim || shifted) && g_log && g_taskhook_n < 40) {
+            fprintf(g_log, "TASKFIX-RM misaim=%d shifted=%d a0=%06x slot=%06x ic=%llu\n",
+                    misaim, shifted, a0, slot, (unsigned long long)g_icount);
+            fflush(g_log); g_taskhook_n++;
+        }
         m68k_set_reg(M68K_REG_PC, 0x2a10au);                        /* skip the original clr.l (-> rts) */
+        return;
+    }
+    /* HARDENING (2026-07-02 audit): the menu-cursor server's UNINSTALL (0x2d5f4) removes
+     * its entry with `clr.l (a0)` @0x2d618 where a0 = [0x392da], the slot address saved
+     * at INSTALL time (0x2d5de).  If an effect registered BEFORE the cursor completes
+     * while the cursor is installed, hook-B compaction shifts the cursor down one slot
+     * and the saved address goes stale -> the original would clear the WRONG slot and
+     * LEAK the cursor server (dispatched forever; repeat leaks -> 9-slot overflow = the
+     * original crash class).  Remove 0x2d61c BY VALUE instead (compacting, hole-free),
+     * ignoring the possibly-stale pointer.  In the common case (cursor at the recorded
+     * tail slot) this is byte-identical to the original clr.l.  Opcode-guarded. */
+    if (g_os && g_tasklist_fix && pc == 0x2d618u && r16(pc) == 0x4290u) {
+        uint32_t a0 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A0);    /* = [0x392da] (possibly stale) */
+        uint32_t slot = 0;
+        for (uint32_t s = 0x3c096u; s < 0x3c0bau; s += 4u) if (r32(s) == 0x2d61cu) slot = s;
+        if (slot) {
+            tasklist_compact(slot);
+            if (slot != a0 && g_log && g_taskhook_n < 40) {         /* the stale-pointer case, now healed */
+                fprintf(g_log, "TASKFIX-CURSOR stale [0x392da]=%06x actual=%06x ic=%llu\n",
+                        a0, slot, (unsigned long long)g_icount);
+                fflush(g_log); g_taskhook_n++;
+            }
+        }
+        /* no 0x2d61c anywhere -> remove nothing (never clr.l a foreign slot) */
+        m68k_set_reg(M68K_REG_PC, 0x2d61au);                        /* skip the original clr.l (-> rts) */
         return;
     }
     if (g_os && pc >= 0x9000u && pc < 0x10000u) hle_dispatch(pc);
@@ -5575,7 +5635,7 @@ int main(int argc, char **argv) {
          * The fix is ON by default; this only exists for A/B audio debugging. */
         else if (!strcmp(argv[i],"--noisrwait")) g_isr_wait=0;
         else if (!strcmp(argv[i],"--nosfxdblguard")) g_sfx_dblguard=0;  /* A/B: disable the SFX one-shot double-guard */
-        else if (!strcmp(argv[i],"--notaskfix")) g_tasklist_fix=0;           /* A/B: disable the task-list root fix (dedup + effect-only removal) */
+        else if (!strcmp(argv[i],"--notaskfix")) g_tasklist_fix=0;           /* A/B: disable the task-list root fix (dedup + effect-only removal + cursor value-removal hardening) */
         else if (!strcmp(argv[i],"--noaud1fix")) g_aud1_dmafix=0;            /* A/B: disable the AUD1 stray-DMACON-disable fix (0x4371c) */
         else if (!strcmp(argv[i],"--nochokefix")) g_choke_haul_fix=0;        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
