@@ -85,6 +85,18 @@ static int g_rest_request = 0;  /* host pressed REST/skip-turn (E / pad Back); i
 static int g_rest_pending = 0;  /* 1 for the one poll AFTER injecting 'E', to re-clear [0x3bf74] so one press = exactly one skipped turn */
 static int g_firewait_hot = 0;  /* set when the "wait for fire" routine (0x22fd0) ran this frame; cleared each frame in capture_frame */
 static int g_mappoll_hot = 0;   /* set when the normal map turn-loop's keyboard poll (0x4024c) ran this frame; the delivery overview is a SEPARATE loop that never hits it -- so firewait && !mappoll = the garbled delivery overview */
+/* REST/inventory injection hardening (2026-07-02 can-kick audit): the request latches
+ * used to live forever and were not scoped to the map screen -- a pad-Back pressed
+ * inside a TOWN latched and fired a turn-skip at the NEXT map poll; and an injection
+ * landing on an AI token's poll was silently EATEN (the game skips the Space/E branches
+ * for AI tokens), so "press E, nothing happens".  Fix: capture only while the overland
+ * map loop is live (g_map_live stamp), and re-arm an eaten injection until it takes
+ * effect (turn-index change for REST, inventory-open for Space), bounded. */
+static int g_map_live = 0;          /* g_cur_frame stamp of the last overland map poll */
+static int g_inv_pending = 0;       /* Space injected; verify it was honored on the next poll */
+static int g_rest_tries = 0, g_inv_tries = 0;   /* bounded re-arm counters */
+static uint16_t g_rest_idx0 = 0;    /* turn index [0x2f9da] at REST injection (change = honored) */
+static uint16_t g_popup_injected = 0; /* rawkey our popup injection left in [0x3bf74] (retracted at the next map poll) */
 /* MOONSTONE-DELIVERY garbled-map latch (2026-06-24).  The "return matching Moonstone to its home
  * village" handler (node 0x1b) branches to 0x22820 when the returned token matches; from 0x22876 it
  * displays the overland map (scene 9), waits for fire (0x2288a), then 0x231e6 + the 0x2289e relaunch
@@ -2720,7 +2732,7 @@ void moon_instr_hook(unsigned int pc) {
      * (a real hazard vs a stray write) instead of only being seen stuck in a save.  Inert unless
      * the handler actually executes.  (Moved to 0x264b8 = the type-4 body entry, since the block
      * below now redirects there before 0x264ce is reached.) */
-    if (g_os && pc == 0x264b8u && g_penaltyset_n < 12 && g_log) {
+    if (g_os && pc == 0x264b8u && r16(pc) == 0x2468u && g_penaltyset_n < 12 && g_log) {
         uint32_t a1 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A1);  /* knight being flagged */
         uint32_t a0 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A0);  /* event/script object  */
         fprintf(g_log, "PENALTY-SET +0x82=1 knight@%06x lives=%02x  event@%06x [+40]=%04x [+4d]=%02x  ppc=%08x ic=%llu\n",
@@ -2730,28 +2742,45 @@ void moon_instr_hook(unsigned int pc) {
         fflush(g_log);
         g_penaltyset_n++;
     }
-    /* === STOP the day-end life-drain (2026-06-26) ===
-     * The +0x82 "lose a life at day-end" flag is a DEAD/BUGGY mechanic: confirmed NOT in the
-     * original game -- lives are lost ONLY via combat defeat (CRPG Addict full playthrough + the
-     * manual; there is NO day-end / time-limit / starvation life loss, and nothing happens once the
-     * black knights are cleared except passing turns).  Operator hit a perpetual per-day drain.
-     * Two gameplay-only guards (the attract intro never reaches them, so determinism is unchanged):
-     *  (1) skip the WHOLE type-4 penalty body @0x264b8 -- it drains the knight's HIT POINTS at
-     *      +0x50 (`sub.w D0,($50,A1)`) AND raises the lose-a-life flag at +0x82.  The entire penalty
-     *      is spurious (fires after all the black knights are dead, which the original never
-     *      penalizes), so suppress both effects; and
-     *  (2) at the day-end dock 0x2171c, CLEAR any already-set flag + SKIP the decrement, so a save
-     *      that already has it stuck stops draining at once.  Combat life loss (0x21434/0x2143a)
-     *      and the normal day-end turn loop are otherwise untouched. */
-    if (g_os && pc == 0x264b8u) {                 /* (1) type-4 penalty body: skip HP-drain + life-flag */
-        m68k_set_reg(M68K_REG_PC, 0x264d4u);      /*     -> jump straight to the event's exit jmp        */
+    /* === STOP the day-end life-drain (2026-06-26; REVISED 2026-07-02 audit) ===
+     * REVISED UNDERSTANDING: +0x82 is a designed CURSE mechanic -- the swamp healer's
+     * service code (0x2aeda) tests and CLEARS it for gold, with its own dialogue variant.
+     * But the mechanic is UNDOCUMENTED for the original game (no manual/playthrough
+     * mention), so per operator decision 2026-07-02 it is decrepit code that should never
+     * trigger: the suppression policy STAYS.  What the audit fixed is the suppression's
+     * mechanics:
+     *  (1) the old skip jumped 0x264b8 -> 0x264d4 PAST the handler's [0x2eaf8] next-state
+     *      write at 0x264c4, violating the actor-scheduler exit contract (0x264d4 is
+     *      `jmp $27ec8`, which returns A0=[0x2eaf8] to the scheduler) -- every firing
+     *      handed the knight a STALE state pointer from whatever actor ran last.  Now the
+     *      hook honors the contract: [0x2eaf8] = the knight's own DEFAULT state (+0x1a,
+     *      the same continuation the engine's AI-default exit at 0x263b0 uses), THEN
+     *      jumps to the exit.  HP-drain and curse-flag stay suppressed.
+     *  (2) at the day-end dock 0x2171c, CLEAR any already-set flag + SKIP the decrement
+     *      (verified surgical: only the 6-byte `subi.b #1,($49,A0)` is skipped).
+     * Both hooks are opcode-guarded (this 0x2xxxx region is phase-overlaid; a bare-PC
+     * match on foreign module code must never fire -- the 2026-07-02 audit found exactly
+     * that class of misfire in another hook). */
+    if (g_os && pc == 0x264b8u && r16(pc) == 0x2468u) {  /* (1) type-4 body resident (`movea.l ($2a,A0),A2`) */
+        uint32_t a1  = (uint32_t)m68k_get_reg(NULL, M68K_REG_A1);      /* the knight being penalized  */
+        uint32_t def = r32((a1 + 0x1au) & (RAM_SIZE - 1u));            /* its default/idle state ptr  */
+        w32(0x2eaf8u, def);                       /* honor the handler-exit contract (no stale state) */
+        m68k_set_reg(M68K_REG_PC, 0x264d4u);      /* -> the event's exit jmp ($27ec8)                 */
+        {
+            static int lifefix_n = 0;
+            if (g_log && lifefix_n < 12) {
+                fprintf(g_log, "LIFEFIX-EXIT knight@%06x default-state=%06x ic=%llu\n",
+                        a1, def, (unsigned long long)g_icount);
+                fflush(g_log); lifefix_n++;
+            }
+        }
         return;
     }
     /* AUD1 stray-disable fix: the sound-start routine @0x4366c blindly clears AUD1's DMA
      * with a hard-coded `move.w #$2,($96,A5)` @0x4371c (the rest of the routine is
      * channel-indexed off A4) -> any one-shot SFX on AUD1 gets chopped when the engine
      * starts a voice on another channel.  Skip the 6-byte stray write (-> the epilogue). */
-    if (g_aud1_dmafix && g_os && pc == 0x4371cu) {
+    if (g_aud1_dmafix && g_os && pc == 0x4371cu && r16(pc) == 0x3b7cu) {  /* opcode-guarded: `move.w #imm,($96,A5)` resident */
         m68k_set_reg(M68K_REG_PC, 0x43722u);
         return;
     }
@@ -2759,7 +2788,13 @@ void moon_instr_hook(unsigned int pc) {
      * (toward arena centre 160), so a right-side grab hauls the monkey ON-screen instead of past
      * the 320-wide edge.  A0 points at the arc-block destX field (already holding curX from 0x272a4);
      * A1 = the hauled monkey ([0x2ebd0]).  We write the corrected destX and skip the +150 add. */
-    if (g_choke_haul_fix && g_os && pc == 0x272a8u) {
+    /* OPCODE-GUARDED (2026-07-02 audit): during the INTRO this address holds a different
+     * routine (an extent tracker; 0x272a8 = `blt`), and the unguarded hook misfired on it
+     * every boot -- writing a garbage word through the intro's A0 and jumping into the
+     * middle of a `move.w D3,$274ee.l` (silent corruption, deterministic cold-boot A/B
+     * divergence at frames 2000-3000).  Only act on the resident choke-haul instruction. */
+    if (g_choke_haul_fix && g_os && pc == 0x272a8u
+        && r16(pc) == 0x0658u && r16(pc + 2u) == 0x0096u) {   /* `addi.w #$96,(A0)+` resident */
         uint32_t a0 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A0);   /* -> arc-block destX (holds curX) */
         uint32_t a1 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A1);   /* the monkey being hauled          */
         int16_t curx = (int16_t)m68k_read_memory_16(a1 + 4u);      /* monkey.X                         */
@@ -2769,7 +2804,7 @@ void moon_instr_hook(unsigned int pc) {
         m68k_set_reg(M68K_REG_PC, 0x272acu);                       /* skip the original +150 add        */
         return;
     }
-    if (g_os && pc == 0x2171cu) {                 /* (2) day-end dock reached only when +0x82 set:  */
+    if (g_os && pc == 0x2171cu && r16(pc) == 0x0428u) {   /* (2) day-end dock (`subi.b #1,($49,A0)` resident) */
         uint32_t a0 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A0);
         if (a0 < RAM_SIZE) g_ram[(a0 + 0x82u) & (RAM_SIZE - 1)] = 0;   /* consume the stale flag     */
         m68k_set_reg(M68K_REG_PC, 0x21722u);      /* skip `subi.b #1,($49,A0)` -- no life docked     */
@@ -2781,7 +2816,7 @@ void moon_instr_hook(unsigned int pc) {
      * is corrupt -> A2 goes garbage -> address error.  Ring the entries A2 visits; the instant A2
      * is bad, dump the trail WITH each entry's item-NAME string -> names the leaked moonstone entry
      * + its bad link.  Inert in normal play (valid menus never hit a bad entry).  Read-only. */
-    if (g_os && pc == 0x2a1aeu && g_log) {
+    if (g_os && pc == 0x2a1aeu && r16(pc) == 0x2479u && g_log) {   /* opcode-guarded: `movea.l $37444.l,A2` resident */
         static uint32_t ring[32]; static int ri = 0, dumped = 0; static uint32_t lastpush = 0xffffffffu;
         uint32_t e = r32(0x37444);
         int bad = (e >= RAM_SIZE) || (e & 1u) || (e != 0 && e < 0x21000u);
@@ -2960,7 +2995,7 @@ void moon_instr_hook(unsigned int pc) {
      * which only runs once the engine is fully loaded and ticking -- strictly after
      * the one-time module load.  From here on, any store into the engine's CODE
      * bytes (0x43224..0x43e00) is a wild write and gets dropped+logged. */
-    if (!g_snd_loaded && pc == 0x4333cu) g_snd_loaded = 1;
+    if (!g_snd_loaded && pc == 0x4333cu && r16(pc) == 0x49f9u) g_snd_loaded = 1;  /* opcode-guarded: `lea $42fd4,A4` resident */
     /* FLOPPY MOTOR/SEEK BUSY-WAIT ACCELERATION (see g_dsk_fastwait note above).
      * Mog's trackdisk driver busy-polls CIA-A ICR ($bfed01) bit0 for a TimerA
      * underflow at two points -- 0x3b7b8 (`btst #0,$bfed01; beq $3b7b8`, the single
@@ -3053,7 +3088,12 @@ void moon_instr_hook(unsigned int pc) {
         if (seed) {                           /* menu just appeared: ignore held input */
             g_menusel_prev = cur;
         } else {                              /* waiting on [0x3bf74]: inject on a fresh press */
-            if (cur && cur != g_menusel_prev) w16(0x3bf74u, (uint16_t)(cur + 1));
+            if (cur && cur != g_menusel_prev) {
+                w16(0x3bf74u, (uint16_t)(cur + 1));
+                g_popup_injected = (uint16_t)(cur + 1);   /* remember it: the popup exit never clears
+                                                           * the buffer, so the next map poll retracts
+                                                           * a still-lingering digit (audit 2026-07-02) */
+            }
             g_menusel_prev = cur;
         }
     }
@@ -3081,16 +3121,50 @@ void moon_instr_hook(unsigned int pc) {
      * it's inert everywhere else (combat/menus/towns use different polls). */
     if (g_os && pc == 0x4024cu) {           /* overland-map keyboard poll */
         g_mappoll_hot = 1;                  /* the normal map turn-loop ran this frame (distinguishes it from the delivery overview) */
+        g_map_live = g_cur_frame;           /* request-capture gate: the map loop is live NOW */
+        /* Retract a lingering popup digit: our numbered-popup injection's rawkey survives
+         * the popup (its exit never clears [0x3bf74]) and would defer/block the ladder
+         * below and every later injection (audit 2026-07-02). */
+        if (g_popup_injected) {
+            if (r16(0x3bf74u) == g_popup_injected) w16(0x3bf74u, 0);
+            g_popup_injected = 0;
+        }
+        /* Effect-check for a pending INVENTORY injection: if it was honored, 0x405b4 set
+         * g_in_inventory since our last poll; an AI token's poll EATS the scancode with no
+         * effect (the game skips the Space/E branches for AI tokens -- audit 2026-07-02).
+         * Re-arm an eaten request (bounded) instead of losing it silently. */
+        if (g_inv_pending) {
+            g_inv_pending = 0;
+            if (g_in_inventory) g_inv_tries = 0;
+            else if (++g_inv_tries <= 400) g_inv_request = 1;      /* eaten -> retry on a later poll */
+            else {
+                g_inv_tries = 0;
+                if (g_log) { fprintf(g_log, "INV-REQ expired unhonored ic=%llu\n", (unsigned long long)g_icount); fflush(g_log); }
+            }
+        }
         g_in_inventory = 0;                 /* we're back on the map (inventory not open) */
         /* REST / skip-turn: the original maps keyboard 'E' (-> ASCII 0x45 via 0x3ff42) to
          * "end my turn now" -- 0x4028c sets the turn timer [0x2f9dc]=[0x2fa08](max), which the
          * turn-end check at 0x4031a then trips, bumping the player index [0x2f9da].  We inject the
          * 'E' scancode-index (0x12) here just like inventory injects Space (0x39).  g_rest_pending
-         * re-clears [0x3bf74] on the very next poll so one keypress = exactly one skipped turn
-         * (the 'E' branch, unlike inventory's, never clears the buffer itself). */
-        if (g_rest_pending) { w16(0x3bf74u, 0); g_rest_pending = 0; }
-        else if (g_inv_request && r16(0x3bf74u) == 0) { w16(0x3bf74u, 0x39); g_inv_request = 0; }
-        else if (g_rest_request && r16(0x3bf74u) == 0) { w16(0x3bf74u, 0x12); g_rest_request = 0; g_rest_pending = 1; }
+         * retracts [0x3bf74] on the very next poll; the injection is considered honored only when
+         * the turn index actually CHANGED (an AI token's poll eats the scancode with no effect),
+         * else it re-arms, bounded -- so one press = one skipped player turn, never zero, never two. */
+        if (g_rest_pending) {
+            w16(0x3bf74u, 0);                                      /* always retract our scancode  */
+            g_rest_pending = 0;
+            if (r16(0x2f9dau) != g_rest_idx0) g_rest_tries = 0;    /* turn advanced: honored       */
+            else if (++g_rest_tries <= 400) g_rest_request = 1;    /* eaten -> retry on a later poll */
+            else {
+                g_rest_tries = 0;
+                if (g_log) { fprintf(g_log, "REST-REQ expired unhonored ic=%llu\n", (unsigned long long)g_icount); fflush(g_log); }
+            }
+        }
+        else if (g_inv_request && r16(0x3bf74u) == 0) { w16(0x3bf74u, 0x39); g_inv_request = 0; g_inv_pending = 1; }
+        else if (g_rest_request && r16(0x3bf74u) == 0) {
+            w16(0x3bf74u, 0x12); g_rest_request = 0; g_rest_pending = 1;
+            g_rest_idx0 = r16(0x2f9dau);                           /* took-signal baseline */
+        }
     }
     if (g_os && pc == 0x405b4u) g_in_inventory = 1;   /* inventory screen just opened */
 
@@ -4641,11 +4715,13 @@ static int run_sdl(int scale) {
                      * fire stays on Ctrl/Enter/mouse/pad.  I is a backup.  Gated to
                      * in-game so Space still SKIPS the attract intro. */
                     case SDLK_SPACE: case SDLK_i:
-                        if (d && !g_blt_busy_scope && !g_in_inventory) g_inv_request = 1; break;
+                        if (d && !g_blt_busy_scope && !g_in_inventory
+                            && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1; break;
                     /* E = REST / skip to the next turn on the overland map (the faithful Amiga
                      * key).  Edge-only (keydown), in-game; inert during the attract/inventory. */
                     case SDLK_e:
-                        if (d && !g_blt_busy_scope && !g_in_inventory) g_rest_request = 1; break;
+                        if (d && !g_blt_busy_scope && !g_in_inventory
+                            && g_map_live && (g_cur_frame - g_map_live) < 3) g_rest_request = 1; break;
                     case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5:
                     case SDLK_6: case SDLK_7: case SDLK_8: case SDLK_9:
                         g_kdigit = d ? (e.key.keysym.sym - SDLK_1 + 1) : 0; break;  /* overlap-popup select */
@@ -4709,7 +4785,8 @@ static int run_sdl(int scale) {
                 int inv_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y)
                            || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START);
                 static int prev_inv_btn = 0;
-                if (inv_btn && !prev_inv_btn && !g_blt_busy_scope && !g_in_inventory) g_inv_request = 1;
+                if (inv_btn && !prev_inv_btn && !g_blt_busy_scope && !g_in_inventory
+                    && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
                 prev_inv_btn = inv_btn;
             }
             /* Back = REST / skip to the next turn on the overland map (edge-detected, in-game
@@ -4717,7 +4794,8 @@ static int run_sdl(int scale) {
             {
                 int rest_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK);
                 static int prev_rest_btn = 0;
-                if (rest_btn && !prev_rest_btn && !g_blt_busy_scope && !g_in_inventory) g_rest_request = 1;
+                if (rest_btn && !prev_rest_btn && !g_blt_busy_scope && !g_in_inventory
+                    && g_map_live && (g_cur_frame - g_map_live) < 3) g_rest_request = 1;
                 prev_rest_btn = rest_btn;
             }
             /* analog cursor speed for mouse-driven menus (clamped ±8/frame) */
@@ -4805,6 +4883,17 @@ static int run_sdl(int scale) {
         autoswap_tick();   /* seamless disk swap: auto-confirm any "insert disk" prompt */
         run_one_frame();
         g_mouse_dx = g_mouse_dy = 0;   /* consume this frame's mouse delta */
+        /* Injection scene-change retract (audit 2026-07-02): if we injected a scancode and
+         * the map poll STOPPED running (scene changed under us -- combat start, town entry),
+         * the pending byte would linger in [0x3bf74] for the next scene's consumers.  Retract
+         * it and drop the stale intent. */
+        if ((g_rest_pending || g_inv_pending) && (g_cur_frame - g_map_live) > 5) {
+            uint16_t b = r16(0x3bf74u);
+            if ((g_rest_pending && b == 0x12u) || (g_inv_pending && b == 0x39u)) w16(0x3bf74u, 0);
+            g_rest_pending = g_inv_pending = 0;
+            g_rest_request = g_inv_request = 0;
+            g_rest_tries = g_inv_tries = 0;
+        }
         /* Render via capture_frame so the live window gets the same vblank-aligned
          * snapshot + empty-backbuffer recovery + scene-transition hold as the dump
          * path (clean scene switches, no half-decoded frames). */
@@ -5852,6 +5941,12 @@ int main(int argc, char **argv) {
     if (g_wav) {
         fseek(g_wav, 0, SEEK_SET); wav_write_header(g_wav, g_wav_bytes); fclose(g_wav); g_wav = NULL;
     }
+    /* sndcode write-guard exit summary (audit 2026-07-02): the guard's whole purpose is
+     * naming the wild writer for a future root fix -- surface its hit count at exit so a
+     * session where it fired is impossible to miss. */
+    if (g_log && g_sndguard_hits)
+        fprintf(g_log, "--- SNDCODE-GUARD: %d wild store(s) dropped this session (see SNDCODE-GUARD lines for writer PCs) ---\n",
+                g_sndguard_hits);
     if (g_audio_on && g_a_total) {
         double rms = (g_a_total ? (g_a_sumsq / (double)g_a_total) : 0.0);
         rms = (rms > 0 ? __builtin_sqrt(rms) : 0.0);
