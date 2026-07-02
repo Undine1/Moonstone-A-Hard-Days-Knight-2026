@@ -755,6 +755,7 @@ static int       g_autoswap_settle = 0; /* frames to let the new disk settle bef
  * they only run while a disk read is in progress, never in settled gameplay). */
 static int       g_dsk_fastwait = 1;    /* 1 = skip the floppy motor/seek dead time (--noflopdelay disables) */
 static int       g_skipat = 0;          /* --skipat N (diag): auto-trigger the intro-skip at host frame N (0=off) */
+static int       g_stallat = 0;         /* --stallat N (diag): simulate a ~0.5s host stall (window drag) at host frame N (0=off) */
 #define ADF_BYTES   901120              /* 80*2*11*512 */
 #define ADF_TRACKS  160                 /* 80 cyl * 2 heads */
 #define SEC_PER_TRK 11
@@ -4857,6 +4858,10 @@ static int run_sdl(int scale) {
                 fs_n = 0; fs_sum = 0.0; fs_max = 0.0; fs_over = 0;
             }
         }
+        /* --stallat N (diag): simulate a >4-frame host stall (a window drag / OS
+         * hitch) at frame N, one-shot -- the repro vehicle for the stall-resync
+         * cushion top-up below.  The device keeps consuming during the sleep. */
+        if (g_stallat && g_cur_frame == g_stallat) SDL_Delay(500);
         /* Wait until this frame's high-resolution deadline: sleep most of the
          * remaining time (cheap), then spin the final couple ms (accurate). */
         for (;;) {
@@ -4871,7 +4876,27 @@ static int run_sdl(int scale) {
          * deadline to now so we don't sprint to "catch up" and desync audio. */
         {
             double now = (double)SDL_GetPerformanceCounter();
-            if (now - next_deadline > frame_ticks * 4.0) next_deadline = now + frame_ticks;
+            if (now - next_deadline > frame_ticks * 4.0) {
+                next_deadline = now + frame_ticks;
+                /* The stall just let the (still-running) device drain the queue in
+                 * real time, and since we deliberately don't sprint, nothing would
+                 * regenerate that cushion (generation == playback; the flush cap only
+                 * LIMITS pushes) -- the fourth and last path into the chronic
+                 * <1-frame starvation state the clear-site audio_reprime calls fixed.
+                 * Top the cushion back up to the boot prime depth.  Scoped to the
+                 * stall-resync ONLY: a per-frame top-up would inject audible silence
+                 * gaps on ordinary clock drift, whereas here the device has already
+                 * gapped during the stall, so the inserted silence costs nothing.
+                 * Sub-4-frame stalls self-heal via the catch-up sprint (each caught-up
+                 * frame pushes a queue frame) and never reach this branch.  Paused
+                 * (load) and deep-backlog (attract --avdelay) states are no-ops via
+                 * the shortfall math. */
+                if (g_audio_dev && !g_audio_paused && !g_audio_mute) {
+                    const Uint32 fb = (Uint32)(SMP_PER_FRAME*2*sizeof(int16_t));
+                    Uint32 q = SDL_GetQueuedAudioSize(g_audio_dev);
+                    if (q < 4u*fb) audio_reprime((int)((4u*fb - q + fb - 1u) / fb));
+                }
+            }
         }
     }
     free(vring); free(vrw); free(vrh);
@@ -5521,6 +5546,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--noautoswap")) g_autoswap=0;   /* disable seamless disk-swap */
         else if (!strcmp(argv[i],"--noflopdelay")) g_dsk_fastwait=0; /* keep the real ~8s floppy motor/seek waits */
         else if (!strcmp(argv[i],"--skipat")&&i+1<argc) g_skipat=atoi(argv[++i]); /* diag: auto intro-skip at frame N */
+        else if (!strcmp(argv[i],"--stallat")&&i+1<argc) g_stallat=atoi(argv[++i]); /* diag: simulate a host stall at frame N */
         else if (!strcmp(argv[i],"--flopdelay")) g_dsk_fastwait=0;   /* alias */
         else if (!strcmp(argv[i],"--watch")&&i+1<argc) g_watch=(uint32_t)strtoul(argv[++i],0,0);
         else if (!strcmp(argv[i],"--watchrd")&&i+1<argc) g_watchrd=(uint32_t)strtoul(argv[++i],0,0);
