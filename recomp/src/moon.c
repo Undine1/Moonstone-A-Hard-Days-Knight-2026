@@ -3008,7 +3008,12 @@ void moon_instr_hook(unsigned int pc) {
      * IRQ / seek-step model is untouched.  Inert outside the Mog driver -- these
      * PCs never execute during the attract intro (lightning/audio sync preserved)
      * and only fire while a disk read is in progress. */
-    if (g_os && g_dsk_fastwait && (pc == 0x3b7b8u || pc == 0x3b8bcu))
+    if (g_os && g_dsk_fastwait && (pc == 0x3b7b8u || pc == 0x3b8bcu)
+        && r16(pc) == 0x0839u)   /* opcode-guarded (audit 2026-07-02): only when the real
+                                  * `btst #0,$bfed01` poll is resident -- it reads ICR and
+                                  * read-clears the flag we set, so the set is consumed by
+                                  * the very same instruction; on overlaid code a phantom
+                                  * TimerA flag would linger for a later genuine reader. */
         g_ca.icr_flags |= 0x01;
     /* Multi-candidate numbered popup: its handler busy-waits on the keyboard buffer
      * [0x3bf74] for a rawkey, translating it via the 0xc1b3 table (routine 0x3ff42)
@@ -4809,9 +4814,13 @@ static int run_sdl(int scale) {
                                * (not stick/d-pad nudges, so drift can't skip it) */
         /* --skipat N (diag, cushion-loss repro 2026-07-02): trigger the intro-skip
          * automatically at host frame N, so the post-skip audio-queue state can be
-         * reproduced/verified headlessly (no manual keypress).  0 = off. */
-        if (g_skipat && g_blt_busy_scope && g_cur_frame >= g_skipat)
+         * reproduced/verified headlessly (no manual keypress).  ONE-SHOT (audit
+         * 2026-07-02): if the skip's FF guard ever expired with the attract still
+         * active, a level-triggered skipat would re-enter the FF forever.  0 = off. */
+        if (g_skipat && g_blt_busy_scope && g_cur_frame >= g_skipat) {
             skip_intro = 1;
+            g_skipat = 0;
+        }
 
         /* combine keyboard + mouse-button + pad into the chipset input globals */
         g_ji_up = kb_u | pad_u;  g_ji_dn = kb_d | pad_d;
