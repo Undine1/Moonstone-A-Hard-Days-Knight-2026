@@ -4821,14 +4821,24 @@ static int run_sdl(int scale) {
                      || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)
                      || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8000;
             pad_rmb = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B);
-            /* Y / Start = open INVENTORY on the map (edge-detected, in-game only). */
+            /* Y = open INVENTORY on the map (edge-detected, in-game only).  Start was
+             * moved off inventory to PAUSE (below) per operator 2026-07-03. */
             {
-                int inv_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y)
-                           || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START);
+                int inv_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y);
                 static int prev_inv_btn = 0;
                 if (inv_btn && !prev_inv_btn && !g_blt_busy_scope && !g_in_inventory
                     && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
                 prev_inv_btn = inv_btn;
+            }
+            /* Start = PAUSE the walk/day animation (the faithful Space-pause, on a pad
+             * button): edge-detected, armed only while the pause gate is polling --
+             * press to freeze, press again to resume. */
+            {
+                int pause_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START);
+                static int prev_pause_btn = 0;
+                if (pause_btn && !prev_pause_btn && !g_blt_busy_scope
+                    && g_walk_live && (g_cur_frame - g_walk_live) < 3) g_pause_request = 1;
+                prev_pause_btn = pause_btn;
             }
             /* Back = REST / skip to the next turn on the overland map (edge-detected, in-game
              * only) — mirrors keyboard 'E'.  Quit stays on Esc / the window close box only. */
