@@ -2568,6 +2568,27 @@ static int      g_aud1_dmafix = 1;    /* ROOT FIX 2026-06-30: the Mog sound-star
                                        * copy/paste slip in the original game.  It chops any one-shot SFX that
                                        * happens to be on AUD1 (the "sound cut short" bug).  Fix = skip that one
                                        * 6-byte instruction (PC 0x4371c -> 0x43722).  --noaud1fix A/B. */
+static int      g_edgewalk_fix = 1;   /* ROOT FIX 2026-07-03 (original-game bug, operator-sanctioned QoL): the
+                                       * overland AI steering commits ONE Bresenham trajectory per turn
+                                       * (params -> [0x2fad0..0x2fadc], walker 0x40c20 replays it every tick)
+                                       * and only the TOWN goal mode has an arrival check (0x40c84, node
+                                       * 0x19/0x1a membership).  A trajectory from the FALLBACK-OBJECT branch
+                                       * (steering priority 3, coords from [0x2facc]'s object, 0x40bcc-0x40bd6)
+                                       * has NO arrival semantics at all: the knight walks his ENTIRE turn
+                                       * budget in the committed direction, overshooting a near goal until the
+                                       * map-edge clamp (0x40b40) eats the motion = the "knight walks into the
+                                       * map edge and sticks" sighting (root-caused from the operator's
+                                       * specimen + a caught-in-the-act day-7 replay: goal (31,65), walked
+                                       * (78,55)->(0,72)).  FIX: capture the fallback goal at trajectory
+                                       * commit; once the walker reaches it, zero the emitted direction word
+                                       * (the knight STANDS at his goal for the rest of the turn -- what
+                                       * arrival should have done).  Chase (+0x64) and town-goal modes are
+                                       * untouched (they have working engagement/arrival).  --noedgewalkfix. */
+static int      g_ew_armed = 0;       /* 0=no, 1=fallback branch taken, 2=goal captured for this trajectory */
+static int16_t  g_ew_tx = 0, g_ew_ty = 0;   /* the armed trajectory's computed goal */
+static int      g_ew_xmajor = 0, g_ew_xsign = 0, g_ew_ysign = 0;  /* arrival = major-axis coordinate
+                                       * crossing the goal plane (monotone per tick -- exact-pair equality
+                                       * can be skipped by the Bresenham lattice, verified in the day-7 repro) */
 static int      g_choke_haul_fix = 1;  /* ROOT FIX 2026-07-01: the canopy-choke "haul to canopy" launch
                                        * (0x27278) builds the arc destination X as curX + 0x96 (+150) with an
                                        * UNCONDITIONAL rightward add (0x272a8 `addi.w #$96,(A0)+`) and no
@@ -2790,6 +2811,47 @@ void moon_instr_hook(unsigned int pc) {
      * (toward arena centre 160), so a right-side grab hauls the monkey ON-screen instead of past
      * the 320-wide edge.  A0 points at the arc-block destX field (already holding curX from 0x272a4);
      * A1 = the hauled monkey ([0x2ebd0]).  We write the corrected destX and skip the +150 add. */
+    /* ===== OVERLAND AI EDGE-WALK FIX (see g_edgewalk_fix decl) ===== */
+    if (g_os && g_edgewalk_fix) {
+        if (pc == 0x40b92u && r16(pc) == 0x33fcu) {          /* trajectory commit begins (`move.w #1,$2fad0`) */
+            g_ew_armed = 0;                                  /* assume chase/town branch until proven fallback */
+        } else if (pc == 0x40bd6u && r16(pc) == 0x3628u) {   /* fallback-object branch (`move.w ($c,A0),D3`) */
+            g_ew_armed = 1;
+        } else if (g_ew_armed == 1 && pc == 0x40c14u && r16(pc) == 0x33c3u) {  /* param store (`move.w D3,$2fada`) */
+            uint32_t rec = r32(0x2ebd0u);                    /* current actor */
+            if (rec < RAM_SIZE) {
+                int16_t x = (int16_t)r16((rec + 0x7eu) & (RAM_SIZE - 1u));
+                int16_t y = (int16_t)r16((rec + 0x80u) & (RAM_SIZE - 1u));
+                int dx = (int)(m68k_get_reg(NULL, M68K_REG_D2) & 0xffffu);   /* |dx| */
+                int dy = (int)(m68k_get_reg(NULL, M68K_REG_D3) & 0xffffu);   /* |dy| */
+                int xb = (int)(m68k_get_reg(NULL, M68K_REG_D4) & 0xffu);     /* 1 = +X, 2 = -X */
+                int yb = (int)(m68k_get_reg(NULL, M68K_REG_D5) & 0xffu);     /* 4 = +Y, 8 = -Y */
+                g_ew_tx = (int16_t)(x + (xb == 1 ? dx : -dx));
+                g_ew_ty = (int16_t)(y + (yb == 4 ? dy : -dy));
+                g_ew_xmajor = (dx >= dy);
+                g_ew_xsign  = (xb == 1) ? 1 : -1;
+                g_ew_ysign  = (yb == 4) ? 1 : -1;
+                g_ew_armed = 2;
+                if (g_log) { static int ewn = 0; if (ewn < 20) {
+                    fprintf(g_log, "EDGEWALK-ARM actor=%06x at(%d,%d) goal(%d,%d) ic=%llu\n",
+                            rec, x, y, g_ew_tx, g_ew_ty, (unsigned long long)g_icount);
+                    fflush(g_log); ewn++; } }
+            }
+        } else if (g_ew_armed == 2 && (pc == 0x40c4eu || pc == 0x40c7cu) && r16(pc) == 0x33c0u) {
+            /* walker about to emit this tick's direction word (`move.w D0,$2f9de`): if the
+             * actor has REACHED the fallback goal, zero it -- stand at the goal instead of
+             * marching past it into the edge clamp. */
+            uint32_t rec = r32(0x2ebd0u);
+            if (rec < RAM_SIZE) {
+                int16_t x = (int16_t)r16((rec + 0x7eu) & (RAM_SIZE - 1u));
+                int16_t y = (int16_t)r16((rec + 0x80u) & (RAM_SIZE - 1u));
+                int arrived = g_ew_xmajor
+                    ? (g_ew_xsign > 0 ? x >= g_ew_tx : x <= g_ew_tx)
+                    : (g_ew_ysign > 0 ? y >= g_ew_ty : y <= g_ew_ty);
+                if (arrived) m68k_set_reg(M68K_REG_D0, 0);
+            }
+        }
+    }
     /* OPCODE-GUARDED (2026-07-02 audit): during the INTRO this address holds a different
      * routine (an extent tracker; 0x272a8 = `blt`), and the unguarded hook misfired on it
      * every boot -- writing a garbage word through the intro's A0 and jumping into the
@@ -5697,6 +5759,7 @@ static int load_state(const char *path) {
         for (int i = 0; i < SAVE_NREGS; i++) if (SAVE_REGS[i]!=M68K_REG_SR) m68k_set_reg(SAVE_REGS[i], regs[i]);
         paula_sidecar_reset();   /* Paula reload-protocol statics live outside the blob: rebuild them
                                   * from the just-restored registers (see paula_sidecar_reset) */
+        g_ew_armed = 0;          /* edge-walk fix trajectory capture: transient per-turn state, drop on load */
     }
     /* Rebuild the streamer's in-memory file copy: g_loadbuf is a host pointer that
      * wasn't serialized -- re-read the (deterministic) dataset file by name and
@@ -5812,7 +5875,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nosfxdblguard")) g_sfx_dblguard=0;  /* A/B: disable the SFX one-shot double-guard */
         else if (!strcmp(argv[i],"--notaskfix")) g_tasklist_fix=0;           /* A/B: disable the task-list root fix (dedup + effect-only removal + cursor value-removal hardening) */
         else if (!strcmp(argv[i],"--noaud1fix")) g_aud1_dmafix=0;            /* A/B: disable the AUD1 stray-DMACON-disable fix (0x4371c) */
-        else if (!strcmp(argv[i],"--nochokefix")) g_choke_haul_fix=0;        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
+        else if (!strcmp(argv[i],"--nochokefix")) g_choke_haul_fix=0;
+        else if (!strcmp(argv[i],"--noedgewalkfix")) g_edgewalk_fix=0;   /* A/B: disable the overland AI fallback-goal arrival fix */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
         else if (!strcmp(argv[i],"--boomlp")&&i+1<argc) { double fc=atof(argv[++i]); g_boomlp_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* per-channel de-click LP on the AUD2 boom, Hz (0=off) */
