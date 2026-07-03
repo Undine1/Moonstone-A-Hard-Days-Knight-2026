@@ -83,7 +83,7 @@ Features beyond the original game.
 - **nb loader + AmigaOS exec/dos HLE** — Loads/relocates the modules with no Kickstart.
 - **OCS blitter + Paula + trackdisk** — Full from-scratch chipset model.
 - **ADF auto-extract** — If the boot modules are missing, reads them straight out of Disk 1's filesystem — a player only drops in the three `.adf` images.
-- **Automatic disk swapping** — Inserts the requested disk + auto-confirms at "Please insert Disk X" (`--noautoswap` restores prompts).
+- **Invisible disk swapping** — The three-floppy original stops at "Please insert Disk X — press fire" on every disk crossing (each town visit, each combat arena, the boot hand-off). The port inserts the requested disk instantly *and never shows the prompt at all*: the prompt screen is skipped outright and the game's own confirm/validate loop runs invisibly under the load backdrop (`--noswapskip` shows the auto-confirmed prompt flash again; `--noautoswap` restores fully manual prompts).
 - **Floppy motor/seek acceleration** — Collapses the ~8 s of modelled drive dead time at the intro→gameplay hand-off (`--noflopdelay` restores it).
 - **Exe-relative paths, build stamp, crash reporter, unlimited live run.**
 

@@ -757,6 +757,20 @@ static int       g_autoswap = 1;        /* default: handle disk prompts automati
 static int       g_autoswap_armed = 0;  /* a prompt is up; pulse fire to confirm it */
 static uint64_t  g_autoswaps = 0;       /* count of automatic swaps performed */
 static int       g_autoswap_settle = 0; /* frames to let the new disk settle before auto-fire */
+static int       g_swapskip = 1;        /* 2026-07-03 (operator request): don't just auto-CONFIRM the
+                                         * "insert disk" prompt -- never SHOW it.  The prompt routine
+                                         * (0x23fea) is a full screen takeover (display setup 0x24044, text
+                                         * draw 0x2a196, palette build + fade 0x29b7c); the fire-wait lives
+                                         * in its CALLERS.  With the swap already performed at entry, the
+                                         * whole routine is moot: emulate its RTS so the caller falls
+                                         * straight into the fire-wait, which the synthetic fire satisfies
+                                         * after the usual settle -- the screen simply keeps the load
+                                         * backdrop and the crossing is invisible.  Every crossing (town =
+                                         * Disk C, combat arenas = Disk B, boot Disk1->2, delivery Disk A)
+                                         * used to flash the prompt for the ~12-frame settle; the old
+                                         * delivery-scene 150-frame prompt HOLD (a band-aid per the
+                                         * operator) is removed with it.  --noswapskip restores the visible
+                                         * prompt flash (--noautoswap/--diskat = fully manual, unchanged). */
 /* --- floppy motor/seek busy-wait acceleration -----------------------------
  * The Mog engine's trackdisk driver paces each disk access with CIA-A TimerA
  * busy-waits that model the PHYSICAL floppy drive's motor spin-up / head-settle
@@ -3662,7 +3676,7 @@ void moon_instr_hook(unsigned int pc) {
          * prompt, instantly insert the requested ADF + arm an auto-fire so the
          * "Press fire when done" wait (0x22fd0) passes through invisibly.  No-op
          * once the player drives swaps manually with --diskat. */
-        if (g_autoswap && pc == 0x23feau) {
+        if (g_autoswap && pc == 0x23feau && r16(pc) == 0x23c8u) {  /* `move.l A0,$2e1d2` = prompt entry resident */
             uint32_t desc = m68k_get_reg(NULL, M68K_REG_A0);
             uint16_t slo  = r16(desc + 2);          /* low word of the prompt string addr */
             int want = -1;
@@ -3675,19 +3689,24 @@ void moon_instr_hook(unsigned int pc) {
                     g_chng_low = 1;                 /* /CHNG: signal the disk changed */
                     g_autoswaps++;
                     if (g_log) fprintf(g_log,
-                        "AUTO-SWAP -> Disk%c (ADF idx %d) at the \"insert disk\" prompt (ic=%llu)\n",
-                        'A'+want, want, (unsigned long long)g_icount);
+                        "AUTO-SWAP -> Disk%c (ADF idx %d) at the \"insert disk\" prompt (fr=%d ic=%llu)\n",
+                        'A'+want, want, g_cur_frame, (unsigned long long)g_icount);
                 }
                 /* Arm the auto-confirm, but let the new disk settle for a few
                  * frames first (the game must observe /CHNG and re-read the
                  * disk's directory to validate it BEFORE we press fire -- pressing
-                 * immediately makes the validation fail and it re-prompts).
-                 * During a moonstone DELIVERY, hold the "Please insert Disk A" prompt
-                 * on screen ~3s (full length) instead of the seamless ~0.25s flash,
-                 * because the operator wants that prompt shown as a normal scene there;
-                 * normal-play swaps stay seamless (12). */
-                if (!g_autoswap_armed) g_autoswap_settle = (g_delivery_win > 0) ? 150 : 12;
+                 * immediately makes the validation fail and it re-prompts). */
+                if (!g_autoswap_armed) g_autoswap_settle = 12;
                 g_autoswap_armed = 1;
+                if (g_swapskip) {
+                    /* never SHOW the prompt: emulate the routine's RTS so the caller
+                     * falls straight into its fire-wait (see g_swapskip decl) */
+                    uint32_t sp = (uint32_t)m68k_get_reg(NULL, M68K_REG_A7);
+                    m68k_set_reg(M68K_REG_PC, r32(sp));
+                    m68k_set_reg(M68K_REG_A7, sp + 4u);
+                    if (g_log) { fprintf(g_log, "SWAP-SKIP prompt screen suppressed fr=%d ic=%llu\n",
+                                         g_cur_frame, (unsigned long long)g_icount); fflush(g_log); }
+                }
             }
         }
         /* SEAMLESS DISK SWAP, part 2: synthesise the "Press fire when done"
@@ -6126,6 +6145,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--dataset")&&i+1<argc) { snprintf(g_dataset_buf,sizeof(g_dataset_buf),"%s",argv[++i]); dataset_set=1; }
         else if (!strcmp(argv[i],"--diskdir")&&i+1<argc) { g_diskdir=argv[++i]; diskdir_set=1; }
         else if (!strcmp(argv[i],"--noautoswap")) g_autoswap=0;   /* disable seamless disk-swap */
+        else if (!strcmp(argv[i],"--noswapskip")) g_swapskip=0;   /* show the (auto-confirmed) insert-disk prompt again */
         else if (!strcmp(argv[i],"--noflopdelay")) g_dsk_fastwait=0; /* keep the real ~8s floppy motor/seek waits */
         else if (!strcmp(argv[i],"--skipat")&&i+1<argc) g_skipat=atoi(argv[++i]); /* diag: auto intro-skip at frame N */
         else if (!strcmp(argv[i],"--poke8")&&i+1<argc) {  /* diag: one-shot byte poke, F:A:V (A,V hex), repeatable */
