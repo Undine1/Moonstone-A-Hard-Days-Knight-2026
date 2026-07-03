@@ -92,7 +92,7 @@ Features beyond the original game.
 - **Gamepad support** — Plug-and-play Xbox/XInput (move, attack, cancel, inventory, rest); also drives the cursor for equip/altar menus.
 - **Keyboard + mouse** — Arrows / mouse / Ctrl / Enter / click / Esc.
 - **Inventory key** (Space / I / pad-Y / Start) and **REST / skip-turn key** (E / pad-Back) — both previously unreachable.
-- **Typed custom knight name**, **numbered-menu quick-keys** (1–9 / Up-Down popups), and **intro skip / fast-forward** (fire/confirm key or any pad button). The skip lands directly on the main menu — it fast-forwards through the ~10 s post-intro loader black, its looping chant, and the "Loading..." title card instead of dropping the player into them (`--noskipmenu` restores the old landing at the loader).
+- **Typed custom knight name**, **numbered-menu quick-keys** (1–9 / Up-Down popups), and **intro skip / fast-forward** (fire/confirm key or any pad button). The skip lands directly on the main menu — it fast-forwards through the ~10 s post-intro loader black, its looping chant, and the "Loading..." title card instead of dropping the player into them (`--noskipmenu` restores the old landing at the loader). A fully watched intro cuts to the menu the same way at its natural end, right after the final scene fades out (`--nointrocut` restores the watched-intro loader wait).
 
 **Audio**
 
