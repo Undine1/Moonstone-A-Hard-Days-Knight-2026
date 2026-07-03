@@ -1123,6 +1123,7 @@ static int     g_audio_paused = 0;       /* 1 = SDL device held paused (playing 
                                           * audible frame, so the prime cushion isn't drained empty during the load
                                           * (the intro-tick underrun fix); cleared in audio_flush. */
 static int     g_audio_mute = 0;         /* 1 = don't push to the SDL queue (used during intro skip FF) */
+static int     g_avlog = 0;              /* --avlog: log presented-frame + audio-push timestamps (A/V-sync measurement) */
 /* Note-attack de-click ramp: a freshly (re)started channel's onset is a near-instant
  * step (0 -> note level); even through the output low-pass that reads as a faint
  * "tick" on each note.  Ramp the channel's gain 0->full over this many HOST samples
@@ -1766,10 +1767,16 @@ static SDL_AudioDeviceID g_audio_dev = 0;
  *            ring of captured frames, letting the flash move later onto the sound.
  *
  * At Mog launch both policies end (audio backlog drained to ~2 frames; video snaps
- * to live) so gameplay stays responsive.  -125 = video held ~2.5 s (sound leads). */
-static int g_av_delay_frames = -135;      /* signed attract A/V offset in frames (--avdelay); <0 delays video.
-                                           * -135 (operator request 2026-06-24, from -150): 15 frames / 0.3s less
-                                           * video delay, i.e. audio leads the picture by slightly less. */
+ * to live) so gameplay stays responsive.  -129 = video held ~2.6 s (sound leads). */
+static int g_av_delay_frames = -129;      /* signed attract A/V offset in frames (--avdelay); <0 delays video.
+                                           * -129 MEASURED 2026-07-03 (was -135, ear-tuned): the intro's one true
+                                           * flash+clap pair is druid-scene strike 1 -- first whiteout pulse at emu
+                                           * frame 4512, thunder SFX (AUD3 attack 0ba114 + rumble 0c2308) triggered
+                                           * at 4637, gap 125 frames; measured live (--avlog) audio-output latency
+                                           * (SDL queue ~72 ms + device buffer ~12 ms) adds ~4.2 frames -> the
+                                           * thunder lands ON the first flash at 129 (at -135 it led the flash by
+                                           * ~118 ms).  Strike 2 (fr 5660s) has no dedicated clap (the AUD0 events
+                                           * there are a music voice), so strike 1 is THE reference. */
 static int g_av_attract_audio = 0;        /* 1 while the attract audio-delay (deep-backlog) policy is active */
 static int g_av_attract_video = 0;        /* 1 while the attract video-delay (frame-ring) policy is active */
 static int g_av_drain = 0;                /* 1 = Mog launched: drain the buffered intro tail, then go live */
@@ -2021,8 +2028,19 @@ static void audio_flush(void) {
              * frames; attract deep-backlog mode, if enabled, uses g_av_delay_frames). */
             int cap_frames = (g_av_attract_audio && g_av_delay_frames > 0)
                            ? g_av_delay_frames + 1 : 8;
-            if (SDL_GetQueuedAudioSize(g_audio_dev) < frame_bytes * (Uint32)cap_frames)
+            Uint32 qpre = SDL_GetQueuedAudioSize(g_audio_dev);
+            int pushed = 0;
+            if (qpre < frame_bytes * (Uint32)cap_frames) {
                 SDL_QueueAudio(g_audio_dev, buf, frame_bytes);
+                pushed = 1;
+            }
+            if (g_avlog && g_log) {   /* A/V-sync probe: this frame's audio starts playing at
+                                       * ~t + qpre/176.4 ms (+ the device's own have.size buffer) */
+                double tms = (double)SDL_GetPerformanceCounter() * 1000.0
+                           / (double)SDL_GetPerformanceFrequency();
+                fprintf(g_log, "AVLOG-A fr=%d t=%.2f qpre=%u pushed=%d\n",
+                        g_cur_frame, tms, (unsigned)qpre, pushed);
+            }
         }
     }
     g_smp_done = 0;     /* start the next frame fresh */
@@ -5086,14 +5104,16 @@ static int run_sdl(int scale) {
     int      vcap   = vdelay + 1;                 /* ring slots: |N| back + the current frame */
     uint8_t *vring  = NULL;
     int     *vrw    = NULL, *vrh = NULL;
+    int     *vrfr   = NULL;                       /* emu-frame number stored in each slot (--avlog A/V-sync probe) */
     long     vframe = 0;
     if (g_av_attract_video && vdelay > 0) {
         vring = (uint8_t *)malloc((size_t)vcap * FB_W * FB_H * 3);
         vrw   = (int *)malloc((size_t)vcap * sizeof(int));
         vrh   = (int *)malloc((size_t)vcap * sizeof(int));
-        if (!vring || !vrw || !vrh) {             /* OOM: fall back to live video */
-            free(vring); free(vrw); free(vrh);
-            vring = NULL; vrw = vrh = NULL; g_av_attract_video = 0;
+        vrfr  = (int *)malloc((size_t)vcap * sizeof(int));
+        if (!vring || !vrw || !vrh || !vrfr) {    /* OOM: fall back to live video */
+            free(vring); free(vrw); free(vrh); free(vrfr);
+            vring = NULL; vrw = vrh = vrfr = NULL; g_av_attract_video = 0;
         }
     }
     int skip_intro = 0;   /* set by any key/pad during the attract -> fast-forward to Mog launch */
@@ -5374,11 +5394,12 @@ static int run_sdl(int scale) {
         capture_frame();
         int w = g_cap_w, h = g_cap_h;
         const uint8_t *disp = g_cap;
+        int disp_fr = g_cur_frame;   /* emu frame the presented image belongs to (--avlog) */
         if (g_av_attract_video && vring && !g_av_drain) {
             /* attract: store this frame, present the one captured |vdelay| frames ago */
             int slot = (int)(vframe % vcap);
             memcpy(vring + (size_t)slot*FB_W*FB_H*3, g_cap, (size_t)FB_W*FB_H*3);
-            vrw[slot] = g_cap_w; vrh[slot] = g_cap_h;
+            vrw[slot] = g_cap_w; vrh[slot] = g_cap_h; vrfr[slot] = g_cur_frame;
             /* LEGEND RAMP: once the legend scene begins (g_av_ramp, after all thunder),
              * walk the delay down to 0 so the picture is caught up to live by Mog launch
              * and the -2.5s tail adds no black at the intro->gameplay hand-off.  The ring
@@ -5388,7 +5409,7 @@ static int run_sdl(int scale) {
             long tgt = vframe - vdelay;
             int dslot = (tgt >= 0) ? (int)(tgt % vcap) : 0;  /* hold first frame until the ring fills */
             disp = vring + (size_t)dslot*FB_W*FB_H*3;
-            w = vrw[dslot]; h = vrh[dslot];
+            w = vrw[dslot]; h = vrh[dslot]; disp_fr = vrfr[dslot];
             vframe++;
             if (g_av_ramp && vdelay == 0) { g_av_attract_video = 0; }  /* caught up: live for the rest */
         } else if (g_av_attract_video && vring && g_av_drain) {
@@ -5402,7 +5423,7 @@ static int run_sdl(int scale) {
             if (tgt < 0) tgt = 0;
             int dslot = (int)(tgt % vcap);
             disp = vring + (size_t)dslot*FB_W*FB_H*3;
-            w = vrw[dslot]; h = vrh[dslot];
+            w = vrw[dslot]; h = vrh[dslot]; disp_fr = vrfr[dslot];
             if (vdelay == 0) { g_av_attract_video = 0; g_av_drain = 0; }  /* fully caught up: live */
         }
         if (g_delivery_win > 0 && g_log) {   /* PRESENT diag: what is actually sent to the texture vs g_cap */
@@ -5431,6 +5452,11 @@ static int run_sdl(int scale) {
             SDL_RenderClear(ren);
             SDL_RenderCopy(ren, tex, &srcr, NULL);
             SDL_RenderPresent(ren);
+        }
+        if (g_avlog && g_log) {   /* A/V-sync probe: when was WHICH emu frame actually presented */
+            double tms = (double)SDL_GetPerformanceCounter() * 1000.0
+                       / (double)SDL_GetPerformanceFrequency();
+            fprintf(g_log, "AVLOG-V fr=%d disp=%d t=%.2f\n", g_cur_frame, disp_fr, tms);
         }
         if (g_livedump) {   /* diagnostics: record each displayed frame next to the exe (F10 toggles) */
             static int ld_n = 0;
@@ -6200,6 +6226,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--noswapskip")) g_swapskip=0;   /* show the (auto-confirmed) insert-disk prompt again */
         else if (!strcmp(argv[i],"--noskipmenu")) g_skipmenu=0;   /* intro-skip lands at Mog launch again (loader black + title card shown) */
         else if (!strcmp(argv[i],"--nointrocut")) g_introcut=0;   /* watched intro waits through the loader black + title card again */
+        else if (!strcmp(argv[i],"--avlog")) g_avlog=1;           /* diag: A/V-sync timestamps (presented frame vs audio push+queue) */
         else if (!strcmp(argv[i],"--noflopdelay")) g_dsk_fastwait=0; /* keep the real ~8s floppy motor/seek waits */
         else if (!strcmp(argv[i],"--skipat")&&i+1<argc) g_skipat=atoi(argv[++i]); /* diag: auto intro-skip at frame N */
         else if (!strcmp(argv[i],"--poke8")&&i+1<argc) {  /* diag: one-shot byte poke, F:A:V (A,V hex), repeatable */
