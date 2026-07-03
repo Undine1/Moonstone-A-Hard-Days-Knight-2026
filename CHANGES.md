@@ -41,6 +41,10 @@ Defects in the 1991 game itself that this port corrects.
 
 Glitches the port introduced in reproducing the Amiga, fixed to match real hardware.
 
+**Gameplay / randomness**
+
+- **RNG seed entropy (identical loot every run)** — The game seeds its RNG once per new game by reading the raster beam position (`VHPOSR & 3` picks one of four preset seed streams); on real hardware the player's fire-press arrived at an arbitrary raster line, so runs differed — in the port, input is sampled at a fixed point in the frame, so the same seed was picked every run and zone loot never varied. Live play now substitutes host timing entropy at the seeding instant (same four faithful streams); headless/regression runs stay fully deterministic (`--norngseedfix`).
+
 **Audio**
 
 - **AUDxVOL byte-write duplication** — A `move.b` to even AUDxVOL wrote only the high byte → soft per-note voices (the intro trumpet echo) blasted at full; now duplicates the byte onto both bus halves so per-note volume lands faithfully.

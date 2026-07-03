@@ -2568,6 +2568,17 @@ static int      g_aud1_dmafix = 1;    /* ROOT FIX 2026-06-30: the Mog sound-star
                                        * copy/paste slip in the original game.  It chops any one-shot SFX that
                                        * happens to be on AUD1 (the "sound cut short" bug).  Fix = skip that one
                                        * 6-byte instruction (PC 0x4371c -> 0x43722).  --noaud1fix A/B. */
+static int      g_rngseed_fix = 1;    /* FAITHFULNESS FIX 2026-07-03: the game's RNG (0x2b2b0, rotate/XOR over
+                                       * seed [0x391a8]) is seeded ONCE per program entry (0x21000) by the
+                                       * routine at 0x2b2f2: `move.w $dff006,D0; andi #3` picks one of FOUR
+                                       * preset seed longs at 0x391ae by the BEAM POSITION at that instant.
+                                       * Real hardware: drive spin-up + human timing made that instant vary =
+                                       * a different stream (loot, encounters, AI rolls) each run.  Our boot
+                                       * is cycle-deterministic, so the same seed was picked EVERY run = the
+                                       * operator's "every run has the same zone loot".  Fix: in LIVE play
+                                       * only, substitute host entropy for the beam read at the seeder --
+                                       * same four faithful streams, real variance.  Headless stays fully
+                                       * deterministic (regression goldens depend on it).  --norngseedfix. */
 static int      g_edgewalk_fix = 1;   /* ROOT FIX 2026-07-03 (original-game bug, operator-sanctioned QoL): the
                                        * overland AI steering commits ONE Bresenham trajectory per turn
                                        * (params -> [0x2fad0..0x2fadc], walker 0x40c20 replays it every tick)
@@ -2811,6 +2822,20 @@ void moon_instr_hook(unsigned int pc) {
      * (toward arena centre 160), so a right-side grab hauls the monkey ON-screen instead of past
      * the 320-wide edge.  A0 points at the arc-block destX field (already holding curX from 0x272a4);
      * A1 = the hauled monkey ([0x2ebd0]).  We write the corrected destX and skip the +150 add. */
+    /* ===== RNG SEED ENTROPY FIX (see g_rngseed_fix decl) ===== */
+    if (g_os && g_sdl_mode && g_rngseed_fix && pc == 0x2b2f6u && r16(pc) == 0x3039u) {
+        uint64_t q = SDL_GetPerformanceCounter();             /* host-timing entropy at the seeding instant */
+        uint32_t e = (uint32_t)(((q ^ (q >> 9) ^ (q >> 23)) * 2654435761u) >> 16);
+        /* multiplicative fold: QPC's LOW bits are granularity-biased (observed idx=0 on
+         * three consecutive runs) -- hash the counter and take high bits so the game's
+         * own `andi #3` sees uniform entropy */
+        m68k_set_reg(M68K_REG_D0, e);
+        m68k_set_reg(M68K_REG_PC, 0x2b2fcu);   /* skip the deterministic beam read */
+        if (g_log) { static int sn = 0; if (sn < 8) {
+            fprintf(g_log, "RNG-SEED host-entropy idx=%u ic=%llu\n", e & 3u, (unsigned long long)g_icount);
+            fflush(g_log); sn++; } }
+        return;
+    }
     /* ===== OVERLAND AI EDGE-WALK FIX (see g_edgewalk_fix decl) ===== */
     if (g_os && g_edgewalk_fix) {
         if (pc == 0x40b92u && r16(pc) == 0x33fcu) {          /* trajectory commit begins (`move.w #1,$2fad0`) */
@@ -5876,7 +5901,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--notaskfix")) g_tasklist_fix=0;           /* A/B: disable the task-list root fix (dedup + effect-only removal + cursor value-removal hardening) */
         else if (!strcmp(argv[i],"--noaud1fix")) g_aud1_dmafix=0;            /* A/B: disable the AUD1 stray-DMACON-disable fix (0x4371c) */
         else if (!strcmp(argv[i],"--nochokefix")) g_choke_haul_fix=0;
-        else if (!strcmp(argv[i],"--noedgewalkfix")) g_edgewalk_fix=0;   /* A/B: disable the overland AI fallback-goal arrival fix */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
+        else if (!strcmp(argv[i],"--noedgewalkfix")) g_edgewalk_fix=0;   /* A/B: disable the overland AI fallback-goal arrival fix */
+        else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
         else if (!strcmp(argv[i],"--boomlp")&&i+1<argc) { double fc=atof(argv[++i]); g_boomlp_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* per-channel de-click LP on the AUD2 boom, Hz (0=off) */
