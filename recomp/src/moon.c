@@ -2628,6 +2628,32 @@ static int      g_chase_engage_fix = 1; /* ROOT FIX 2026-07-03 (original-game bu
                                        * launches the arena via 0x21ab4; AI-vs-AI pairs are filtered inside the
                                        * handler itself (0x21afa), so no knight-vs-knight spam.
                                        * --nochaseengagefix. */
+static int      g_hide_parity_fix = 1; /* ROOT FIX 2026-07-03 (vanish-in-combat, the operator's high-priority
+                                       * "player disappears mid-fight, enemy hits air" bug): combat sprite
+                                       * visibility is a display-record flag (+0x30) that BOTH draw passes
+                                       * (0x28994/0x28a18) gate on -- and a hidden actor's per-frame anim/
+                                       * behaviour/input processing is skipped with it, so a wrongly-hidden
+                                       * knight is invisible AND brain-dead (verified: the frozen specimen
+                                       * moonstone_bug.sav revives its sprite with a single +0x30 poke).
+                                       * The flag is only ever EOR-TOGGLED (helper 0x28862, `eori.w #1` @
+                                       * 0x2886c), so correctness rests on matched toggle parity between the
+                                       * grab/pounce ENTER sites (hide the grabbed knight while carried;
+                                       * ret-addrs 0x27534 head-latch, 0x2755c carry) and the RELEASE sites
+                                       * (show him again; 0x271c6 grabber-died, 0x27330/0x27340 grab-resolve
+                                       * pair, 0x27e74 head-latch release).  Any unpaired execution -- the
+                                       * grab-resolve pair can BOTH run when [0x2ebd4]==[0x2e1f6] alias the
+                                       * same knight, and the re-pounce limit cycle flips repeatedly -- lands
+                                       * odd parity: released-but-hidden forever = the vanish (the specimen
+                                       * shows exactly that: grab links cleared, hide still 1).  FIX: at the
+                                       * toggle choke point, callers whose INTENT is certain write the intent
+                                       * (enter := 1, release := 0) instead of EOR.  Bit-identical for every
+                                       * correctly-paired sequence (the EOR would produce the same value);
+                                       * differs ONLY in the broken sequences, where it yields the intended
+                                       * state instead of the inverted one -- the vanish becomes unreachable
+                                       * by construction.  Unclassified togglers (bulk 0x213d8, dragon
+                                       * 0x213f2, lift 0x27dd4) keep the faithful EOR.  HIDEFIX log fires
+                                       * only when the forced value differs from what the EOR would have
+                                       * produced = an actual unpaired toggle caught live.  --nohidefix. */
 static int      g_dayend_fix = 1;     /* ROOT FIX 2026-07-03 (original-game bug, the intermittent "town exit
                                        * doesn't end the day"): the turn budget [0x2fa08] = actor stat +0x56
                                        * << 4, re-derived by turn-setup 0x403fe (write @0x4044e).  The town
@@ -2968,6 +2994,41 @@ void moon_instr_hook(unsigned int pc) {
                 fprintf(g_log, "DAYEND-FIX pending end kept: timer %04x->%04x (max %04x->%04x) ic=%llu\n",
                         timer, newmax, oldmax, newmax, (unsigned long long)g_icount);
                 fflush(g_log); dn++; } }
+        }
+    }
+    /* ===== HIDE-TOGGLE LEDGER (vanish-in-combat forensics 2026-07-03): the combat
+     * display-record hide flag (+0x30) is EOR-toggled, never set/cleared, so sprite
+     * visibility depends on matched toggle PARITY.  The vanish bug = odd parity left
+     * behind by a grab/pounce cycle (moonstone_bug.sav: knight alive, queued, HIDE=1).
+     * Every toggle funnels through `eori.w #1,($30,A6)` @0x2886c inside helper
+     * 0x28862; [A7] there = the caller's return address.  Bounded ledger. */
+    if (g_os && pc == 0x2886cu && r16(pc) == 0x0a6eu) {
+        uint32_t a6  = (uint32_t)m68k_get_reg(NULL, M68K_REG_A6);
+        uint32_t ret = r32((uint32_t)m68k_get_reg(NULL, M68K_REG_A7));
+        if (g_log) { static int ht = 0; if (ht < 120) {
+            fprintf(g_log, "HIDE-TOG own=%06lx pre=%u caller=%06lx fr=%d ic=%llu\n",
+                    (unsigned long)r32(a6 + 0x18u), (unsigned)r16(a6 + 0x30u),
+                    (unsigned long)ret, g_cur_frame, (unsigned long long)g_icount);
+            fflush(g_log); ht++;
+        } }
+        if (g_hide_parity_fix) {
+            int want = -1;
+            if (ret == 0x271c6u || ret == 0x27330u || ret == 0x27340u || ret == 0x27e74u)
+                want = 0;   /* grab RELEASE: the released actor must be visible */
+            else if (ret == 0x27534u || ret == 0x2755cu)
+                want = 1;   /* grab ENTER: the carried actor must be hidden */
+            if (want >= 0) {
+                int pre = (int)r16(a6 + 0x30u);
+                m68k_write_memory_16(a6 + 0x30u, (unsigned)want);
+                m68k_set_reg(M68K_REG_PC, 0x28872u);   /* skip the eori; lands on the rts */
+                if (pre == want && g_log) { static int hf = 0; if (hf < 12) {
+                    /* the EOR would have INVERTED away from intent = the vanish moment */
+                    fprintf(g_log, "HIDEFIX unpaired toggle caught: own=%06lx caller=%06lx kept=%d ic=%llu\n",
+                            (unsigned long)r32(a6 + 0x18u), (unsigned long)ret, want,
+                            (unsigned long long)g_icount);
+                    fflush(g_log); hf++;
+                } }
+            }
         }
     }
     if (g_os && pc == 0x21ab4u && r16(pc) == 0x48e7u && g_log) {   /* encounter handler: who fights whom */
@@ -6070,6 +6131,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--noedgewalkfix")) g_edgewalk_fix=0;   /* A/B: disable the overland AI fallback-goal arrival fix */
         else if (!strcmp(argv[i],"--nochaseengagefix")) g_chase_engage_fix=0;   /* A/B: disable the chase-arrival engage fix */
         else if (!strcmp(argv[i],"--nodayendfix")) g_dayend_fix=0;   /* A/B: disable the town-exit day-end fix */
+        else if (!strcmp(argv[i],"--nohidefix")) g_hide_parity_fix=0;   /* A/B: disable the combat hide-parity (vanish) fix */
         else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */

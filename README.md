@@ -23,6 +23,9 @@ The port also corrects several defects present in the 1991 release itself, among
 - **Town exit not ending the day after an armor purchase** — the exit stamps the turn timer
   to the *old* movement budget, then the new armor's bigger budget is re-derived on the map
   return, resurrecting the turn.
+- **Player vanishing mid-combat** — the grab/pounce choreography *toggles* the knight's
+  sprite-hide flag rather than setting it, so one unmatched toggle left him invisible,
+  uncontrollable and the fight unwinnable; hide/show intent is now explicit.
 
 Most of these ship with an off-switch restoring the faithful-original behaviour
 (`--notaskfix`, `--noedgewalkfix`, …) — the full list and details are in
