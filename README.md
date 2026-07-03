@@ -26,6 +26,9 @@ The port also corrects several defects present in the 1991 release itself, among
 - **Player vanishing mid-combat** — the grab/pounce choreography *toggles* the knight's
   sprite-hide flag rather than setting it, so one unmatched toggle left him invisible,
   uncontrollable and the fight unwinnable; hide/show intent is now explicit.
+- **Swamp monster wedged inside the knight, flickering** — a point-blank pounce landed in a
+  state the contact handler never handles (the standoff constant equals the re-pounce gate
+  threshold), ping-ponging forever; it now resolves into the normal shake-it-off grab.
 
 Most of these ship with an off-switch restoring the faithful-original behaviour
 (`--notaskfix`, `--noedgewalkfix`, …) — the full list and details are in

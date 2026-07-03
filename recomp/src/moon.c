@@ -776,11 +776,12 @@ static int       g_autoswap_settle = 0; /* frames to let the new disk settle bef
  * they only run while a disk read is in progress, never in settled gameplay). */
 static int       g_dsk_fastwait = 1;    /* 1 = skip the floppy motor/seek dead time (--noflopdelay disables) */
 static int       g_skipat = 0;          /* --skipat N (diag): auto-trigger the intro-skip at host frame N (0=off) */
-static int       g_poke_frame = 0;      /* --poke8 F:A:V (diag): one-shot RAM byte poke at frame F -- lets a repro
-                                         * script inject a mid-run state change (e.g. the armor stat write) without
-                                         * blind-scripting the UI that would cause it.  0 = off. */
-static uint32_t  g_poke_addr = 0;
-static int       g_poke_val = -1;
+#define MAX_POKE8 8
+static int       g_poke8_n = 0;         /* --poke8 F:A:V (diag, repeatable up to 8): one-shot RAM byte poke at
+                                         * frame F -- lets a repro script inject a mid-run state change (e.g.
+                                         * the armor stat write, or forged contact geometry) without blind-
+                                         * scripting the UI that would cause it. */
+static struct { int frame; uint32_t addr; int val; int done; } g_poke8[MAX_POKE8];
 static int       g_stallat = 0;         /* --stallat N (diag): simulate a ~0.5s host stall (window drag) at host frame N (0=off) */
 #define ADF_BYTES   901120              /* 80*2*11*512 */
 #define ADF_TRACKS  160                 /* 80 cyl * 2 heads */
@@ -2654,6 +2655,25 @@ static int      g_hide_parity_fix = 1; /* ROOT FIX 2026-07-03 (vanish-in-combat,
                                        * 0x213f2, lift 0x27dd4) keep the faithful EOR.  HIDEFIX log fires
                                        * only when the forced value differs from what the EOR would have
                                        * produced = an actual unpaired toggle caught live.  --nohidefix. */
+static int      g_pounce_latch_fix = 1; /* ROOT FIX 2026-07-03 (original-game bug, the operator's "monkey idles
+                                       * embedded in my body and flickers" combat glitch): the swamp-monster
+                                       * contact handler (0x27476) resolves a touch by the monster's +0x68
+                                       * state bits -- bit0 (mid-leap) -> HEAD-LATCH grab @0x274e4 (the legit
+                                       * mash-to-shake-off mechanic), bit3 (carry) -> 0x27538, else -> "bounce
+                                       * off" (clears +0x68, restarts anims).  The point-blank case is a HOLE:
+                                       * when the pounce gate finds the anchor distance <= 40 (0x27080, the
+                                       * standoff constant +0x74=40 == the gate threshold) it parks the monster
+                                       * with **bit7** set (0x2708a) -- a state the contact switch never
+                                       * handles, so an embedded monster ping-pongs forever between the gate
+                                       * (sets bit7) and the bounce (clears it): the one-frame flicker, wedged
+                                       * inside the knight's body until the player walks >40px away (root-
+                                       * caused 2026-06-30 against a live specimen, instruction-traced; the
+                                       * specimen save was since overwritten).  FIX: route bit7-at-contact to
+                                       * the SAME head-latch resolution as bit0 (the game's own mechanic --
+                                       * point-blank pounce = grab, mash to shake off, releases through the
+                                       * normal 0x27e50 path).  bit0/bit3 keep their original priority; the
+                                       * latch path's own guards (event-type, already-latched) still apply.
+                                       * --nopouncefix. */
 static int      g_dayend_fix = 1;     /* ROOT FIX 2026-07-03 (original-game bug, the intermittent "town exit
                                        * doesn't end the day"): the turn budget [0x2fa08] = actor stat +0x56
                                        * << 4, re-derived by turn-setup 0x403fe (write @0x4044e).  The town
@@ -2980,6 +3000,21 @@ void moon_instr_hook(unsigned int pc) {
                         fflush(g_log); cq++;
                     } }
                 }
+            }
+        }
+    }
+    /* ===== POINT-BLANK POUNCE LATCH FIX (see g_pounce_latch_fix decl) ===== */
+    if (g_os && g_pounce_latch_fix && pc == 0x27484u && r16(pc) == 0x0829u) {  /* `btst #0,($68,A1)` = contact switch */
+        uint32_t a1 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A1);
+        if (a1 < RAM_SIZE - 0x84u) {
+            uint8_t b = g_ram[a1 + 0x68u];
+            if ((b & 0x80u) && !(b & 0x09u)) {   /* point-blank hold, not mid-leap, not carrying */
+                m68k_set_reg(M68K_REG_PC, 0x274e4u);   /* resolve as the head-latch grab */
+                if (g_log) { static int pl = 0; if (pl < 12) {
+                    fprintf(g_log, "POUNCE-LATCH actor=%06x bits=%02x fr=%d ic=%llu\n",
+                            a1, b, g_cur_frame, (unsigned long long)g_icount);
+                    fflush(g_log); pl++;
+                } }
             }
         }
     }
@@ -4773,14 +4808,17 @@ static int dump_captured(const char *path) {
 
 static void autoswap_tick(void);   /* fwd: seamless disk-swap auto-confirm (defined below) */
 static void apply_script(int fr);  /* fwd: scripted input (allows --script under --sdl for repro) */
-static void poke_tick(void) {      /* --poke8 F:A:V one-shot RAM byte poke (diag, see decl) */
-    if (g_poke_val >= 0 && g_cur_frame >= g_poke_frame) {
-        if (g_poke_addr < RAM_SIZE) {
-            g_ram[g_poke_addr] = (uint8_t)g_poke_val;
-            if (g_log) { fprintf(g_log, "POKE8 fr=%d @%06x <= %02x\n",
-                                 g_cur_frame, g_poke_addr, (unsigned)g_poke_val); fflush(g_log); }
+static void poke_tick(void) {      /* --poke8 F:A:V one-shot RAM byte pokes (diag, see decl) */
+    int i;
+    for (i = 0; i < g_poke8_n; i++) {
+        if (!g_poke8[i].done && g_cur_frame >= g_poke8[i].frame) {
+            if (g_poke8[i].addr < RAM_SIZE) {
+                g_ram[g_poke8[i].addr] = (uint8_t)g_poke8[i].val;
+                if (g_log) { fprintf(g_log, "POKE8 fr=%d @%06x <= %02x\n",
+                                     g_cur_frame, g_poke8[i].addr, (unsigned)g_poke8[i].val); fflush(g_log); }
+            }
+            g_poke8[i].done = 1;
         }
-        g_poke_val = -1;
     }
 }
 static int  g_nscript;             /* fwd (tentative): script event count, defined with parse_script below */
@@ -6090,10 +6128,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--noautoswap")) g_autoswap=0;   /* disable seamless disk-swap */
         else if (!strcmp(argv[i],"--noflopdelay")) g_dsk_fastwait=0; /* keep the real ~8s floppy motor/seek waits */
         else if (!strcmp(argv[i],"--skipat")&&i+1<argc) g_skipat=atoi(argv[++i]); /* diag: auto intro-skip at frame N */
-        else if (!strcmp(argv[i],"--poke8")&&i+1<argc) {  /* diag: one-shot byte poke, F:A:V (A,V hex) */
+        else if (!strcmp(argv[i],"--poke8")&&i+1<argc) {  /* diag: one-shot byte poke, F:A:V (A,V hex), repeatable */
             unsigned pf=0, pa=0, pv=0;
-            if (sscanf(argv[++i], "%u:%x:%x", &pf, &pa, &pv) == 3) {
-                g_poke_frame=(int)pf; g_poke_addr=pa; g_poke_val=(int)(pv&0xffu);
+            if (sscanf(argv[++i], "%u:%x:%x", &pf, &pa, &pv) == 3 && g_poke8_n < MAX_POKE8) {
+                g_poke8[g_poke8_n].frame=(int)pf; g_poke8[g_poke8_n].addr=pa;
+                g_poke8[g_poke8_n].val=(int)(pv&0xffu); g_poke8[g_poke8_n].done=0; g_poke8_n++;
             }
         }
         else if (!strcmp(argv[i],"--stallat")&&i+1<argc) g_stallat=atoi(argv[++i]); /* diag: simulate a host stall at frame N */
@@ -6132,6 +6171,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nochaseengagefix")) g_chase_engage_fix=0;   /* A/B: disable the chase-arrival engage fix */
         else if (!strcmp(argv[i],"--nodayendfix")) g_dayend_fix=0;   /* A/B: disable the town-exit day-end fix */
         else if (!strcmp(argv[i],"--nohidefix")) g_hide_parity_fix=0;   /* A/B: disable the combat hide-parity (vanish) fix */
+        else if (!strcmp(argv[i],"--nopouncefix")) g_pounce_latch_fix=0;   /* A/B: disable the point-blank pounce latch fix */
         else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
