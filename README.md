@@ -20,6 +20,9 @@ The port also corrects several defects present in the 1991 release itself, among
 - **AI knights never attacking on contact** — a knight with town business (the AI's gold-driven
   shopping/healing intent) had his per-tick attack check masked for the whole chase, so he'd
   march straight onto the player — or right through him — without ever engaging.
+- **Town exit not ending the day after an armor purchase** — the exit stamps the turn timer
+  to the *old* movement budget, then the new armor's bigger budget is re-derived on the map
+  return, resurrecting the turn.
 
 Most of these ship with an off-switch restoring the faithful-original behaviour
 (`--notaskfix`, `--noedgewalkfix`, …) — the full list and details are in

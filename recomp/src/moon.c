@@ -776,6 +776,11 @@ static int       g_autoswap_settle = 0; /* frames to let the new disk settle bef
  * they only run while a disk read is in progress, never in settled gameplay). */
 static int       g_dsk_fastwait = 1;    /* 1 = skip the floppy motor/seek dead time (--noflopdelay disables) */
 static int       g_skipat = 0;          /* --skipat N (diag): auto-trigger the intro-skip at host frame N (0=off) */
+static int       g_poke_frame = 0;      /* --poke8 F:A:V (diag): one-shot RAM byte poke at frame F -- lets a repro
+                                         * script inject a mid-run state change (e.g. the armor stat write) without
+                                         * blind-scripting the UI that would cause it.  0 = off. */
+static uint32_t  g_poke_addr = 0;
+static int       g_poke_val = -1;
 static int       g_stallat = 0;         /* --stallat N (diag): simulate a ~0.5s host stall (window drag) at host frame N (0=off) */
 #define ADF_BYTES   901120              /* 80*2*11*512 */
 #define ADF_TRACKS  160                 /* 80 cyl * 2 heads */
@@ -2623,6 +2628,23 @@ static int      g_chase_engage_fix = 1; /* ROOT FIX 2026-07-03 (original-game bu
                                        * launches the arena via 0x21ab4; AI-vs-AI pairs are filtered inside the
                                        * handler itself (0x21afa), so no knight-vs-knight spam.
                                        * --nochaseengagefix. */
+static int      g_dayend_fix = 1;     /* ROOT FIX 2026-07-03 (original-game bug, the intermittent "town exit
+                                       * doesn't end the day"): the turn budget [0x2fa08] = actor stat +0x56
+                                       * << 4, re-derived by turn-setup 0x403fe (write @0x4044e).  The town
+                                       * Exit handler "ends the turn" by stamping timer := CURRENT max
+                                       * (0x228cc) -- but buying the good armor raises +0x56 (6->8), and the
+                                       * post-exit map re-entry re-derives max (0x60->0x80) AFTER the stamp,
+                                       * so the turn-end check (timer >= max @0x40320) never trips: the turn
+                                       * survives with 32 bonus ticks and the day only ends after that much
+                                       * extra walking -- the operator's "intermittent" no-day-end, live-
+                                       * captured 2026-07-03 (TOWN-ACT exit logged timer=002b/0060; the save
+                                       * after showed timer=0060 max=0080, stat 6->8, armor 0x1b->0x1e).
+                                       * FIX: at the re-derive write, if a turn-end was pending under the old
+                                       * max (timer >= oldmax) and the new max is larger, carry the pending
+                                       * end forward (timer := newmax).  Genuine handoffs clear the timer
+                                       * BEFORE re-deriving, so they never trigger this; the speed-potion
+                                       * doublers are separate sites (by design they DO extend a turn).
+                                       * --nodayendfix. */
 static int      g_choke_haul_fix = 1;  /* ROOT FIX 2026-07-01: the canopy-choke "haul to canopy" launch
                                        * (0x27278) builds the arc destination X as curX + 0x96 (+150) with an
                                        * UNCONDITIONAL rightward add (0x272a8 `addi.w #$96,(A0)+`) and no
@@ -2933,6 +2955,19 @@ void moon_instr_hook(unsigned int pc) {
                     } }
                 }
             }
+        }
+    }
+    /* ===== TOWN-EXIT DAY-END FIX (see g_dayend_fix decl) ===== */
+    if (g_os && g_dayend_fix && pc == 0x4044eu && r16(pc) == 0x33c0u) {  /* `move.w D0,$2fa08` = budget re-derive */
+        uint16_t oldmax = (uint16_t)r16(0x2fa08u);
+        uint16_t timer  = (uint16_t)r16(0x2f9dcu);
+        uint16_t newmax = (uint16_t)(m68k_get_reg(NULL, M68K_REG_D0) & 0xffffu);
+        if (oldmax && timer >= oldmax && newmax > oldmax) {
+            m68k_write_memory_16(0x2f9dcu, newmax);   /* pending turn-end survives the re-derive */
+            if (g_log) { static int dn = 0; if (dn < 8) {
+                fprintf(g_log, "DAYEND-FIX pending end kept: timer %04x->%04x (max %04x->%04x) ic=%llu\n",
+                        timer, newmax, oldmax, newmax, (unsigned long long)g_icount);
+                fflush(g_log); dn++; } }
         }
     }
     if (g_os && pc == 0x21ab4u && r16(pc) == 0x48e7u && g_log) {   /* encounter handler: who fights whom */
@@ -4677,6 +4712,16 @@ static int dump_captured(const char *path) {
 
 static void autoswap_tick(void);   /* fwd: seamless disk-swap auto-confirm (defined below) */
 static void apply_script(int fr);  /* fwd: scripted input (allows --script under --sdl for repro) */
+static void poke_tick(void) {      /* --poke8 F:A:V one-shot RAM byte poke (diag, see decl) */
+    if (g_poke_val >= 0 && g_cur_frame >= g_poke_frame) {
+        if (g_poke_addr < RAM_SIZE) {
+            g_ram[g_poke_addr] = (uint8_t)g_poke_val;
+            if (g_log) { fprintf(g_log, "POKE8 fr=%d @%06x <= %02x\n",
+                                 g_cur_frame, g_poke_addr, (unsigned)g_poke_val); fflush(g_log); }
+        }
+        g_poke_val = -1;
+    }
+}
 static int  g_nscript;             /* fwd (tentative): script event count, defined with parse_script below */
 static int  save_state(const char *path);   /* fwd: quicksave  (F5; defined near main) */
 static int  load_state(const char *path);   /* fwd: quickload  (F9; defined near main) */
@@ -4711,6 +4756,7 @@ static void run_one_frame(void) {
     if (vertb_gate()) { g_custom[0x09c>>1] |= 0x0020; }  /* VERTB */
     update_ipl();
     audio_flush();   /* finish + emit one PAL frame of Paula audio to the host sink */
+    poke_tick();   /* --poke8 one-shot (diag) */
     /* --watch frame-boundary POLL (2026-07-03): the write-watch instruments w8/w16/w32
      * and blt_w16, yet a watched byte was seen changing with NO logged writer (the town
      * hotspot-table zeroing) -- some path still bypasses the watch.  Poll the watched
@@ -5983,6 +6029,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--noautoswap")) g_autoswap=0;   /* disable seamless disk-swap */
         else if (!strcmp(argv[i],"--noflopdelay")) g_dsk_fastwait=0; /* keep the real ~8s floppy motor/seek waits */
         else if (!strcmp(argv[i],"--skipat")&&i+1<argc) g_skipat=atoi(argv[++i]); /* diag: auto intro-skip at frame N */
+        else if (!strcmp(argv[i],"--poke8")&&i+1<argc) {  /* diag: one-shot byte poke, F:A:V (A,V hex) */
+            unsigned pf=0, pa=0, pv=0;
+            if (sscanf(argv[++i], "%u:%x:%x", &pf, &pa, &pv) == 3) {
+                g_poke_frame=(int)pf; g_poke_addr=pa; g_poke_val=(int)(pv&0xffu);
+            }
+        }
         else if (!strcmp(argv[i],"--stallat")&&i+1<argc) g_stallat=atoi(argv[++i]); /* diag: simulate a host stall at frame N */
         else if (!strcmp(argv[i],"--flopdelay")) g_dsk_fastwait=0;   /* alias */
         else if (!strcmp(argv[i],"--watch")&&i+1<argc) g_watch=(uint32_t)strtoul(argv[++i],0,0);
@@ -6017,6 +6069,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nochokefix")) g_choke_haul_fix=0;
         else if (!strcmp(argv[i],"--noedgewalkfix")) g_edgewalk_fix=0;   /* A/B: disable the overland AI fallback-goal arrival fix */
         else if (!strcmp(argv[i],"--nochaseengagefix")) g_chase_engage_fix=0;   /* A/B: disable the chase-arrival engage fix */
+        else if (!strcmp(argv[i],"--nodayendfix")) g_dayend_fix=0;   /* A/B: disable the town-exit day-end fix */
         else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
@@ -6158,6 +6211,7 @@ int main(int argc, char **argv) {
         if (g_ndiskev) apply_diskat(fr);
         if (g_nscript) apply_script(fr);
         if (g_ntypeev) apply_type(fr);   /* scripted typed text (--type) for headless name-entry validation */
+        poke_tick();       /* --poke8 one-shot (diag) */
         autoswap_tick();   /* seamless disk swap: auto-confirm any "insert disk" prompt */
         if (press_frame >= 0 && fr >= press_frame) { g_fire = 1; g_fire2 = 1; }
         if (clickthru) { g_fire = g_fire2 = ((fr % 50) < 10) ? 1 : 0; } /* pulse fire */

@@ -67,16 +67,23 @@ def measure(kind, inp, frame):
         m = re.search(r"ram_fnv=([0-9a-f]+)", r.stdout)
         return m.group(1) if m else "ERR:no-hash"
     if kind == "scriptfnv":
-        # loadstate a fixture and drive scripted input: input is "SAVE|SCRIPT" (the
-        # --script frame:keys timeline).  The townday row walks the near-town map save
-        # INTO the town (fire), down the menu to Exit, and back out -- asserting the
-        # whole town-entry/exit + day-advance + map-return flow the operator's
-        # intermittent day-end bug lives in.
-        save_name, script = (inp.split("|", 1) + [""])[:2]
+        # loadstate a fixture and drive scripted input: input is "SAVE|SCRIPT[|POKE]"
+        # (the --script frame:keys timeline; POKE = an optional --poke8 F:A:V one-shot
+        # byte poke).  The townday row walks the near-town map save INTO the town
+        # (fire), down the menu to Exit, and back out -- asserting the whole
+        # town-entry/exit + day-advance + map-return flow.  The townarmor row is the
+        # same route with the best-armor id poked mid-visit (simulating the merchant
+        # purchase): it asserts the day-end fix -- unfixed, the exit stamps the OLD
+        # turn budget and the armor's bigger budget resurrects the turn.
+        parts = (inp.split("|", 2) + ["", ""])[:3]
+        save_name, script, poke = parts
         save = os.path.join(args.saves, save_name)
         if not os.path.exists(save):
             return "ERR:no-save"
-        r = run(["--os", "--loadstate", save, "--frames", str(frame), "--script", script])
+        extra = ["--os", "--loadstate", save, "--frames", str(frame), "--script", script]
+        if poke:
+            extra += ["--poke8", poke]
+        r = run(extra)
         m = re.search(r"ram_fnv=([0-9a-f]+)", r.stdout)
         return m.group(1) if m else "ERR:no-hash"
     if kind == "savefnv":
