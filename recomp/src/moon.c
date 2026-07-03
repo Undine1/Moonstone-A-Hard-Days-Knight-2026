@@ -790,6 +790,13 @@ static int       g_swapskip = 1;        /* 2026-07-03 (operator request): don't 
  * they only run while a disk read is in progress, never in settled gameplay). */
 static int       g_dsk_fastwait = 1;    /* 1 = skip the floppy motor/seek dead time (--noflopdelay disables) */
 static int       g_skipat = 0;          /* --skipat N (diag): auto-trigger the intro-skip at host frame N (0=off) */
+static int       g_skipmenu = 1;        /* intro-skip lands ON the main menu (1, default): the fast-forward keeps
+                                         * running past Mog launch until the menu input-poll loop (0x22964) is
+                                         * reached, so the skip never shows the ~10s loader black + chant, the
+                                         * "Loading..." title card, or the second black gap that follow the
+                                         * launch (operator 2026-07-03).  --noskipmenu restores the old landing
+                                         * (exit the fast-forward right at Mog launch). */
+static int       g_menu_live = 0;       /* set by the instr-hook when the main-menu poll loop executes (landing marker) */
 #define MAX_POKE8 8
 static int       g_poke8_n = 0;         /* --poke8 F:A:V (diag, repeatable up to 8): one-shot RAM byte poke at
                                          * frame F -- lets a repro script inject a mid-run state change (e.g.
@@ -3390,6 +3397,16 @@ void moon_instr_hook(unsigned int pc) {
         g_av_drain = 1;           /* drain the buffered intro tail over the loader, THEN go live
                                    * (instead of snapping straight to the black load screen) */
     }
+    /* MAIN-MENU landing marker for the intro-skip fast-forward: 0x22964 is the
+     * front-end menu's input-poll loop head (`jsr $22fe6` read-input; the FSM spins
+     * here ~700x/frame while the Players/Gore/Practice/Select-Knight menu is
+     * interactive).  Verified it first executes only AFTER the menu is composed
+     * (ic 78.38M ~ fr 7360 on a cold boot; never during the loader black or the
+     * "Loading..." title card).  Opcode-guarded (0x2xxxx is overlaid per phase) and
+     * gated on the attract scope being over, so an attract-phase overlay reusing
+     * the address can't stamp it.  Consumed only by the skip fast-forward. */
+    if (g_os && pc == 0x22964u && !g_blt_busy_scope && r16(pc) == 0x4eb9u)
+        g_menu_live = 1;
     /* (Legend cookie-cut redirect REMOVED: now that the loader-HLE opcode guard above
      * no longer hijacks 0x2cda0 during the char engine, the char engine's OWN `beq.w
      * $2cda6` runs and the per-glyph cookie-cut reaches the display naturally for the
@@ -5243,8 +5260,13 @@ static int run_sdl(int scale) {
         if (skip_intro && g_blt_busy_scope) {
             /* SKIP THE INTRO: the attract is a scripted auto-flow that launches the
              * Mog game engine at 0x21114 (which clears g_blt_busy_scope).  Run the
-             * emulation unthrottled with no render/audio until that point, then resume
-             * normal play.  Bypass the video-delay ring (its buffered frames are stale
+             * emulation unthrottled with no render/audio until that point -- and then
+             * (default, --noskipmenu reverts) KEEP fast-forwarding through the post-
+             * launch landing zone (~10s loader black + looping chant, the "Loading..."
+             * title card with its own chant drone, a second ~1s black) until the main
+             * menu's input-poll loop is live (g_menu_live, hook at 0x22964), so the
+             * skip cuts straight to the silent, interactive menu.  Then resume normal
+             * play.  Bypass the video-delay ring (its buffered frames are stale
              * after a fast-forward) and drop any queued intro audio at the end. */
             g_av_attract_video = 0; g_av_drain = 0;
             if (win) SDL_SetWindowTitle(win, "Moonstone - skipping intro...");
@@ -5255,13 +5277,21 @@ static int run_sdl(int scale) {
              * is already queued and stop pushing; the empty queue plays clean silence. */
             if (g_audio_dev) SDL_ClearQueuedAudio(g_audio_dev);
             g_audio_mute = 1;
-            int guard = 0;
-            while (g_blt_busy_scope && !g_stop && guard < 20000) {
+            int guard = 0, post = 0;
+            g_menu_live = 0;
+            while ((g_blt_busy_scope || (g_skipmenu && !g_menu_live))
+                   && !g_stop && guard < 20000) {
                 g_ji_up=g_ji_dn=g_ji_lf=g_ji_rt=0; g_fire=g_fire2=0; g_rmb=0;
                 autoswap_tick();       /* keep auto-confirming disk-swap prompts */
                 run_one_frame();
+                /* landing-zone cap: the menu marker arrives ~1000 frames after Mog
+                 * launch on a cold boot; if it ever fails to (unforeseen flow), land
+                 * wherever we are instead of burning the whole 20000-frame guard. */
+                if (!g_blt_busy_scope && ++post > 1500) break;
                 if ((++guard % 600) == 0) SDL_PumpEvents();   /* keep the window responsive */
             }
+            if (g_log) { fprintf(g_log, "SKIP-LAND menu=%d post=%d guard=%d\n",
+                                 g_menu_live, post, guard); fflush(g_log); }
             if (win) SDL_SetWindowTitle(win, g_wintitle);
             skip_intro = 0;
             g_av_attract_video = 0; g_av_drain = 0;   /* stay live post-skip (no tail drain) */
@@ -6146,6 +6176,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--diskdir")&&i+1<argc) { g_diskdir=argv[++i]; diskdir_set=1; }
         else if (!strcmp(argv[i],"--noautoswap")) g_autoswap=0;   /* disable seamless disk-swap */
         else if (!strcmp(argv[i],"--noswapskip")) g_swapskip=0;   /* show the (auto-confirmed) insert-disk prompt again */
+        else if (!strcmp(argv[i],"--noskipmenu")) g_skipmenu=0;   /* intro-skip lands at Mog launch again (loader black + title card shown) */
         else if (!strcmp(argv[i],"--noflopdelay")) g_dsk_fastwait=0; /* keep the real ~8s floppy motor/seek waits */
         else if (!strcmp(argv[i],"--skipat")&&i+1<argc) g_skipat=atoi(argv[++i]); /* diag: auto intro-skip at frame N */
         else if (!strcmp(argv[i],"--poke8")&&i+1<argc) {  /* diag: one-shot byte poke, F:A:V (A,V hex), repeatable */
