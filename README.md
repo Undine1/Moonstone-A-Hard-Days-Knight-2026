@@ -7,6 +7,21 @@ of a hand-written OCS chipset (blitter, copper, 4-channel Paula audio, trackdisk
 
 See [CHANGES.md](CHANGES.md) for everything this port changes vs. the original.
 
+## Original-game bugs fixed
+
+The port also corrects several defects present in the 1991 release itself, among them:
+
+- **The Moonstone-in-enemy crash** — a black knight looting the Moonstone corrupted the
+  inventory list and crashed the game on the next click.
+- **The two-troll / double-overhead-swing crash** — simultaneous screen-effect starts leaked
+  per-vblank task-list entries until the list overflowed (also froze the post-combat cursor).
+- **AI knights walking into the map edge** — the overland AI's fallback goal had no arrival
+  check, so a knight would overshoot his destination and grind against the map border all turn.
+
+Most of these ship with an off-switch restoring the faithful-original behaviour
+(`--notaskfix`, `--noedgewalkfix`, …) — the full list and details are in
+[CHANGES.md](CHANGES.md) §1.
+
 ## Layout
 
 | Path | What |

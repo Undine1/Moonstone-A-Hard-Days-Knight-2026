@@ -4,7 +4,7 @@ Native Windows port of *Moonstone: A Hard Days Knight* (Mindscape, 1991), runnin
 original 68000 game code on a from-scratch model of the Amiga's custom chips — no emulator,
 no Kickstart ROM. This document catalogs what the port changes relative to the original game.
 
-_Last updated: 2026-06-30 · build "Moonstone Reborn v1.0.0"._
+_Last updated: 2026-07-03 · build "Moonstone Reborn v1.0.0"._
 
 ---
 
@@ -12,7 +12,10 @@ _Last updated: 2026-06-30 · build "Moonstone Reborn v1.0.0"._
 
 Defects in the 1991 game itself that this port corrects.
 
-- **Random life-loss at day-end** — A dead/buggy type-4 "hazard" event (fires after all black knights die) sets the +0x82 "lose a life" flag, draining one life every day-end; the whole penalty body @0x264b8 is skipped and any stuck flag cleared @0x2171c. _(guard-fixed; pending hands-on playtest)_
+- **Random life-loss at day-end** — An undocumented "curse" mechanic (the type-4 hazard event sets a +0x82 flag; one life drained per day-end until a paid healer visit clears it) fires spuriously after the black knights die. The mechanic appears in no manual or playthrough of the original, so the port suppresses it: the penalty body @0x264b8 is skipped (exiting through the actor-scheduler's proper handler contract) and any stuck flag is cleared at the day-end dock @0x2171c.
+- **AI knight walks into the map edge and sticks** — The overland AI commits one straight-line trajectory per turn, but only its town-goal mode has an arrival check; a trajectory toward the *fallback* map-object goal never stops, so a knight overshoots a nearby goal and grinds against the map edge for his whole turn. The port adds the missing arrival: the knight stops at his computed goal (`--noedgewalkfix` restores the original behaviour).
+- **Canopy-choke haul flings the monkey off-screen** — The swamp monkey's canopy-choke haul launches it +150 px right *unconditionally*, so a right-side grab lands it off a 320-wide arena (off-screen choke loop, clipped stab animation, HP drain). The haul now swings inward toward the arena centre (`--nochokefix` restores it).
+- **AUD1 SFX cut short (stray DMACON write)** — The sound-start routine ends with a hard-coded `move.w #$2,DMACON` that kills AUD1's DMA on *every* voice start (a copy/paste slip — every other write in the routine is channel-indexed), chopping any one-shot SFX playing on AUD1; the stray instruction is skipped (`--noaud1fix` restores it).
 - **Moonstone-in-enemy crash** — A black knight loots the Moonstone, then clicking it walks a corrupt inventory list into a wild dereference; guarded by blocking a Moonstone loot to a non-player winner, plus `sndcode_guard` containment and a precise deref trap @0x2a1b8. _(contained + guarded; pending another playthrough)_
 - **Sound-engine code-write crash (blue-orb loot/equip)** — Hovering a blue orb over armor wrote a byte into the live sound-engine code, faulting on the next audio run; `sndcode_guard` drops any post-load store into the code region.
 - **Two-troll / double-overhead-swing crash + post-combat cursor freeze** — Simultaneous starts of one screen-effect leaked task-list entries until the 9-slot list overflowed; fixed with idempotent effect registration + effect-only removal that never deletes the cursor/menu handler (`g_tasklist_fix`).
