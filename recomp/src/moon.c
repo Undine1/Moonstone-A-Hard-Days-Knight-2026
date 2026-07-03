@@ -2842,6 +2842,15 @@ void moon_instr_hook(unsigned int pc) {
             g_ew_armed = 0;                                  /* assume chase/town branch until proven fallback */
         } else if (pc == 0x40bd6u && r16(pc) == 0x3628u) {   /* fallback-object branch (`move.w ($c,A0),D3`) */
             g_ew_armed = 1;
+        } else if (pc == 0x40bb0u && r16(pc) == 0x3629u) {   /* CHASE branch (`move.w ($80,A1),D3`): chase walks
+                                                              * overshoot exactly like fallback walks -- the AI
+                                                              * tick gates ALL proximity/attack checks off while a
+                                                              * trajectory is committed ([0x2fa1a] skip), so there
+                                                              * is NO mid-walk collision; a chasing knight marched
+                                                              * THROUGH the player (operator-observed 2026-07-03,
+                                                              * moonstone_zonevisit.sav).  Stop at the target's
+                                                              * committed position too. */
+            g_ew_armed = 1;
         } else if (g_ew_armed == 1 && pc == 0x40c14u && r16(pc) == 0x33c3u) {  /* param store (`move.w D3,$2fada`) */
             uint32_t rec = r32(0x2ebd0u);                    /* current actor */
             if (rec < RAM_SIZE) {
