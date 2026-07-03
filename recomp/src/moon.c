@@ -413,9 +413,16 @@ static inline uint16_t blt_r16(uint32_t a) {
     a &= (RAM_SIZE-1); return (uint16_t)((g_ram[a]<<8)|g_ram[a+1]);
 }
 static int sndcode_guard(uint32_t a, uint32_t v, int sz); /* fwd: sound-code write guard */
+static uint32_t g_watch;                                  /* fwd: --watch addr (blt_w16 logs too) */
 static inline void blt_w16(uint32_t a, uint16_t v) {
     a &= (RAM_SIZE-1);
     if (sndcode_guard(a, v, 2)) return;   /* drop a stray blit into live sound code */
+    if (g_watch && a >= (g_watch - 2) && a <= (g_watch + 4))   /* blitter writes bypassed the CPU
+                                                                * write-watch -- found the hard way
+                                                                * (town hotspot-table zeroing, 2026-07-03) */
+        fprintf(g_log ? g_log : stderr, "  BLT-WATCH16 @%06x <= %04x  BLTDPT=%06x BLTSIZE-ic=%llu\n",
+                a, v, (((uint32_t)g_custom[0x054>>1] << 16) | g_custom[0x056>>1]) & 0x1ffffe,
+                (unsigned long long)g_icount);
     g_ram[a]=(uint8_t)(v>>8); g_ram[a+1]=(uint8_t)v;
 }
 
@@ -3244,11 +3251,43 @@ void moon_instr_hook(unsigned int pc) {
      * 0x21aa4/0x1c7574 (`tst.w $3bf74` = 0x4a79). */
     if (g_os && (pc == 0x21a8cu || pc == 0x1c755cu) && r16(pc) == 0x3039u) {
         g_walk_live = g_cur_frame;          /* the pause gate is polling NOW (capture scope) */
-        if (g_pause_request && r16(0x3bf74u) == 0) { w16(0x3bf74u, 0x39); g_pause_request = 0; }
+        if (g_pause_request && r16(0x3bf74u) == 0) {
+            w16(0x3bf74u, 0x39); g_pause_request = 0;
+            if (g_log) { static int pn = 0; if (pn < 40) { pn++;
+                fprintf(g_log, "PAUSE-INJ gate pc=%06x fr=%d ic=%llu\n", pc, g_cur_frame, (unsigned long long)g_icount); fflush(g_log); } }
+        }
     }
     if (g_os && (pc == 0x21aa4u || pc == 0x1c7574u) && r16(pc) == 0x4a79u) {
         g_walk_live = g_cur_frame;          /* paused (busy-wait): keep the capture scope live */
-        if (g_pause_request) { w16(0x3bf74u, 0x39); g_pause_request = 0; }  /* release the wait */
+        if (g_pause_request) {
+            w16(0x3bf74u, 0x39); g_pause_request = 0;   /* release the wait */
+            if (g_log) { static int rn = 0; if (rn < 40) { rn++;
+                fprintf(g_log, "PAUSE-REL wait pc=%06x fr=%d ic=%llu\n", pc, g_cur_frame, (unsigned long long)g_icount); fflush(g_log); } }
+        }
+    }
+    /* TOWN-ACT tripwire (2026-07-03, town day-end hunt): log every town-menu action
+     * dispatch + the day-end timer write site, so the operator's next "left town but my
+     * turn is still active" occurrence names the dispatched action and whether the
+     * day-flow write ran.  The dispatch: town FSM fire handler reads [hotspot+0x10];
+     * hook the action handlers' entries (all five: 0x224e8 merchant / 0x224d2 tavern-ish
+     * / 0x22520 healer / 0x22504 temple / 0x223e4 EXIT).  Bounded, read-only. */
+    if (g_os && g_log && (pc == 0x223e4u || pc == 0x224e8u || pc == 0x224d2u
+                          || pc == 0x22504u || pc == 0x22520u)) {
+        static int tn = 0;
+        if (tn < 60) { tn++;
+            fprintf(g_log, "TOWN-ACT pc=%06x cursor=(%d,%d) timer=%04x/%04x fr=%d ic=%llu\n",
+                    pc, (int16_t)r16(0x392d4u), (int16_t)r16(0x392d6u),
+                    r16(0x2f9dcu), r16(0x2fa08u), g_cur_frame, (unsigned long long)g_icount);
+            fflush(g_log);
+        }
+    }
+    if (g_os && g_log && pc == 0x2182cu) {   /* the day-flow's timer:=max write site (healthy-exit trace) */
+        static int dn = 0;
+        if (dn < 60) { dn++;
+            fprintf(g_log, "DAYEND-WRITE pc=%06x timer=%04x->%04x fr=%d ic=%llu\n",
+                    pc, r16(0x2f9dcu), r16(0x2fa08u), g_cur_frame, (unsigned long long)g_icount);
+            fflush(g_log);
+        }
     }
     if (g_os && pc == 0x4024cu) {           /* overland-map keyboard poll */
         g_mappoll_hot = 1;                  /* the normal map turn-loop ran this frame (distinguishes it from the delivery overview) */
@@ -4621,6 +4660,21 @@ static void run_one_frame(void) {
     if (vertb_gate()) { g_custom[0x09c>>1] |= 0x0020; }  /* VERTB */
     update_ipl();
     audio_flush();   /* finish + emit one PAL frame of Paula audio to the host sink */
+    /* --watch frame-boundary POLL (2026-07-03): the write-watch instruments w8/w16/w32
+     * and blt_w16, yet a watched byte was seen changing with NO logged writer (the town
+     * hotspot-table zeroing) -- some path still bypasses the watch.  Poll the watched
+     * word once per frame and log transitions, so the guilty FRAME can be pinned even
+     * when the writer is invisible. */
+    if (g_watch && g_log) {
+        static uint32_t pw_last = 0xffffffffu;
+        uint32_t cur = r16(g_watch);
+        if (pw_last != 0xffffffffu && cur != pw_last) {
+            fprintf(g_log, "WATCH-POLL fr=%d @%06x %04x -> %04x ic=%llu\n",
+                    g_cur_frame, g_watch, pw_last, cur, (unsigned long long)g_icount);
+            fflush(g_log);
+        }
+        pw_last = cur;
+    }
 }
 
 #ifdef _WIN32
