@@ -2607,6 +2607,22 @@ static int16_t  g_ew_tx = 0, g_ew_ty = 0;   /* the armed trajectory's computed g
 static int      g_ew_xmajor = 0, g_ew_xsign = 0, g_ew_ysign = 0;  /* arrival = major-axis coordinate
                                        * crossing the goal plane (monotone per tick -- exact-pair equality
                                        * can be skipped by the Bresenham lattice, verified in the day-7 repro) */
+static int      g_chase_engage_fix = 1; /* ROOT FIX 2026-07-03 (original-game bug, chase saga pt.3): a knight
+                                       * who reaches the player never ATTACKS if he also has town business.
+                                       * The engage machinery exists and is per-tick fresh: the mover (0x400b2)
+                                       * rebuilds the touch queue [0x30138] every tick, and the arrival check
+                                       * (0x40c84) ends in 0x40ccc "chase target in my queue -> 0x21ab4 attack
+                                       * + end turn".  But 0x40c84 tests the TOWN goal [0x2fa1c] FIRST, and the
+                                       * per-tick intent ladder (0x40eee, gold-driven: rich knights shop, poor
+                                       * ones heal) re-arms that goal EVERY tick -- so for any knight with town
+                                       * intent the queue check is unreachable for the WHOLE chase even though
+                                       * his steering (0x40b7a, +0x64 chase priority) is marching at the player.
+                                       * He arrives and just stands there (post edge-walk stop; marched through
+                                       * pre-fix).  Fix: while a chase target is set, route arrival to the
+                                       * queue check -- chase walk, chase arrival.  Knight-vs-player contact
+                                       * launches the arena via 0x21ab4; AI-vs-AI pairs are filtered inside the
+                                       * handler itself (0x21afa), so no knight-vs-knight spam.
+                                       * --nochaseengagefix. */
 static int      g_choke_haul_fix = 1;  /* ROOT FIX 2026-07-01: the canopy-choke "haul to canopy" launch
                                        * (0x27278) builds the arc destination X as curX + 0x96 (+150) with an
                                        * UNCONDITIONAL rightward add (0x272a8 `addi.w #$96,(A0)+`) and no
@@ -2891,6 +2907,41 @@ void moon_instr_hook(unsigned int pc) {
                     : (g_ew_ysign > 0 ? y >= g_ew_ty : y <= g_ew_ty);
                 if (arrived) m68k_set_reg(M68K_REG_D0, 0);
             }
+        }
+    }
+    /* ===== CHASE-ARRIVAL ENGAGE FIX (see g_chase_engage_fix decl) ===== */
+    if (g_os && g_chase_engage_fix && pc == 0x40c84u && r16(pc) == 0x4ab9u) {  /* `tst.l $2fa1c` = arrival check */
+        uint32_t rec = r32(0x2ebd0u);
+        if (rec && rec < RAM_SIZE - 0x84u && r32(rec + 0x36u) == 4u) {   /* acting AI knight only */
+            uint32_t tgt = r32(rec + 0x64u);
+            if (tgt) {
+                /* Divert ONLY on the contact tick (target actually in the touch queue --
+                 * same 5-entry ptr scan 0x40d12 performs).  Non-contact ticks keep the
+                 * original flow bit-identically: town absorption, fallback-object stops
+                 * and every other arrival nuance stay exactly as shipped. */
+                uint32_t q; int inq = 0;
+                for (q = 0x30138u; q < 0x30160u; q += 8u) {
+                    if (!r32(q)) break;
+                    if (r32(q) == tgt) { inq = 1; break; }
+                }
+                if (inq) {
+                    m68k_set_reg(M68K_REG_PC, 0x40cccu);   /* contact: engage wins over town intent */
+                    if (g_log) { static int cq = 0; if (cq < 12) {
+                        fprintf(g_log, "CHASE-CONTACT actor=%06x tgt=%06x goal=%08lx ic=%llu\n",
+                                rec, tgt, (unsigned long)r32(0x2fa1cu), (unsigned long long)g_icount);
+                        fflush(g_log); cq++;
+                    } }
+                }
+            }
+        }
+    }
+    if (g_os && pc == 0x21ab4u && r16(pc) == 0x48e7u && g_log) {   /* encounter handler: who fights whom */
+        static int en = 0; if (en < 12) {
+            fprintf(g_log, "ENGAGE a0=%06lx a1=%06lx ic=%llu\n",
+                    (unsigned long)m68k_get_reg(NULL, M68K_REG_A0),
+                    (unsigned long)m68k_get_reg(NULL, M68K_REG_A1),
+                    (unsigned long long)g_icount);
+            fflush(g_log); en++;
         }
     }
     /* OPCODE-GUARDED (2026-07-02 audit): during the INTRO this address holds a different
@@ -5965,6 +6016,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--noaud1fix")) g_aud1_dmafix=0;            /* A/B: disable the AUD1 stray-DMACON-disable fix (0x4371c) */
         else if (!strcmp(argv[i],"--nochokefix")) g_choke_haul_fix=0;
         else if (!strcmp(argv[i],"--noedgewalkfix")) g_edgewalk_fix=0;   /* A/B: disable the overland AI fallback-goal arrival fix */
+        else if (!strcmp(argv[i],"--nochaseengagefix")) g_chase_engage_fix=0;   /* A/B: disable the chase-arrival engage fix */
         else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */

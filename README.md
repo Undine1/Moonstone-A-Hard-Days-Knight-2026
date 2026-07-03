@@ -17,6 +17,9 @@ The port also corrects several defects present in the 1991 release itself, among
   per-vblank task-list entries until the list overflowed (also froze the post-combat cursor).
 - **AI knights walking into the map edge** — the overland AI's fallback goal had no arrival
   check, so a knight would overshoot his destination and grind against the map border all turn.
+- **AI knights never attacking on contact** — a knight with town business (the AI's gold-driven
+  shopping/healing intent) had his per-tick attack check masked for the whole chase, so he'd
+  march straight onto the player — or right through him — without ever engaging.
 
 Most of these ship with an off-switch restoring the faithful-original behaviour
 (`--notaskfix`, `--noedgewalkfix`, …) — the full list and details are in
