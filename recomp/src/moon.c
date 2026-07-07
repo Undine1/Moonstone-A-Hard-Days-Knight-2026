@@ -2699,6 +2699,23 @@ static int      g_hide_parity_fix = 1; /* ROOT FIX 2026-07-03 (vanish-in-combat,
                                        * 0x213f2, lift 0x27dd4) keep the faithful EOR.  HIDEFIX log fires
                                        * only when the forced value differs from what the EOR would have
                                        * produced = an actual unpaired toggle caught live.  --nohidefix. */
+static int      g_dragon_fix = 1;    /* ROOT FIX 2026-07-07 (operator's "re-entered into another fight with the
+                                       * dragon, the dragon was not visible on the map"): the dragon-fight
+                                       * handler 0x22200 never clears the dragon-hunt flag [0x2fa0e] at its
+                                       * exits, so after a LOST fight the dragon stays armed at the contact
+                                       * spot but UNDRAWN (the flight handler [0x3717c+0x28] was uninstalled
+                                       * at fight entry; nothing re-registers the map sprite) -- the per-step
+                                       * contact test 0x21fb0 then re-launches fights against an invisible
+                                       * dragon (reproduced: the respawn landing inside the box re-fought
+                                       * INSTANTLY).  The handler skeleton incl. the do-nothing loss exit is
+                                       * in the shipped mog module (file 0x12fe), but the operator only
+                                       * started seeing it after the RNG entropy fix un-froze the dragon's
+                                       * random target pick -- likely newly-common exposure.  FIX (per
+                                       * operator: "it should just return to flight"): clear [0x2fa0e] at the
+                                       * fight exits (the same stand-down the map rebuild 0x21d9e does on
+                                       * other scene paths); the map-enter check 0x40554 then re-arms a fresh
+                                       * VISIBLE flight for a surviving dragon, and a killed one stays
+                                       * retired (lives=0xff gates the re-arm).  --nodragonfix reverts. */
 static int      g_pounce_latch_fix = 1; /* ROOT FIX 2026-07-03 (original-game bug, the operator's "monkey idles
                                        * embedded in my body and flickers" combat glitch): the swamp-monster
                                        * contact handler (0x27476) resolves a touch by the monster's +0x68
@@ -3060,6 +3077,32 @@ void moon_instr_hook(unsigned int pc) {
                     fflush(g_log); pl++;
                 } }
             }
+        }
+    }
+    /* ===== DRAGON RETURN-TO-FLIGHT FIX (see g_dragon_fix decl) =====
+     * The dragon-fight handler (0x22200) exits via `bra $228cc` on BOTH outcomes
+     * without clearing the dragon-hunt flag [0x2fa0e].  After a LOST fight that
+     * leaves an armed, UNDRAWN dragon parked at the contact spot (its flight
+     * handler was uninstalled at fight entry, nothing re-registers its map
+     * sprite): the per-step contact test (0x21fb0, gated on the flag) re-launches
+     * the fight against an invisible dragon -- reproduced from the operator's
+     * save 3 (respawn inside the box = instant re-fight).  The flag only cleared
+     * when some OTHER scene rebuild ran 0x21d7a's clear (0x21d9e).  Fix: do the
+     * game's own stand-down at the fight exit -- clear the flag.  The map-enter
+     * check (0x40554) then re-arms a FRESH flight next time the map loads, so a
+     * surviving dragon RETURNS TO FLIGHT, visibly (verified rendering); a killed
+     * dragon stays retired (lives 0xff gates the re-arm at 0x40628).  The exits
+     * are `bra.w $228cc`: 0x2222a disp 0x6a0 (loss), 0x2224e disp 0x67c (win). */
+    if (g_os && g_dragon_fix &&
+        ((pc == 0x2222au && r32(pc) == 0x600006a0u) ||
+         (pc == 0x2224eu && r32(pc) == 0x6000067cu))) {
+        if (r16(0x2fa0eu)) {
+            w16(0x2fa0eu, 0);
+            if (g_log) { static int dn = 0; if (dn < 12) {
+                fprintf(g_log, "DRAGON-STANDDOWN %s fr=%d ic=%llu (hunt flag cleared at fight exit)\n",
+                        pc == 0x2222au ? "loss" : "win", g_cur_frame, (unsigned long long)g_icount);
+                fflush(g_log); dn++;
+            } }
         }
     }
     /* ===== TOWN-EXIT DAY-END FIX (see g_dayend_fix decl) ===== */
@@ -6273,6 +6316,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nodayendfix")) g_dayend_fix=0;   /* A/B: disable the town-exit day-end fix */
         else if (!strcmp(argv[i],"--nohidefix")) g_hide_parity_fix=0;   /* A/B: disable the combat hide-parity (vanish) fix */
         else if (!strcmp(argv[i],"--nopouncefix")) g_pounce_latch_fix=0;   /* A/B: disable the point-blank pounce latch fix */
+        else if (!strcmp(argv[i],"--nodragonfix")) g_dragon_fix=0;   /* A/B: disable the dragon return-to-flight stand-down */
         else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
