@@ -2963,6 +2963,30 @@ static void apply_retail_parity(void) {
     } }
 }
 
+/* Host-side replica of the game's RNG (0x2b2b0): 8 rounds of ror/eor/roxr over
+ * the seed [0x391a8], with the roxr X-flag chained across rounds (the entry X
+ * comes from the live CPU flags, exactly as a guest call would see it).  Used
+ * by parity hooks that need EXTRA draws retail makes and cracked doesn't --
+ * reading and advancing the game's own seed keeps headless runs deterministic. */
+static uint32_t parity_rng(void) {
+    uint32_t d0 = r32(0x391a8u), d1;
+    int x = ((int)m68k_get_reg(NULL, M68K_REG_SR) >> 4) & 1;
+    for (int i = 0; i < 8; i++) {
+        d1 = ((d0 >> 3) | (d0 << 29)) ^ d0;      /* ror.l #3 ^ d0 */
+        for (int k = 0; k < 2; k++) {             /* roxr.l #2, d1 */
+            int nx = (int)(d1 & 1u);
+            d1 = (d1 >> 1) | ((uint32_t)x << 31); x = nx;
+        }
+        {                                          /* roxr.l #1, d0 */
+            int nx = (int)(d0 & 1u);
+            d0 = (d0 >> 1) | ((uint32_t)x << 31); x = nx;
+        }
+    }
+    w32(0x391a8u, d0);
+    return d0;
+}
+static int g_ko_latch = 0;   /* B3: retail's "fighter is down" latch (host-side twin of retail's h1 var) */
+
 void moon_instr_hook(unsigned int pc) {
     /* Retail-parity data/same-size-code patches: re-assert periodically so a fresh
      * mog overlay (scene transition) gets re-patched within a few k instructions.
@@ -3402,6 +3426,51 @@ void moon_instr_hook(unsigned int pc) {
         && r16(0x21bf8u) == 0x6100u && r16(0x21bfau) == 0xf914u) {
         uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0);
         if (a0 && a0 < RAM_SIZE - 0x84u) w32(a0 + 0x64u, 0);
+    }
+    /* B8  wander-destination pick (0x40906): cracked re-rolls the RNG until the
+     *     &3 result is nonzero (uniform 1..3 over the 3 nearest map nodes); retail
+     *     maps a 0 roll to 1 (nearest node picked ~half the time).  Emulate
+     *     retail's `bne +2; moveq #1,d0` at the cracked re-roll branch. */
+    if (g_os && g_retail_parity && pc == 0x40916u && r16(0x40916u) == 0x67f4u) {
+        if ((m68k_get_reg(NULL, M68K_REG_D0) & 3u) == 0) {
+            m68k_set_reg(M68K_REG_D0, 1u);
+            m68k_set_reg(M68K_REG_PC, 0x40918u);   /* skip the beq re-roll */
+        }
+    }
+    /* B9  quest-object placement (new-game init, 4 marked objects over 4 groups of
+     *     6 map nodes): cracked rolls ONE column (uniform 0..5 by rejection) and
+     *     reuses it for all four groups -- correlated placement; retail re-rolls
+     *     per group.  Re-roll d0 at the 2nd/3rd/4th picks with the game's own RNG
+     *     (host replica, same seed/rejection), scaled by the cracked row stride. */
+    if (g_os && g_retail_parity
+        && (pc == 0x25e6eu || pc == 0x25e7eu || pc == 0x25e8eu)
+        && r16(pc) == 0x2270u && r16(pc + 2u) == 0x0800u) {
+        uint32_t roll;
+        do { roll = parity_rng() & 7u; } while (roll > 5u);
+        m68k_set_reg(M68K_REG_D0, roll * 0x14u);   /* the picks index by col*stride */
+        if (g_log) { static int qn = 0; if (qn < 8) {
+            fprintf(g_log, "QUEST-REROLL site=%06x col=%u fr=%d\n", pc, roll, g_cur_frame);
+            fflush(g_log); qn++; } }
+    }
+    /* B3  KO-latch: retail latches "this fighter is down" when the KO path runs,
+     *     tests the latch before applying further hit damage/animation (writing
+     *     the -1 no-anim sentinel and exiting instead), and clears it at combat
+     *     setup.  Cracked has no latch, so post-KO hits still process.  The latch
+     *     lives host-side; the three sites mirror retail's. */
+    if (g_os && g_retail_parity) {
+        if (pc == 0x2173cu && r16(0x2173cu) == 0x4279u)      /* combat scene setup */
+            g_ko_latch = 0;
+        if (pc == 0x2670eu && r16(0x2670eu) == 0x2069u && r16(0x26710u) == 0x0012u)
+            g_ko_latch = 1;                                   /* KO/death path entered */
+        if (g_ko_latch && pc == 0x26b8cu
+            && r16(0x26b8cu) == 0x4eb9u && r32(0x26b8eu) == 0x000269a8u) {
+            w32(0x2eaf8u, 0xffffffffu);                       /* -1 anim sentinel (retail) */
+            m68k_set_reg(M68K_REG_PC, 0x27ec8u);              /* the block's common exit */
+            if (g_log) { static int kn = 0; if (kn < 8) {
+                fprintf(g_log, "KO-LATCH suppressed post-KO hit fr=%d ic=%llu\n",
+                        g_cur_frame, (unsigned long long)g_icount);
+                fflush(g_log); kn++; } }
+        }
     }
     /* B7  AI dragon-scroll auto-use: retail's per-tick AI chain has a stage the
      *     cracked build carries as DEAD CODE (0x40dec, zero references): a knight
