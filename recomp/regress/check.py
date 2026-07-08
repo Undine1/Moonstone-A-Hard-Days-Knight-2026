@@ -44,8 +44,12 @@ if not os.path.isdir(args.data):
 tmp = tempfile.mkdtemp(prefix="moonregress_")
 
 def run(extra):
+    # --noretailparity: these goldens are the CRACKED-baseline fingerprints.  Retail
+    # parity is a new default-on layer whose own goldens are re-baselined separately
+    # (task #5); running it off here keeps this harness a valid "cracked base
+    # unchanged" regression net while the parity port is in progress.
     cmd = [args.exe, "--mod", os.path.join(args.data, "nb"),
-           "--diskdir", args.data, "--dataset", args.data,
+           "--diskdir", args.data, "--dataset", args.data, "--noretailparity",
            "--log", os.path.join(tmp, "engine.log")] + extra
     return subprocess.run(cmd, capture_output=True, text=True)
 

@@ -2841,7 +2841,80 @@ static void dump_derail(const char *why, unsigned pc, int force) {
     fprintf(g_log, "\n"); fflush(g_log);
 }
 
+/* ===================== RETAIL PARITY (data + same-size code) =====================
+ * Bring the cracked runtime's DATA and same-size code bytes up to the SPS-retail
+ * build's VALUES so the port plays the developers' intended (retail) game.  Each
+ * entry is applied to g_ram in place and memcmp-guarded on the cracked "before"
+ * bytes, so it is idempotent, self-healing across mog reloads, and inert on
+ * retail/unknown data or before the gameplay mog is resident.  Size-CHANGING
+ * retail edits (inserted logic) are handled as PC hooks in moon_instr_hook, not
+ * here.  Full derivation: extracted/LEDGER_DRAFT.md (A/B items).  The master gate
+ * is g_retail_parity (--noretailparity), which also preserves the cracked-
+ * baseline regression goldens (harness runs with the flag off). */
+static int g_retail_parity = 1;
+struct parity_patch { uint32_t addr; uint8_t len; uint8_t before[8]; uint8_t after[8]; const char *tag; };
+static const struct parity_patch g_parity_tab[] = {
+    /* A2  encounter/queue lives test: retail `ble` excludes dead/retired (0xff = -1)
+     *     knights that cracked `beq` (==0 only) let through.  opcode 0x67->0x6f, keep
+     *     cracked's own branch displacement. */
+    { 0x21adcu, 4, {0x67,0x00,0x00,0xb2}, {0x6f,0x00,0x00,0xb2}, "encounter-lives-ble" },
+    /* B1  stat-gain roll: retail succeeds on (roll+bonus) <= 50, cracked on >= 50
+     *     (blt->bgt; same disp).  Mechanism = the post-fight stat-increment gate;
+     *     byte-change certain, "stat-gain" naming is the strong hypothesis. */
+    { 0x2adaeu, 2, {0x6d,0x04}, {0x6e,0x04}, "statroll-le" },
+    /* B (selection cmp #5): retail `bge` where cracked `beq` (0x67->0x6c, same disp). */
+    { 0x2ddaeu, 2, {0x67,0x08}, {0x6c,0x08}, "sel-cmp5-bge" },
+    /* B11 demon close-range action-state duration timer: 6 -> 9 ticks. */
+    { 0x4207cu, 6, {0x11,0x7c,0x00,0x06,0x00,0x6a}, {0x11,0x7c,0x00,0x09,0x00,0x6a}, "demon-timer-9" },
+    /* B11 demon aggression threshold table (8 entries) retuned 70/60/50/40/30/20/15/10
+     *     -> 50/40/30/30/20/10/8/6.  Pairs with the andi #7 index-mask hook (A6). */
+    { 0x392b4u, 8, {0x46,0x3c,0x32,0x28,0x1e,0x14,0x0f,0x0a}, {0x32,0x28,0x1e,0x1e,0x14,0x0a,0x08,0x06}, "demon-aggr-table" },
+    /* B18 animation-descriptor constant 0xd0 -> 0xcc (17 sites; retail data revision). */
+    { 0x31322u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x318aeu, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x3193eu, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x31c34u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x31daau, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x32016u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x32604u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x32696u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x327a0u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x3294cu, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x32b1cu, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x33824u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x33908u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x33bccu, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x34124u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x341a6u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    { 0x36ecau, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+};
+static void apply_retail_parity(void) {
+    if (!g_retail_parity || g_lineage != LIN_CRACKED) return;
+    /* gameplay mog resident? (knife-loop signature -- all mog hunks load as a unit) */
+    if (r16(0x41106u) != 0x0628u) return;
+    unsigned n = (unsigned)(sizeof(g_parity_tab)/sizeof(g_parity_tab[0])), applied = 0;
+    for (unsigned i = 0; i < n; i++) {
+        const struct parity_patch *p = &g_parity_tab[i];
+        int hit = 1;
+        for (unsigned k = 0; k < p->len; k++)
+            if (g_ram[(p->addr + k) & (RAM_SIZE-1)] != p->before[k]) { hit = 0; break; }
+        if (!hit) continue;
+        for (unsigned k = 0; k < p->len; k++)
+            g_ram[(p->addr + k) & (RAM_SIZE-1)] = p->after[k];
+        applied++;
+    }
+    if (applied && g_log) { static unsigned last = 0; if (applied != last) {
+        fprintf(g_log, "RETAIL-PARITY applied %u/%u data patches ic=%llu\n",
+                applied, n, (unsigned long long)g_icount);
+        fflush(g_log); last = applied;
+    } }
+}
+
 void moon_instr_hook(unsigned int pc) {
+    /* Retail-parity data/same-size-code patches: re-assert periodically so a fresh
+     * mog overlay (scene transition) gets re-patched within a few k instructions.
+     * Guarded per-entry, so this is idempotent and inert off the cracked build. */
+    if (g_os && (g_icount & 0x1fffu) == 0) apply_retail_parity();
     /* record recent PCs (derail forensics), but SKIP the line-245 raster-wait spin
      * (0x3fe12..0x3fe26) so the ring shows the surrounding loop, not just the wait. */
     if (pc < 0x3fe12u || pc > 0x3fe26u) { g_pcring[g_pcring_i & 127] = pc; g_pcring_i++; }
@@ -6421,6 +6494,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nopouncefix")) g_pounce_latch_fix=0;   /* A/B: disable the point-blank pounce latch fix */
         else if (!strcmp(argv[i],"--nodragonfix")) g_dragon_fix=0;   /* A/B: disable the dragon return-to-flight stand-down */
         else if (!strcmp(argv[i],"--nogoldfix")) g_gold_fix=0;   /* A/B: restore the cracked-build knife-restock gold corruption */
+        else if (!strcmp(argv[i],"--noretailparity")) g_retail_parity=0;   /* A/B: disable the retail-parity data/code patches (keeps the cracked-baseline behaviour + goldens) */
         else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
