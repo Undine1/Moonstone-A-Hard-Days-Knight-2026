@@ -2814,6 +2814,24 @@ static int      g_invmenu_fix = 1;   /* ROOT FIX 2026-07-08 (task #11, the moons
                                        * are untouched (verified: token steal-back flow byte-identical).
                                        * --noinvmenufix reverts both layers for A/B. */
 static int      g_invwalk_len = 0;   /* entries visited in the current label walk (reset at the walker entry) */
+static int      g_stackcap_fix = 1;  /* QoL FIX 2026-07-09 (operator 2026-07-03: "an item can be held beyond what
+                                       * the inventory screen can display... cap stacks at their intended size as
+                                       * shown in the inventory screen"): every acquisition path adds item counts
+                                       * with plain uncapped `addi.b`/adds (the dead-loser loot merge 0x215b0
+                                       * even WRAPS at 255), while the panel renderers clamp what they SHOW --
+                                       * heal potion/gem/talisman 4 (`cmp #4/ble/moveq #4`), ring 3, scroll rows
+                                       * at most 2 sprites (0x2c7f8: >=3 -> moveq #2).  Cap at the ACQUISITION
+                                       * sites (merge, screen-take, temple buy) to the UI limits; sword count
+                                       * (+4), keys/tokens (bit fields) and knives (rec+0x4c, already capped 10
+                                       * by the retail loop) untouched.  NOT a scrub -- existing over-stacks are
+                                       * left alone, they just can't grow.  --nostackcap reverts. */
+static int      g_gamble_cap = 1;    /* QoL FIX 2026-07-09 (operator 2026-07-03: "gambling lets gold grow past
+                                       * the game's intended limit"): the game's gold cap is 150 -- the loot
+                                       * gold-click loop stops at ==150 (0x2d264) and the temple-sell path
+                                       * clamps at 150 (0x2d492) -- but the tavern payout (0x2b84e: winnings =
+                                       * stake x combo multiplier, `add.w D0,($4a,A0)`) has NO cap.  The stake
+                                       * deduction is fine (affordability-checked at 0x2b6c4, cannot go
+                                       * negative).  Clamp the payout add at 150.  --nogamblecap reverts. */
 static int      g_pounce_latch_fix = 1; /* ROOT FIX 2026-07-03 (original-game bug, the operator's "monkey idles
                                        * embedded in my body and flickers" combat glitch): the swamp-monster
                                        * contact handler (0x27476) resolves a touch by the monster's +0x68
@@ -3875,6 +3893,91 @@ void moon_instr_hook(unsigned int pc) {
                         badp ? "bad-ptr" : "cap", e, g_invwalk_len,
                         (unsigned long long)g_icount); fflush(g_log); wn++; } }
             g_invwalk_len = 0;
+            return;
+        }
+    }
+    /* ===== ITEM STACK CAPS (see g_stackcap_fix decl) ===== caps by items-struct offset:
+     * 0x00 heal potion 4, 0x02 gem 4, 0x06 ring 3, 0x08 talisman 4, 0x0a-0x12 scrolls 2;
+     * 0 = uncapped (0x04 sword count, 0x14/0x16 key/token bit fields). */
+#define STACK_CAP(off) ((off)==0x00u||(off)==0x02u||(off)==0x08u ? 4 : (off)==0x06u ? 3 : \
+                        ((off)>=0x0au&&(off)<=0x12u) ? 2 : 0)
+    /* (1) dead-loser loot merge byte-add (0x215b0 `move.b (A2,D0.w),D1`; + add.b, move.b, then
+     *     clr.w loser at 0x215bc).  Emulate the sum with the cap, resume at the loser-clear. */
+    if (g_os && g_stackcap_fix && pc == 0x215b0u && r16(pc) == 0x1232u) {
+        uint32_t a2 = m68k_get_reg(NULL, M68K_REG_A2), a3 = m68k_get_reg(NULL, M68K_REG_A3);
+        uint16_t off = (uint16_t)m68k_get_reg(NULL, M68K_REG_D0);
+        int cap = STACK_CAP(off);
+        if (cap && a2 < RAM_SIZE && a3 < RAM_SIZE) {
+            unsigned tot = g_ram[(a2+off)&(RAM_SIZE-1)] + g_ram[(a3+off)&(RAM_SIZE-1)];
+            if ((int)tot > cap) {
+                if (g_log) { static int sn = 0; if (sn < 24) {
+                    fprintf(g_log, "STACK-CAP merge off=%x %u->%d ic=%llu\n", off, tot, cap,
+                            (unsigned long long)g_icount); fflush(g_log); sn++; } }
+                tot = (unsigned)cap;
+            }
+            g_ram[(a3+off)&(RAM_SIZE-1)] = (uint8_t)tot;
+            m68k_set_reg(M68K_REG_PC, 0x215bcu);       /* game clears the loser slot + loops */
+            return;
+        }
+    }
+    /* (2) alive-loser single-item take (0x21552 `subi.b #1,(A2,D0.w)` / addi.b winner):
+     *     winner already at cap -> skip the transfer (loser keeps the item). */
+    if (g_os && g_stackcap_fix && pc == 0x21552u && r16(pc) == 0x0432u) {
+        uint32_t a3 = m68k_get_reg(NULL, M68K_REG_A3);
+        uint16_t off = (uint16_t)m68k_get_reg(NULL, M68K_REG_D0);
+        int cap = STACK_CAP(off);
+        if (cap && a3 < RAM_SIZE && g_ram[(a3+off)&(RAM_SIZE-1)] >= (uint8_t)cap) {
+            m68k_set_reg(M68K_REG_PC, 0x2155eu);
+            if (g_log) { static int sn = 0; if (sn < 24) {
+                fprintf(g_log, "STACK-CAP alive-take off=%x at cap %d ic=%llu\n", off, cap,
+                        (unsigned long long)g_icount); fflush(g_log); sn++; } }
+            return;
+        }
+    }
+    /* (3) loot/steal-screen counted take (0x2d060 `subi.b #1,(A1,D1.w)` viewed-- / addi.b player++
+     *     at 0x2d066): player at cap -> skip both (click becomes a no-op, screen re-renders). */
+    if (g_os && g_stackcap_fix && pc == 0x2d060u && r16(pc) == 0x0431u) {
+        uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0);
+        uint16_t off = (uint16_t)m68k_get_reg(NULL, M68K_REG_D1);
+        int cap = STACK_CAP(off);
+        if (cap && a0 < RAM_SIZE && g_ram[(a0+off)&(RAM_SIZE-1)] >= (uint8_t)cap) {
+            m68k_set_reg(M68K_REG_PC, 0x2d06cu);
+            if (g_log) { static int sn = 0; if (sn < 24) {
+                fprintf(g_log, "STACK-CAP take off=%x at cap %d ic=%llu\n", off, cap,
+                        (unsigned long long)g_icount); fflush(g_log); sn++; } }
+            return;
+        }
+    }
+    /* (4) temple buy (0x2d41a `move.w (A3,D1.w),D0` price load, BEFORE the gold deduction at
+     *     0x2d424): player at cap -> reject the purchase outright (no payment).  Bit items
+     *     (keys 0x14 / tokens 0x16) pass through to their own or.b path untouched. */
+    if (g_os && g_stackcap_fix && pc == 0x2d41au && r16(pc) == 0x3033u) {
+        uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0);
+        uint16_t off = (uint16_t)m68k_get_reg(NULL, M68K_REG_D1);
+        int cap = STACK_CAP(off);
+        if (cap && a0 < RAM_SIZE && g_ram[(a0+off)&(RAM_SIZE-1)] >= (uint8_t)cap) {
+            m68k_set_reg(M68K_REG_PC, 0x2d45au);       /* the handler's rts */
+            if (g_log) { static int sn = 0; if (sn < 24) {
+                fprintf(g_log, "STACK-CAP buy off=%x at cap %d ic=%llu\n", off, cap,
+                        (unsigned long long)g_icount); fflush(g_log); sn++; } }
+            return;
+        }
+    }
+    /* ===== TAVERN PAYOUT GOLD CAP (see g_gamble_cap decl): 0x2b84e `add.w D0,($4a,A0)` ===== */
+    if (g_os && g_gamble_cap && pc == 0x2b84eu && r16(pc) == 0xd168u && r16(pc+2u) == 0x004au) {
+        uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0);
+        if (a0 < RAM_SIZE - 0x4cu) {
+            int32_t gold = (int16_t)r16(a0 + 0x4au);
+            int32_t win  = (int16_t)(uint16_t)m68k_get_reg(NULL, M68K_REG_D0);
+            int32_t tot  = gold + win;
+            if (tot > 150) {
+                if (g_log) { static int gn = 0; if (gn < 24) {
+                    fprintf(g_log, "GAMBLE-CAP %d+%d -> 150 ic=%llu\n", gold, win,
+                            (unsigned long long)g_icount); fflush(g_log); gn++; } }
+                tot = 150;
+            }
+            w16(a0 + 0x4au, (uint16_t)tot);
+            m68k_set_reg(M68K_REG_PC, 0x2b852u);       /* skip the uncapped add */
             return;
         }
     }
@@ -7025,6 +7128,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nopouncefix")) g_pounce_latch_fix=0;   /* A/B: disable the point-blank pounce latch fix */
         else if (!strcmp(argv[i],"--nodragonfix")) g_dragon_fix=0;   /* A/B: disable the dragon return-to-flight stand-down */
         else if (!strcmp(argv[i],"--noinvmenufix")) g_invmenu_fix=0; /* A/B: disable garbage-item-id skip + label-walk hardening */
+        else if (!strcmp(argv[i],"--nostackcap")) g_stackcap_fix=0;  /* A/B: disable item stack caps at acquisition sites */
+        else if (!strcmp(argv[i],"--nogamblecap")) g_gamble_cap=0;   /* A/B: disable the tavern payout 150-gold clamp */
         else if (!strcmp(argv[i],"--nogoldfix")) g_gold_fix=0;   /* A/B: restore the cracked-build knife-restock gold corruption */
         else if (!strcmp(argv[i],"--noretailparity")) g_retail_parity=0;   /* A/B: disable the retail-parity data/code patches (keeps the cracked-baseline behaviour + goldens) */
         else if (!strcmp(argv[i],"--noretailsfx")) g_retail_sfx=0;   /* A/B: disable the B15 retail UI-feedback-sound sites (parity stays otherwise on) */
