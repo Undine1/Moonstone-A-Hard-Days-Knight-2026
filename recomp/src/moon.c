@@ -2896,6 +2896,22 @@ static const struct parity_patch g_parity_tab[] = {
      *     (`clr.l $64(a0)` at 0x40e18), which retail does not -- NOP it so the
      *     diverted stage matches retail exactly.  Dead code without the hook. */
     { 0x40e18u, 4, {0x42,0xa8,0x00,0x64}, {0x4e,0x71,0x4e,0x71}, "scroll-keepchase" },
+    /* B6  healer-temple affordability rung: cracked heals only when gold > 25 at
+     *     price 25; retail gold > 15 at price 15 (lives <= 2 in both).  Two
+     *     same-size immediates in the intent ladder's heal rung. */
+    { 0x40f0au, 6, {0x0c,0x68,0x00,0x19,0x00,0x4a}, {0x0c,0x68,0x00,0x0f,0x00,0x4a}, "heal-gate-15" },
+    { 0x40f1cu, 4, {0x33,0xfc,0x00,0x19}, {0x33,0xfc,0x00,0x0f}, "heal-price-15" },
+    /* A-list/re-eval: the AI knife-restock loop's two broken size suffixes patched
+     *     to RETAIL'S OWN opcodes (cmpi.w->cmpi.b on the 10-knife cap; subi.b->
+     *     subi.w on the 2-gold payment) -- the game now runs retail's correct loop
+     *     natively.  g_gold_fix's byte-guard sees the repaired bytes and goes
+     *     inert automatically (kept as belt-and-braces for parity-off runs). */
+    { 0x41114u, 6, {0x0c,0x68,0x00,0x0a,0x00,0x4c}, {0x0c,0x28,0x00,0x0a,0x00,0x4c}, "knife-cap-byte" },
+    { 0x4111cu, 6, {0x04,0x28,0x00,0x02,0x00,0x4a}, {0x04,0x68,0x00,0x02,0x00,0x4a}, "knife-pay-word" },
+    /* B14 loot enumerator, high-weapon presentation: cracked clamps the displayed
+     *     weapon id to 0x19; retail shows it unclamped (the ==0x19 special case is
+     *     the B14 PC hook).  Force the clamp branch always-taken (ble -> bra). */
+    { 0x2c3b0u, 2, {0x6f,0x06}, {0x60,0x06}, "loot-weapon-noclamp" },
     /* B11 demon close-range action-state duration timer: 6 -> 9 ticks. */
     { 0x4207cu, 6, {0x11,0x7c,0x00,0x06,0x00,0x6a}, {0x11,0x7c,0x00,0x09,0x00,0x6a}, "demon-timer-9" },
     /* B11 demon aggression threshold table (8 entries) retuned 70/60/50/40/30/20/15/10
@@ -3426,6 +3442,18 @@ void moon_instr_hook(unsigned int pc) {
         && r16(0x21bf8u) == 0x6100u && r16(0x21bfau) == 0xf914u) {
         uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0);
         if (a0 && a0 < RAM_SIZE - 0x84u) w32(a0 + 0x64u, 0);
+    }
+    /* B14 loot enumerator, retail's best-weapon special case: when the corpse's
+     *     weapon id is 0x19 retail lists it as count=1/kind=4 instead of the
+     *     generic count=2/kind=$58 entry (which cracked always writes just before
+     *     this jsr).  Override the two h1 vars after cracked's writes; d0 still
+     *     holds the (unclamped, see 'loot-weapon-noclamp') weapon id here. */
+    if (g_os && g_retail_parity && pc == 0x2c3fau
+        && r16(0x2c3fau) == 0x4eb9u && r32(0x2c3fcu) == 0x0002c85eu) {
+        if (m68k_get_reg(NULL, M68K_REG_D0) == 0x19u) {
+            w16(0x2faf6u, 1);       /* count */
+            w16(0x2fafcu, 4);       /* kind */
+        }
     }
     /* A10 cursor-handler install dedup (0x2d5de): retail guards its handler-list
      *     appends against double-install (an already-there check + a dedup call
