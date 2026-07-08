@@ -2699,6 +2699,14 @@ static int      g_hide_parity_fix = 1; /* ROOT FIX 2026-07-03 (vanish-in-combat,
                                        * 0x213f2, lift 0x27dd4) keep the faithful EOR.  HIDEFIX log fires
                                        * only when the forced value differs from what the EOR would have
                                        * produced = an actual unpaired toggle caught live.  --nohidefix. */
+static int      g_gold_fix = 1;      /* CRACKED-BUILD REPAIR 2026-07-08 (the "blank knight gold / click gives 150"
+                                       * bug): the circulating cracked ADFs carry an earlier mog build whose AI
+                                       * knife-restock loop nukes the knight's gold word (-512/knife via a byte-
+                                       * wide subtract) and whose 10-knife cap never fires (word compare on a
+                                       * byte field).  Verified against the operator's SPS-retail IPFs: retail
+                                       * has the correct word-pay + byte-cap.  The hook (0x41106) emulates the
+                                       * retail transaction; byte-guarded on the broken build so it is inert on
+                                       * retail/unknown data.  --nogoldfix restores the corruption for A/B. */
 static int      g_dragon_fix = 1;    /* ROOT FIX 2026-07-07 (operator's "re-entered into another fight with the
                                        * dragon, the dragon was not visible on the map"): the dragon-fight
                                        * handler 0x22200 never clears the dragon-hunt flag [0x2fa0e] at its
@@ -3102,6 +3110,42 @@ void moon_instr_hook(unsigned int pc) {
                 fprintf(g_log, "DRAGON-STANDDOWN %s fr=%d ic=%llu (hunt flag cleared at fight exit)\n",
                         pc == 0x2222au ? "loss" : "win", g_cur_frame, (unsigned long long)g_icount);
                 fflush(g_log); dn++;
+            } }
+        }
+    }
+    /* ===== AI KNIFE-RESTOCK GOLD FIX (cracked/pre-release build only) =====
+     * The circulating cracked ADFs carry an EARLIER build of mog whose AI
+     * knife-restock loop (town shop, kind-0x4c applier) pays for each extra
+     * throwing knife with `subi.b #2,($4a,A0)` -- a byte subtract landing on
+     * the HIGH byte of the 16-bit gold field = -512 gold per knife -- and its
+     * 10-knife cap is a dead `cmpi.w` on the byte field.  The SPS-retail build
+     * has the correct `subi.w` / `cmpi.b` (verified against the operator's
+     * preservation IPFs; the retail loop lives at 0x40d24 and needs no help).
+     * Emulate the retail transaction at the loop entry: grant knives at 2 gold
+     * each (word-wide), stop under 2 gold or at 10 knives, land on the loop's
+     * own rts.  Guarded on the BROKEN build's exact bytes (entry addi.b AND
+     * the broken subi.b), so any other lineage leaves this hook inert. */
+    if (g_os && g_gold_fix && pc == 0x41106u
+        && r16(0x41106u) == 0x0628u && r16(0x41108u) == 0x0001u && r16(0x4110au) == 0x004cu
+        && r16(0x4111cu) == 0x0428u && r16(0x4111eu) == 0x0002u && r16(0x41120u) == 0x004au) {
+        uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0);
+        if (a0 < RAM_SIZE - 0x84u) {
+            uint8_t knives0 = g_ram[a0 + 0x4cu];
+            int16_t gold0 = (int16_t)r16(a0 + 0x4au);
+            uint8_t knives = knives0;
+            int16_t gold = gold0;
+            for (;;) {
+                knives++;
+                if (gold < 2 || knives == 10) break;
+                gold = (int16_t)(gold - 2);
+            }
+            g_ram[a0 + 0x4cu] = knives;
+            w16(a0 + 0x4au, (uint16_t)gold);
+            m68k_set_reg(M68K_REG_PC, 0x41124u);   /* the loop's own rts */
+            if (g_log) { static int gn = 0; if (gn < 12) {
+                fprintf(g_log, "GOLDFIX knight=%06x gold %d->%d knives %d->%d fr=%d ic=%llu\n",
+                        a0, gold0, gold, knives0, knives, g_cur_frame, (unsigned long long)g_icount);
+                fflush(g_log); gn++;
             } }
         }
     }
@@ -6317,6 +6361,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nohidefix")) g_hide_parity_fix=0;   /* A/B: disable the combat hide-parity (vanish) fix */
         else if (!strcmp(argv[i],"--nopouncefix")) g_pounce_latch_fix=0;   /* A/B: disable the point-blank pounce latch fix */
         else if (!strcmp(argv[i],"--nodragonfix")) g_dragon_fix=0;   /* A/B: disable the dragon return-to-flight stand-down */
+        else if (!strcmp(argv[i],"--nogoldfix")) g_gold_fix=0;   /* A/B: restore the cracked-build knife-restock gold corruption */
         else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
