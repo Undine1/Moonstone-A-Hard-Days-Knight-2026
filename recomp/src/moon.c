@@ -3008,6 +3008,41 @@ static uint32_t parity_rng(void) {
     return d0;
 }
 static int g_ko_latch = 0;   /* B3: retail's "fighter is down" latch (host-side twin of retail's h1 var) */
+/* ===== B15: retail's UI feedback sound at loot/trade actions =====
+ * Retail wraps its sound trigger in a register-preserving helper (movem around
+ * `move.w #$9c,d0; jsr sound`) and calls it at ~27 loot/trade sites; the cracked
+ * build plays the same sound at only a few of them.  The 21 mapped retail-only
+ * sites are ported with a TRANSPARENT GUEST CALL: save all registers + SR host-
+ * side, rts-divert into the game's own trigger (h16+$88 = 0x3aa44 -- the exact
+ * routine cracked's inline sites call) with d0=$9c, and restore everything when
+ * it returns, so the interrupted code path continues bit-perfectly.  3 retail
+ * sites already have a cracked twin (skipped); 3 sit inside the structurally
+ * different menu flow (unmappable 1:1, skipped).  --noretailsfx for A/B. */
+static int g_retail_sfx = 1;
+static struct { int phase; uint32_t site; uint32_t regs[16]; uint32_t sr; } g_sfx_call = { 0 };
+static const struct { uint32_t pc; uint16_t op16; uint32_t op32; } g_sfx_sites[] = {
+    { 0x22384u, 0x4eb9u, 0x0002c5f4u },   /* menu/equip transitions */
+    { 0x223ceu, 0x4eb9u, 0x0002c5f4u },
+    { 0x224d8u, 0x4eb9u, 0x0002a318u },
+    { 0x224e8u, 0x4eb9u, 0x00028b26u },
+    { 0x22504u, 0x4eb9u, 0x00028b26u },
+    { 0x22520u, 0x4eb9u, 0x00028b26u },
+    { 0x22d60u, 0x3039u, 0u          },   /* select screen */
+    { 0x2cd88u, 0x33fcu, 0u          },   /* loot/trade screen actions: */
+    { 0x2cd9cu, 0x6100u, 0u          },
+    { 0x2d0dcu, 0x2079u, 0u          },
+    { 0x2d1acu, 0x237cu, 0x0000001bu },   /*   armor take (loser to base armor) */
+    { 0x2d23cu, 0x6000u, 0u          },   /*   weapon take exit */
+    { 0x2d240u, 0x0cb9u, 0u          },
+    { 0x2d2e8u, 0x4eb9u, 0x0002aca4u },   /*   item screen refresh points */
+    { 0x2d31cu, 0x4eb9u, 0x0002aca4u },
+    { 0x2d350u, 0x4eb9u, 0x0002aca4u },
+    { 0x2d384u, 0x4eb9u, 0x0002aca4u },
+    { 0x2d3b8u, 0x4eb9u, 0x0002aca4u },
+    { 0x2d3dcu, 0x4eb9u, 0x0002aca4u },   /*   knife take */
+    { 0x2d428u, 0xb27cu, 0u          },   /*   item click eval */
+    { 0x2d47cu, 0x0431u, 0u          },   /*   item transfer */
+};
 
 void moon_instr_hook(unsigned int pc) {
     /* Retail-parity data/same-size-code patches: re-assert periodically so a fresh
@@ -3501,6 +3536,39 @@ void moon_instr_hook(unsigned int pc) {
                     fprintf(g_log, "ARMOR-LOOT winner=%06x takes %02x (was %02x) fr=%d ic=%llu\n",
                             a0, larm, warm, g_cur_frame, (unsigned long long)g_icount);
                     fflush(g_log); an++; } }
+            }
+        }
+    }
+    /* B15 transparent guest call (see g_sfx_sites decl): phase 1 = the trigger just
+     * rts'd back to the diverted site -- restore every register + SR and fall
+     * through so the site's original instruction now executes; phase 0 = check the
+     * site table and divert.  The trigger never executes loot-screen PCs, so the
+     * single global slot cannot nest. */
+    if (g_os && g_retail_parity && g_retail_sfx) {
+        if (g_sfx_call.phase == 1 && pc == g_sfx_call.site) {
+            for (int i = 0; i < 8; i++) m68k_set_reg((m68k_register_t)(M68K_REG_D0 + i), g_sfx_call.regs[i]);
+            for (int i = 0; i < 8; i++) m68k_set_reg((m68k_register_t)(M68K_REG_A0 + i), g_sfx_call.regs[8 + i]);
+            m68k_set_reg(M68K_REG_SR, g_sfx_call.sr);
+            g_sfx_call.phase = 0;
+        } else if (g_sfx_call.phase == 0) {
+            for (unsigned s = 0; s < sizeof(g_sfx_sites)/sizeof(g_sfx_sites[0]); s++) {
+                if (pc != g_sfx_sites[s].pc) continue;
+                if (r16(pc) != g_sfx_sites[s].op16) break;                     /* overlay resident -> inert */
+                if (g_sfx_sites[s].op32 && r32(pc + 2u) != g_sfx_sites[s].op32) break;
+                for (int i = 0; i < 8; i++) g_sfx_call.regs[i]     = m68k_get_reg(NULL, (m68k_register_t)(M68K_REG_D0 + i));
+                for (int i = 0; i < 8; i++) g_sfx_call.regs[8 + i] = m68k_get_reg(NULL, (m68k_register_t)(M68K_REG_A0 + i));
+                g_sfx_call.sr = m68k_get_reg(NULL, M68K_REG_SR);
+                g_sfx_call.site = pc; g_sfx_call.phase = 1;
+                uint32_t sp = g_sfx_call.regs[15] - 4u;
+                w32(sp, pc);                                   /* trigger's rts lands back on this site */
+                m68k_set_reg(M68K_REG_A7, sp);
+                m68k_set_reg(M68K_REG_D0, 0x9cu);              /* retail's UI feedback sound id */
+                m68k_set_reg(M68K_REG_PC, 0x3aa44u);           /* h16+$88: the game's sound trigger */
+                if (g_log) { static int fn = 0; if (fn < 12) {
+                    fprintf(g_log, "SFX-CLICK site=%06x fr=%d ic=%llu\n",
+                            pc, g_cur_frame, (unsigned long long)g_icount);
+                    fflush(g_log); fn++; } }
+                break;
             }
         }
     }
@@ -6850,6 +6918,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nodragonfix")) g_dragon_fix=0;   /* A/B: disable the dragon return-to-flight stand-down */
         else if (!strcmp(argv[i],"--nogoldfix")) g_gold_fix=0;   /* A/B: restore the cracked-build knife-restock gold corruption */
         else if (!strcmp(argv[i],"--noretailparity")) g_retail_parity=0;   /* A/B: disable the retail-parity data/code patches (keeps the cracked-baseline behaviour + goldens) */
+        else if (!strcmp(argv[i],"--noretailsfx")) g_retail_sfx=0;   /* A/B: disable the B15 retail UI-feedback-sound sites (parity stays otherwise on) */
         else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
