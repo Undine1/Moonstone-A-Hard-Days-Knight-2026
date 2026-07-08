@@ -43,14 +43,14 @@ if not os.path.isdir(args.data):
 
 tmp = tempfile.mkdtemp(prefix="moonregress_")
 
-def run(extra):
-    # --noretailparity: these goldens are the CRACKED-baseline fingerprints.  Retail
-    # parity is a new default-on layer whose own goldens are re-baselined separately
-    # (task #5); running it off here keeps this harness a valid "cracked base
-    # unchanged" regression net while the parity port is in progress.
+def run(extra, parity=False):
+    # Default rows run --noretailparity: those goldens are the CRACKED-baseline
+    # fingerprints (they prove the base build is untouched).  Rows whose kind
+    # carries the "p+" prefix run with the retail-parity layer ON (the shipping
+    # default) against their own golden set.
     cmd = [args.exe, "--mod", os.path.join(args.data, "nb"),
-           "--diskdir", args.data, "--dataset", args.data, "--noretailparity",
-           "--log", os.path.join(tmp, "engine.log")] + extra
+           "--diskdir", args.data, "--dataset", args.data,
+           "--log", os.path.join(tmp, "engine.log")] + ([] if parity else ["--noretailparity"]) + extra
     return subprocess.run(cmd, capture_output=True, text=True)
 
 def sha16(path):
@@ -61,13 +61,18 @@ def sha16(path):
     return h.hexdigest()[:16]
 
 def measure(kind, inp, frame):
+    # kind prefix "p+" = run with the retail-parity layer ON (the shipping default);
+    # bare kinds run --noretailparity against the cracked-baseline goldens.
+    parity = kind.startswith("p+")
+    if parity:
+        kind = kind[2:]
     if kind == "ramfnv":
         # input "cold" = legacy bare boot (no --os, default 600 frames -- keeps the
         # original golden); input "os" = full HLE boot, runs the real attract.  A
         # frame past 600 extends the run (the long attract golden exists because a
         # hook misfire at frames 2000-3000 was once invisible to the 500-frame one).
         extra = (["--os"] if inp == "os" else []) + ["--frames", str(max(600, int(frame)))]
-        r = run(extra + ["--savestate-at", str(frame), os.path.join(tmp, "d.sav")])
+        r = run(extra + ["--savestate-at", str(frame), os.path.join(tmp, "d.sav")], parity)
         m = re.search(r"ram_fnv=([0-9a-f]+)", r.stdout)
         return m.group(1) if m else "ERR:no-hash"
     if kind == "scriptfnv":
@@ -87,7 +92,7 @@ def measure(kind, inp, frame):
         extra = ["--os", "--loadstate", save, "--frames", str(frame), "--script", script]
         if poke:
             extra += ["--poke8", poke]
-        r = run(extra)
+        r = run(extra, parity)
         m = re.search(r"ram_fnv=([0-9a-f]+)", r.stdout)
         return m.group(1) if m else "ERR:no-hash"
     if kind == "savefnv":
@@ -97,7 +102,7 @@ def measure(kind, inp, frame):
         save = os.path.join(args.saves, inp)
         if not os.path.exists(save):
             return "ERR:no-save"
-        r = run(["--os", "--loadstate", save, "--frames", str(frame)])
+        r = run(["--os", "--loadstate", save, "--frames", str(frame)], parity)
         m = re.search(r"ram_fnv=([0-9a-f]+)", r.stdout)
         return m.group(1) if m else "ERR:no-hash"
     if kind == "framesha":
@@ -105,7 +110,7 @@ def measure(kind, inp, frame):
         if not os.path.exists(save):
             return "ERR:no-save"
         pre = os.path.join(tmp, "f")
-        run(["--loadstate", save, "--dumpevery", "9999", "--dump", pre])
+        run(["--loadstate", save, "--dumpevery", "9999", "--dump", pre], parity)
         ppm = f"{pre}_{int(frame):04d}.ppm"
         return sha16(ppm) if os.path.exists(ppm) else "ERR:no-frame"
     return "ERR:bad-kind"

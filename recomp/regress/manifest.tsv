@@ -18,3 +18,9 @@ townday	scriptfnv	moonstone_townmap.sav|10:f,16:.,450:d,494:.,504:f,510:.	800	5c
 townarmor	scriptfnv	moonstone_townarmor.sav|10:u,36:.,40:r,46:.,60:f,66:.,800:d,844:.,850:l,853:.,860:f,866:.|700:2e83b:1e	2600	3536121e
 combat	framesha	moonstone_goodcombat.sav	0	9e5057c52ed11aed
 overland	framesha	moonstone_prebug_backup.sav	0	66646f883aac4567
+# Retail-parity goldens (the SHIPPING default: g_retail_parity ON).  Same fixtures
+# as the cracked-baseline rows above; kind prefix "p+" runs without --noretailparity.
+combatrunP	p+savefnv	moonstone_combatrun.sav	600	0824c9a9
+vanishrunP	p+savefnv	moonstone_bug.sav	600	81b317c7
+towndayP	p+scriptfnv	moonstone_townmap.sav|10:f,16:.,450:d,494:.,504:f,510:.	800	dafe1934
+townarmorP	p+scriptfnv	moonstone_townarmor.sav|10:u,36:.,40:r,46:.,60:f,66:.,800:d,844:.,850:l,853:.,860:f,866:.|700:2e83b:1e	2600	384dc55d
