@@ -3427,6 +3427,49 @@ void moon_instr_hook(unsigned int pc) {
         uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0);
         if (a0 && a0 < RAM_SIZE - 0x84u) w32(a0 + 0x64u, 0);
     }
+    /* A10 cursor-handler install dedup (0x2d5de): retail guards its handler-list
+     *     appends against double-install (an already-there check + a dedup call
+     *     before the append).  The screen-EFFECT append is already covered by
+     *     g_tasklist_fix (same dedup, 0x2a0ea); this closes the remaining site --
+     *     the menu cursor handler (0x2d61c) append into the same per-vblank list. */
+    if (g_os && g_retail_parity && pc == 0x2d5deu
+        && r16(0x2d5deu) == 0x217cu && r32(0x2d5e0u) == 0x0002d61cu && r16(0x2d5e4u) == 0xfffcu) {
+        for (uint32_t s = 0x3c096u; s < 0x3c0bau; s += 4u) {
+            if (r32(s) == 0x2d61cu) {                  /* cursor already registered */
+                m68k_set_reg(M68K_REG_PC, 0x2d5e6u);   /* skip the duplicate append */
+                break;
+            }
+        }
+    }
+    /* B13 loot armor-transfer (retail subroutine at its 0x21584, absent in
+     *     cracked): on the victor's loot pass, if the loser wears BETTER armor
+     *     the winner takes it (hp adjusted by the armor-weight table {0,10,20,30}
+     *     indexed by the winner's OLD armor id - 0x1b; loser reset to base armor
+     *     0x1b) INSTEAD of halving the loser's gold; gold-halving only runs when
+     *     the armor isn't better.  Emulate at the cracked gold-halve call site
+     *     (0x21576 `bsr.b $580`): a0=winner, a1=loser, exactly retail's compare
+     *     and effects, skipping the bsr when the armor branch takes. */
+    if (g_os && g_retail_parity && pc == 0x21576u
+        && r16(0x21576u) == 0x6108u && r16(0x21580u) == 0x3029u) {
+        uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0), a1 = m68k_get_reg(NULL, M68K_REG_A1);
+        if (a0 && a1 && a0 < RAM_SIZE - 0x84u && a1 < RAM_SIZE - 0x84u) {
+            uint32_t warm = r32(a0 + 0x5cu), larm = r32(a1 + 0x5cu);
+            if ((int32_t)warm < (int32_t)larm) {
+                static const int8_t wtab[4] = { 0, 0x0a, 0x14, 0x1e };
+                uint32_t idx = warm - 0x1bu;
+                int16_t weight = (idx < 4u) ? wtab[idx] : 0;
+                w32(a0 + 0x5cu, larm);                                     /* winner takes the armor */
+                w16(a1 + 0x50u, (uint16_t)((int16_t)r16(a1 + 0x50u) - weight));
+                w16(a0 + 0x50u, (uint16_t)((int16_t)r16(a0 + 0x50u) + weight));
+                w32(a1 + 0x5cu, 0x1bu);                                    /* loser back to base armor */
+                m68k_set_reg(M68K_REG_PC, 0x21578u);                       /* skip the gold-halve bsr */
+                if (g_log) { static int an = 0; if (an < 8) {
+                    fprintf(g_log, "ARMOR-LOOT winner=%06x takes %02x (was %02x) fr=%d ic=%llu\n",
+                            a0, larm, warm, g_cur_frame, (unsigned long long)g_icount);
+                    fflush(g_log); an++; } }
+            }
+        }
+    }
     /* B8  wander-destination pick (0x40906): cracked re-rolls the RNG until the
      *     &3 result is nonzero (uniform 1..3 over the 3 nearest map nodes); retail
      *     maps a 0 roll to 1 (nearest node picked ~half the time).  Emulate
