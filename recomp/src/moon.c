@@ -3294,6 +3294,16 @@ void moon_instr_hook(unsigned int pc) {
             m68k_set_reg(M68K_REG_D0, hi | 5u);
         }
     }
+    /* A5  demon fight-init flag-word clear: retail zeroes the demon module's
+     *     state-flag word at creature init (`move.w #0,(flag)` inserted between the
+     *     init jsrs); cracked never clears it, so demon state bits (incl. the bit7
+     *     hold latch) survive from a previous encounter into a new fight.  Do the
+     *     clear at the cracked equivalent point (0x25934, just before jsr h0+0x4a30)
+     *     on the cracked demon flag word [0x42266] (= h40+0xa02). */
+    if (g_os && g_retail_parity && pc == 0x25934u
+        && r16(0x25934u) == 0x4eb9u && r32(0x25936u) == 0x00025a30u) {
+        if (r16(0x42266u)) w16(0x42266u, 0);
+    }
     /* A6  demon aggression-table index bounds mask: the first threshold lookup
      *     (0x4263c `cmp.b (a5,d2.w),d0`, table [0x392b4]) indexes with the raw
      *     word from [0x30394]; retail masks `andi.w #$7,d2` first so the index
