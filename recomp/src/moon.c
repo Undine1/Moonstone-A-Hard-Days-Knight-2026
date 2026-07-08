@@ -2896,6 +2896,27 @@ static const struct parity_patch g_parity_tab[] = {
     /* B11 demon aggression threshold table (8 entries) retuned 70/60/50/40/30/20/15/10
      *     -> 50/40/30/30/20/10/8/6.  Pairs with the andi #7 index-mask hook (A6). */
     { 0x392b4u, 8, {0x46,0x3c,0x32,0x28,0x1e,0x14,0x0f,0x0a}, {0x32,0x28,0x1e,0x1e,0x14,0x0a,0x08,0x06}, "demon-aggr-table" },
+    /* B18 knight name: "SIR EDWARD" -> retail's "SIR GUNTHER".  The name lives in
+     *     a padded fixed-width slot ("SIR EDWARD\0" + 4 spare NULs before the next
+     *     field), so the one-char-longer retail name fits in place. */
+    { 0x37156u, 8, {0x53,0x49,0x52,0x20,0x45,0x44,0x57,0x41}, {0x53,0x49,0x52,0x20,0x47,0x55,0x4e,0x54}, "gunther-1" },
+    { 0x3715eu, 4, {0x52,0x44,0x00,0x00}, {0x48,0x45,0x52,0x00}, "gunther-2" },
+    /* B4  shop price VALUES (merchant price-table init): Sword of Sharpness 52->100,
+     *     ring of protection 40->50.  Sell prices are computed as buy/2 by the game
+     *     (50 / 25), so no further value patches are needed. */
+    { 0x2dc06u, 6, {0x31,0x7c,0x00,0x34,0x00,0x04}, {0x31,0x7c,0x00,0x64,0x00,0x04}, "price-sword-100" },
+    { 0x2dc0cu, 6, {0x31,0x7c,0x00,0x28,0x00,0x06}, {0x31,0x7c,0x00,0x32,0x00,0x06}, "price-ring-50" },
+    /* B4  shop menu strings, same-length digit edits: "ring of protection for
+     *     40 GP" -> 50; "Sell ring for 20 GP" -> 25. */
+    { 0x3991eu, 1, {0x34}, {0x35}, "str-ring-50" },
+    { 0x39a6bu, 1, {0x30}, {0x35}, "str-sellring-25" },
+    /* B4  the two GROWN shop lines ("Buy Sword of Sharpness for 100 GP", "Sell
+     *     Sword of Sharpness for 50 GP" -- cracked's sell line was just "Sword of
+     *     Sharpness", no price) cannot grow in place; their menu-table pointers
+     *     (h0+0xcb10 / h0+0xcb86, verified sole references) are repointed into the
+     *     parity string pool written by apply_retail_parity below. */
+    { 0x2db10u, 4, {0x00,0x03,0x98,0x94}, {0x00,0x03,0x9b,0x66}, "ptr-buy-sword" },
+    { 0x2db86u, 4, {0x00,0x03,0x99,0xf9}, {0x00,0x03,0x9b,0x8c}, "ptr-sell-sword" },
     /* B18 animation-descriptor constants 0xd0 -> 0xcc were REMOVED from the table
      *     2026-07-08: applied in isolation they are entangled with other retail h4
      *     animation-pointer-table changes we do NOT carry, so cracked's tables +
@@ -2908,6 +2929,17 @@ static void apply_retail_parity(void) {
     if (!g_retail_parity || g_lineage != LIN_CRACKED) return;
     /* gameplay mog resident? (knife-loop signature -- all mog hunks load as a unit) */
     if (r16(0x41106u) != 0x0628u) return;
+    /* Parity string pool: retail's two grown shop lines live in the DEAD 120-byte
+     * treasure-title string block (h4+0x98c2 -> [0x39b66]) that retail deleted and
+     * that nothing references in the cracked build (verified: zero relocs target
+     * it).  Written before the table so the repointed menu pointers always find
+     * valid text. */
+    static const char pool0[] = "Buy Sword of Sharpness for 100 GP";   /* -> [0x39b66] */
+    static const char pool1[] = "Sell Sword of Sharpness for 50 GP";   /* -> [0x39b8c] */
+    if (memcmp(g_ram + 0x39b66u, pool0, sizeof(pool0)) != 0)
+        memcpy(g_ram + 0x39b66u, pool0, sizeof(pool0));
+    if (memcmp(g_ram + 0x39b8cu, pool1, sizeof(pool1)) != 0)
+        memcpy(g_ram + 0x39b8cu, pool1, sizeof(pool1));
     unsigned n = (unsigned)(sizeof(g_parity_tab)/sizeof(g_parity_tab[0])), applied = 0;
     for (unsigned i = 0; i < n; i++) {
         const struct parity_patch *p = &g_parity_tab[i];
