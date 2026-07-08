@@ -2891,6 +2891,11 @@ static const struct parity_patch g_parity_tab[] = {
     { 0x40dbau, 6, {0x0c,0x28,0x00,0x03,0x00,0x49}, {0x0c,0x28,0x00,0x05,0x00,0x49}, "heal-lives-5" },
     { 0x40dc0u, 2, {0x6f,0x10}, {0x6d,0x10}, "heal-ble-blt" },
     { 0x40dcau, 2, {0xe4,0x48}, {0x4e,0x71}, "heal-hp-anydmg" },
+    /* B7  companion patch for the dragon-scroll stage re-activation (see the B7 PC
+     *     hook): the cracked stage body also cleared the knight's OWN chase pointer
+     *     (`clr.l $64(a0)` at 0x40e18), which retail does not -- NOP it so the
+     *     diverted stage matches retail exactly.  Dead code without the hook. */
+    { 0x40e18u, 4, {0x42,0xa8,0x00,0x64}, {0x4e,0x71,0x4e,0x71}, "scroll-keepchase" },
     /* B11 demon close-range action-state duration timer: 6 -> 9 ticks. */
     { 0x4207cu, 6, {0x11,0x7c,0x00,0x06,0x00,0x6a}, {0x11,0x7c,0x00,0x09,0x00,0x6a}, "demon-timer-9" },
     /* B11 demon aggression threshold table (8 entries) retuned 70/60/50/40/30/20/15/10
@@ -3345,6 +3350,92 @@ void moon_instr_hook(unsigned int pc) {
         && r16(0x4263cu) == 0xb035u && r16(0x42636u) == 0x4bf9u) {
         uint32_t d2 = m68k_get_reg(NULL, M68K_REG_D2);
         m68k_set_reg(M68K_REG_D2, (d2 & 0xffff0000u) | (d2 & 7u));
+    }
+    /* A4  demon per-tick walk block entry (0x41fd2, a multi-branch target incl. the
+     *     action-timer re-entry at 0x42050): cracked enters with whatever a0 the
+     *     preceding helper chain left and applies the demon's movement through it;
+     *     retail inserts a reload of the demon record pointer here.  Same reload. */
+    if (g_os && g_retail_parity && pc == 0x41fd2u
+        && r16(0x41fd2u) == 0x7c00u && r16(0x41fd4u) == 0x7000u) {
+        uint32_t rec = r32(0x2ebd0u);
+        if (rec && rec < RAM_SIZE - 0x84u) m68k_set_reg(M68K_REG_A0, rec);
+    }
+    /* A3  demon bit6 (effect active) twin blocks (0x42106/0x42162): the sound call
+     *     repoints a0 to the h4 parameter struct (#$19b2 = [0x31c56]), and cracked's
+     *     trailing action-timer write `move.b #3/#5,$6a(a0)` then lands in h4 DATA
+     *     (silent corruption; the effect object's timer never arms).  Retail
+     *     push/pops a0 around the calls; equivalently restore a0 to the effect
+     *     object ([0x259f0], the block's own load at entry) at the timer write. */
+    if (g_os && g_retail_parity
+        && ((pc == 0x42144u && r16(0x42146u) == 0x0003u) ||
+            (pc == 0x421a0u && r16(0x421a2u) == 0x0005u))
+        && r16(pc) == 0x117cu && r16(pc + 4u) == 0x006au) {
+        uint32_t obj = r32(0x259f0u);
+        if (obj && obj < RAM_SIZE - 0x6cu) m68k_set_reg(M68K_REG_A0, obj);
+    }
+    /* A9  task-slot clear helper (0x413f2 `movea.l d0,a0; clr.l (a0); rts`):
+     *     cracked clobbers the caller's a0 (callers: map-enter x2, h0+0x8f62);
+     *     retail adds a push/pop.  Do the clear host-side, land on the rts. */
+    if (g_os && g_retail_parity && pc == 0x413f2u
+        && r16(0x413f2u) == 0x2040u && r16(0x413f4u) == 0x4290u) {
+        uint32_t d0 = m68k_get_reg(NULL, M68K_REG_D0);
+        if (d0 < RAM_SIZE - 4u) w32(d0, 0);
+        m68k_set_reg(M68K_REG_PC, 0x413f6u);   /* the helper's own rts */
+    }
+    /* A11 shop-intent ladder entry presets (0x40eee): retail presets the intent
+     *     globals {price=0, kind=$ffff, goods=0} at every evaluation so a tick
+     *     where no rung fires leaves a harmless sentinel instead of a STALE
+     *     intent for the town applier (kind $ffff matches no applier case). */
+    if (g_os && g_retail_parity && pc == 0x40eeeu
+        && r16(0x40eeeu) == 0x23fcu && r32(0x40ef0u) == 0u) {
+        w16(0x3760cu, 0); w16(0x3760eu, 0xffffu); w32(0x37610u, 0);
+    }
+    /* B10 chase hygiene: retail clears BOTH fighters' chase pointers (+0x64) when
+     *     the fight pair is staged, and the initiator's again on the dock branch;
+     *     cracked carried stale chase targets through fights. */
+    if (g_os && g_retail_parity && pc == 0x21b62u && r16(0x21b62u) == 0x0c39u) {
+        uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0), a1 = m68k_get_reg(NULL, M68K_REG_A1);
+        if (a0 && a0 < RAM_SIZE - 0x84u) w32(a0 + 0x64u, 0);
+        if (a1 && a1 < RAM_SIZE - 0x84u) w32(a1 + 0x64u, 0);
+    }
+    if (g_os && g_retail_parity && pc == 0x21bf8u
+        && r16(0x21bf8u) == 0x6100u && r16(0x21bfau) == 0xf914u) {
+        uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0);
+        if (a0 && a0 < RAM_SIZE - 0x84u) w32(a0 + 0x64u, 0);
+    }
+    /* B7  AI dragon-scroll auto-use: retail's per-tick AI chain has a stage the
+     *     cracked build carries as DEAD CODE (0x40dec, zero references): a knight
+     *     with a chase target and a dragon scroll (item slot 0x10) sics the dragon
+     *     on his quarry.  Re-activate the build's own function by diverting into it
+     *     between the c6/c7 stage calls (retail's slot), with retail's outer gates
+     *     done here: day >= 2, chasing, has scroll, dragon not already on that
+     *     target.  The function's one divergence from retail (it also cleared the
+     *     knight's own chase) is NOPed by the 'scroll-keepchase' table patch. */
+    {
+        static int b7_ret = 0;
+        if (g_os && g_retail_parity && pc == 0x401c0u
+            && r16(0x401c0u) == 0x4eb9u && r32(0x401c2u) == 0x00040e64u) {
+            if (b7_ret) b7_ret = 0;              /* back from the diverted stage */
+            else if ((int16_t)r16(0x30394u) >= 2) {
+                uint32_t rec = r32(0x2ebd0u);
+                if (rec && rec < RAM_SIZE - 0x84u) {
+                    uint32_t chase = r32(rec + 0x64u);
+                    uint32_t items = r32(rec + 0x60u);
+                    if (chase && items && items < RAM_SIZE - 0x20u && r8(items + 0x10u)
+                        && r32(0x2e9ecu + 0x64u) != chase) {
+                        uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7) - 4u;
+                        m68k_set_reg(M68K_REG_A7, sp);
+                        w32(sp, 0x401c0u);                    /* rts lands back here */
+                        m68k_set_reg(M68K_REG_PC, 0x40decu);  /* the scroll stage */
+                        b7_ret = 1;
+                        if (g_log) { static int sn = 0; if (sn < 8) {
+                            fprintf(g_log, "SCROLL-USE knight=%06x target=%06x fr=%d ic=%llu\n",
+                                    rec, chase, g_cur_frame, (unsigned long long)g_icount);
+                            fflush(g_log); sn++; } }
+                    }
+                }
+            }
+        }
     }
     /* ===== TOWN-EXIT DAY-END FIX (see g_dayend_fix decl) ===== */
     if (g_os && g_dayend_fix && pc == 0x4044eu && r16(pc) == 0x33c0u) {  /* `move.w D0,$2fa08` = budget re-derive */
