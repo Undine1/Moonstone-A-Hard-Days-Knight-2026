@@ -2699,6 +2699,44 @@ static int      g_hide_parity_fix = 1; /* ROOT FIX 2026-07-03 (vanish-in-combat,
                                        * 0x213f2, lift 0x27dd4) keep the faithful EOR.  HIDEFIX log fires
                                        * only when the forced value differs from what the EOR would have
                                        * produced = an actual unpaired toggle caught live.  --nohidefix. */
+/* ===================== game-data lineage =====================
+ * The circulating cracked ADFs carry an EARLIER BUILD of the mog engine than
+ * the retail release (verified 2026-07-08 against SPS preservation IPFs of the
+ * retail disks: retail rebuilt mog with bug fixes; nb/program are identical).
+ * Every PC hook below is addressed for ONE build's code layout; the lineage is
+ * fingerprinted from the mog module at startup so hooks can carry both
+ * addresses.  Unknown lineages run with cracked addresses + opcode guards
+ * (worst case: a hook goes inert, never misfires). */
+#define LIN_CRACKED 0
+#define LIN_RETAIL  1
+#define LIN_UNKNOWN 2
+static int g_lineage = LIN_CRACKED;
+/* fingerprint: the AI knife-restock loop's two size-suffix bytes -- the known
+ * discriminator between the builds (cracked: cmpi.w/subi.b; retail: cmpi.b/subi.w) */
+static void detect_lineage(const char *datadir) {
+    char p[1300]; snprintf(p, sizeof(p), "%s/%s", datadir, "mog");
+    FILE *f = fopen(p, "rb");
+    if (!f) { g_lineage = LIN_UNKNOWN; return; }
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *d = (uint8_t *)malloc(sz > 0 ? (size_t)sz : 1);
+    if (!d) { fclose(f); g_lineage = LIN_UNKNOWN; return; }
+    sz = (long)fread(d, 1, (size_t)sz, f); fclose(f);
+    /* knife-loop skeleton: addi.b #1,(4c,A0); cmpi.w #2,(4a,A0); blt+16; cmpi.? #10,(4c,A0); beq+8; subi.? #2,(4a,A0) */
+    static const uint8_t skel[] = { 0x06,0x28,0x00,0x01,0x00,0x4c, 0x0c,0x68,0x00,0x02,0x00,0x4a, 0x6d,0x10 };
+    g_lineage = LIN_UNKNOWN;
+    for (long i = 0; i + 30 <= sz; i += 2) {
+        if (memcmp(d + i, skel, sizeof(skel)) == 0) {
+            uint8_t cmp_op = d[i + 15], sub_op = d[i + 23];   /* size bytes of the two ops */
+            if (cmp_op == 0x68 && sub_op == 0x28) g_lineage = LIN_CRACKED;
+            else if (cmp_op == 0x28 && sub_op == 0x68) g_lineage = LIN_RETAIL;
+            break;
+        }
+    }
+    free(d);
+}
+/* dual-PC hook helper: cracked address always active (opcode-guarded), retail
+ * alternate active only under the retail lineage */
+#define PC2(cr, rt) (pc == (cr##u) || (g_lineage == LIN_RETAIL && pc == (rt##u)))
 static int      g_gold_fix = 1;      /* CRACKED-BUILD REPAIR 2026-07-08 (the "blank knight gold / click gives 150"
                                        * bug): the circulating cracked ADFs carry an earlier mog build whose AI
                                        * knife-restock loop nukes the knight's gold word (-512/knife via a byte-
@@ -3515,7 +3553,7 @@ void moon_instr_hook(unsigned int pc) {
      * "Loading..." title card).  Opcode-guarded (0x2xxxx is overlaid per phase) and
      * gated on the attract scope being over, so an attract-phase overlay reusing
      * the address can't stamp it.  Consumed only by the skip fast-forward. */
-    if (g_os && pc == 0x22964u && !g_blt_busy_scope && r16(pc) == 0x4eb9u)
+    if (g_os && PC2(0x22964, 0x22906) && !g_blt_busy_scope && r16(pc) == 0x4eb9u)
         g_menu_live = 1;
     /* (Legend cookie-cut redirect REMOVED: now that the loader-HLE opcode guard above
      * no longer hijacks 0x2cda0 during the char engine, the char engine's OWN `beq.w
@@ -3803,13 +3841,34 @@ void moon_instr_hook(unsigned int pc) {
          * prompt, instantly insert the requested ADF + arm an auto-fire so the
          * "Press fire when done" wait (0x22fd0) passes through invisibly.  No-op
          * once the player drives swaps manually with --diskat. */
-        if (g_autoswap && pc == 0x23feau && r16(pc) == 0x23c8u) {  /* `move.l A0,$2e1d2` = prompt entry resident */
+        if (g_autoswap && PC2(0x23fea, 0x240c8) && r16(pc) == 0x23c8u) {  /* `move.l A0,...` = prompt entry resident (retail copy at 0x240c8) */
             uint32_t desc = m68k_get_reg(NULL, M68K_REG_A0);
-            uint16_t slo  = r16(desc + 2);          /* low word of the prompt string addr */
             int want = -1;
-            if      (slo == 0x024f) want = 0;       /* Disk A */
-            else if (slo == 0x023a) want = 1;       /* Disk B */
-            else if (slo == 0x0264) want = 2;       /* Disk C */
+            /* Identify a DISK prompt by reading the actual prompt string through the
+             * descriptor ([desc+0] = string ptr) and parsing "...Disk X" -- lineage-
+             * independent (the retail build's strings live at shifted addresses; the
+             * routine also serves non-disk prompts like GAME OVER, which parse to
+             * want=-1 and display normally). */
+            {
+                uint32_t str = r32(desc);
+                if (str && str < RAM_SIZE - 64u) {
+                    for (uint32_t k = 0; k < 56; k++) {
+                        if (g_ram[str+k] == 'D' && g_ram[str+k+1] == 'i' &&
+                            g_ram[str+k+2] == 's' && g_ram[str+k+3] == 'k') {
+                            uint32_t j = str + k + 4;
+                            while (j < str + 62 && g_ram[j] == ' ') j++;
+                            if (g_ram[j] >= 'A' && g_ram[j] <= 'C') want = (int)(g_ram[j] - 'A');
+                            break;
+                        }
+                    }
+                }
+            }
+            if (want < 0) {   /* legacy fallback: the cracked build's known string low-words */
+                uint16_t slo = r16(desc + 2);
+                if      (slo == 0x024f) want = 0;       /* Disk A */
+                else if (slo == 0x023a) want = 1;       /* Disk B */
+                else if (slo == 0x0264) want = 2;       /* Disk C */
+            }
             if (want >= 0 && want < 3 && g_adf[want]) {
                 if (g_disk_inserted != want) {
                     g_disk_inserted = want;
@@ -3844,8 +3903,8 @@ void moon_instr_hook(unsigned int pc) {
          * it at the release loop (0x22fda) so both halves of the wait fall
          * through.  PC-gated so it can't race ahead of the wait. */
         if (g_autoswap && g_autoswap_armed && g_autoswap_settle == 0) {
-            if (pc == 0x22fd0u) g_fire2 = 1;             /* press loop: assert fire */
-            else if (pc == 0x22fdau) {                   /* release loop reached: done */
+            if (PC2(0x22fd0, 0x22f7c)) g_fire2 = 1;      /* press loop: assert fire */
+            else if (PC2(0x22fda, 0x22f86)) {            /* release loop reached: done */
                 g_fire2 = 0; g_autoswap_armed = 0;
                 if (g_log) fprintf(g_log, "AUTO-SWAP confirmed (synthetic fire) ic=%llu\n",
                                    (unsigned long long)g_icount);
@@ -6437,6 +6496,14 @@ int main(int argc, char **argv) {
      * the four boot modules (nb/program/mog/crystal) out of Disk 1's filesystem
      * so they don't have to extract them by hand.  No-op once they exist. */
     ensure_boot_modules(g_dataset, g_diskdir);
+
+    /* Fingerprint the game-data lineage from the mog module (see detect_lineage):
+     * hooks carry per-lineage addresses; unknown data runs guarded-inert. */
+    detect_lineage(g_dataset);
+    fprintf(g_log, "LINEAGE: %s\n",
+            g_lineage == LIN_RETAIL ? "retail (SPS-verified build)" :
+            g_lineage == LIN_CRACKED ? "cracked-common (earlier engine build; known repairs active)" :
+            "UNKNOWN (fixes inert where code layout differs; prefer SPS IPF-derived data)");
 
     /* --wav: headless capture of the generated Paula mix (enables audio gen on
      * the non-SDL path).  A placeholder 44-byte header is written now and
