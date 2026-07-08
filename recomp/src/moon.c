@@ -2883,6 +2883,14 @@ static const struct parity_patch g_parity_tab[] = {
     { 0x2adaeu, 2, {0x6d,0x04}, {0x6e,0x04}, "statroll-le" },
     /* B (selection cmp #5): retail `bge` where cracked `beq` (0x67->0x6c, same disp). */
     { 0x2ddaeu, 2, {0x67,0x08}, {0x6c,0x08}, "sel-cmp5-bge" },
+    /* B5  AI knight heal-potion drink thresholds (per-tick heal check 0x40dba):
+     *     cracked drinks at lives<=3 OR hp<maxhp/4; retail at lives<5 OR hp!=maxhp
+     *     (much more eager).  Three same-size edits: lives #3->#5; the lives branch
+     *     ble->blt; and NOP the `lsr.w #2,d0` so the hp test compares against full
+     *     maxhp (hp<maxhp == hp!=maxhp since hp<=maxhp) instead of maxhp/4. */
+    { 0x40dbau, 6, {0x0c,0x28,0x00,0x03,0x00,0x49}, {0x0c,0x28,0x00,0x05,0x00,0x49}, "heal-lives-5" },
+    { 0x40dc0u, 2, {0x6f,0x10}, {0x6d,0x10}, "heal-ble-blt" },
+    { 0x40dcau, 2, {0xe4,0x48}, {0x4e,0x71}, "heal-hp-anydmg" },
     /* B11 demon close-range action-state duration timer: 6 -> 9 ticks. */
     { 0x4207cu, 6, {0x11,0x7c,0x00,0x06,0x00,0x6a}, {0x11,0x7c,0x00,0x09,0x00,0x6a}, "demon-timer-9" },
     /* B11 demon aggression threshold table (8 entries) retuned 70/60/50/40/30/20/15/10
