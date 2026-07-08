@@ -2791,6 +2791,29 @@ static int      g_dragon_fix = 1;    /* ROOT FIX 2026-07-07 (operator's "re-ente
                                        * other scene paths); the map-enter check 0x40554 then re-arms a fresh
                                        * VISIBLE flight for a surviving dragon, and a killed one stays
                                        * retired (lives=0xff gates the re-arm).  --nodragonfix reverts. */
+static int      g_invmenu_fix = 1;   /* ROOT FIX 2026-07-08 (task #11, the moonstone phantom/click-crash class):
+                                       * the knight-panel/loot-screen builders derive each item hotspot's action
+                                       * code from RAW weapon/armor id fields with NO range check (weapon act =
+                                       * 0x28+(id-0x16)*4, valid ids 0x16-0x19; armor act = 0x18+(id-0x1b)*4,
+                                       * valid 0x1b-0x1e); the hover label = [0x2fafe]+(act/4)*0xe into two
+                                       * contiguous 27-entry tables (0x2fe44/0x2ffbe).  A garbage id therefore
+                                       * (a) mid-range: renders a PHANTOM item -- weapon ids 0x1a-0x1c label as
+                                       * the three MOONSTONE names (proven live: the operator's save 2 carries
+                                       * rec1 weapon=0x1c, an ARMOR id from the A1 stale-goods shop defect, and
+                                       * its panel hover reads "HALF MOONSTONE"); taking it copies the garbage
+                                       * id to the player (weapon-swap 0x2d1cc has no check either); (b) far:
+                                       * pushes the label entry OFF both tables -> the walk (0x2a1ae/0x2a318)
+                                       * follows garbage next-links -> address-error/runaway on real HW, an
+                                       * infinite render wedge in the port (reproduced: wpn=0x27 poke -> 79k
+                                       * unmapped reads, pc parked in the walk; 646/742 garbage ids lethal).
+                                       * TWO layers: (1) skip building the item render+hotspot for an out-of-
+                                       * domain id (no real item exists; also stops phantom propagation);
+                                       * (2) harden the label walk -- odd/out-of-RAM entry ptr or >64 entries
+                                       * in one walk (the wedge cycles through plausible pointers) ends the
+                                       * walk at its own exit (0x2a324) instead of dying.  Real tokens/items
+                                       * are untouched (verified: token steal-back flow byte-identical).
+                                       * --noinvmenufix reverts both layers for A/B. */
+static int      g_invwalk_len = 0;   /* entries visited in the current label walk (reset at the walker entry) */
 static int      g_pounce_latch_fix = 1; /* ROOT FIX 2026-07-03 (original-game bug, the operator's "monkey idles
                                        * embedded in my body and flickers" combat glitch): the swamp-monster
                                        * contact handler (0x27476) resolves a touch by the monster's +0x68
@@ -3806,6 +3829,53 @@ void moon_instr_hook(unsigned int pc) {
                 fprintf(g_log, "  entry=%06x name@%06x '%s' next+0xa=%08x\n", n, sp, nm, r32(n + 0x0a));
             }
             fflush(g_log);
+        }
+    }
+    /* ===== INVENTORY-MENU CRASH-PROOFING (see g_invmenu_fix decl) ===== */
+    /* Layer 1: item-id validation at the shared hotspot-builder heads (0x2c85e falls through into
+     * 0x2c872; hooking both catches every entry path, and a valid item just re-checks harmlessly).
+     * The item's action code sits in [0x2faf8], its arg (record field offset) in [0x2fafc] -- both
+     * always written by the call sites before the call.  Legit action domain: stats 0x00-0x0c, gold
+     * 0x10, daggers 0x14, armor 0x18-0x24, weapon 0x28-0x34, tokens 0x38-0x40, keys 0x44, potions
+     * 0x48-0x54, scroll row 0x58-0x68 -- nothing legit exceeds 0x68.  Weapon/armor args get their
+     * exact domain enforced (that's where the garbage ids live); skip = jump to the builder's own
+     * rts (0x2c8be) before its movem push, so neither the sprites nor the hotspot are emitted. */
+    if (g_os && g_invmenu_fix &&
+        ((pc == 0x2c85eu && r16(pc) == 0x0cb9u) ||        /* `cmpi.l #3,$2fb1c.l` resident */
+         (pc == 0x2c872u && r16(pc) == 0x33fcu))) {       /* `move.w #1,$3eb08.l` resident */
+        uint32_t act = r32(0x2faf8u);
+        uint16_t arg = r16(0x2fafcu);
+        int invalid = (act > 0x68u)
+                   || (arg == 0x58u && (act < 0x28u || act > 0x34u))
+                   || (arg == 0x5cu && (act < 0x18u || act > 0x24u));
+        if (invalid) {
+            m68k_set_reg(M68K_REG_PC, 0x2c8beu);          /* the builder's rts: item skipped */
+            if (g_log) { static int iv = 0; if (iv < 24) {
+                fprintf(g_log, "INVID-SKIP act=%x arg=%x (garbage item id; slot hidden) ic=%llu\n",
+                        act, arg, (unsigned long long)g_icount); fflush(g_log); iv++; } }
+            return;
+        }
+    }
+    /* Layer 2: label-walk hardening.  Every walk enters at 0x2a196 (all 18 call sites verified;
+     * 0x2a17c falls through 0x2a190 -> 0x2a196) -- reset the per-walk counter there.  At each
+     * entry visit (0x2a1ae) a bad pointer or a >64-entry walk exits via the walker's own
+     * termination (0x2a324) instead of derefing garbage / wedging.  Legit lists are single-entry
+     * item labels or short multi-line prompt chains.  Runs AFTER the INV-MENU ring trace above,
+     * so the forensic trail is still dumped before the graceful exit. */
+    if (g_os && g_invmenu_fix && pc == 0x2a196u && r16(pc) == 0x33fcu)
+        g_invwalk_len = 0;
+    if (g_os && g_invmenu_fix && pc == 0x2a1aeu && r16(pc) == 0x2479u) {   /* `movea.l $37444.l,A2` resident */
+        uint32_t e = r32(0x37444u);
+        int badp = (e & 1u) || e >= RAM_SIZE;
+        g_invwalk_len++;
+        if (badp || g_invwalk_len > 64) {
+            m68k_set_reg(M68K_REG_PC, 0x2a324u);          /* the walker's own exit */
+            if (g_log) { static int wn = 0; if (wn < 24) {
+                fprintf(g_log, "INVWALK-END %s entry=%08x len=%d ic=%llu\n",
+                        badp ? "bad-ptr" : "cap", e, g_invwalk_len,
+                        (unsigned long long)g_icount); fflush(g_log); wn++; } }
+            g_invwalk_len = 0;
+            return;
         }
     }
     if (g_os && !g_blt_busy_scope && g_derail_n < 6) {
@@ -6954,6 +7024,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nohidefix")) g_hide_parity_fix=0;   /* A/B: disable the combat hide-parity (vanish) fix */
         else if (!strcmp(argv[i],"--nopouncefix")) g_pounce_latch_fix=0;   /* A/B: disable the point-blank pounce latch fix */
         else if (!strcmp(argv[i],"--nodragonfix")) g_dragon_fix=0;   /* A/B: disable the dragon return-to-flight stand-down */
+        else if (!strcmp(argv[i],"--noinvmenufix")) g_invmenu_fix=0; /* A/B: disable garbage-item-id skip + label-walk hardening */
         else if (!strcmp(argv[i],"--nogoldfix")) g_gold_fix=0;   /* A/B: restore the cracked-build knife-restock gold corruption */
         else if (!strcmp(argv[i],"--noretailparity")) g_retail_parity=0;   /* A/B: disable the retail-parity data/code patches (keeps the cracked-baseline behaviour + goldens) */
         else if (!strcmp(argv[i],"--noretailsfx")) g_retail_sfx=0;   /* A/B: disable the B15 retail UI-feedback-sound sites (parity stays otherwise on) */
