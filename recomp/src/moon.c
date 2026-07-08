@@ -2280,6 +2280,34 @@ static inline void moonstone_watch(uint32_t a, uint32_t v, int sz) {
                     (unsigned)m68k_get_reg(NULL,M68K_REG_PPC), (unsigned long long)g_icount), fflush(g_log);
     }
 }
+/* INV-MENU LINK WATCH (2026-07-08, task #11 instrumentation): the loot/equip screens' hover-label
+ * entries live in two 27-entry x 0xe-byte tables (0x2fe44 knight-panel names, 0x2ffbe item names;
+ * both rebuilt at every service-screen setup by the 0x2dd4c/0x2de50 loops, which always clr.l each
+ * entry's +0xa next-link) plus the single static text entry at 0x37448 (its builder 0x2a17c also
+ * always writes next=0).  The moonstone click-crash = the label walker (0x2a1ae/0x2a312) following
+ * a NON-ZERO +0xa link out of a table entry into garbage.  Since no legitimate writer ever stores a
+ * non-zero next-link in these entries, any such write IS the corruptor -- log its PC.  Read-only,
+ * capped, off the hot path via the address early-out.  Grep the log for INVLINK-SET. */
+static int g_invlink_n = 0;
+static inline void invlink_watch(uint32_t a, uint32_t v, int sz) {
+    if (!g_os || v == 0u || g_invlink_n >= 40 || !g_log) return;
+    uint32_t end = a + (uint32_t)sz;
+    if (end <= 0x2fe44u || a >= 0x37456u) return;         /* fast reject */
+    uint32_t tab;
+    if      (a < 0x2fe44u + 27u*0xeu && end > 0x2fe44u) tab = 0x2fe44u;
+    else if (a < 0x2ffbeu + 27u*0xeu && end > 0x2ffbeu) tab = 0x2ffbeu;
+    else if (a < 0x37452u + 4u       && end > 0x37452u) tab = 0x37448u;  /* static entry's +0xa */
+    else return;
+    int hit = (tab == 0x37448u);
+    if (!hit)
+        for (uint32_t off = a - tab; off < end - tab; off++)
+            if ((off % 0xeu) >= 0xau) { hit = 1; break; }
+    if (!hit) return;
+    fprintf(g_log, "INVLINK-SET tab=%05x addr=%05x <= %0*x sz%d pc=%06x ppc=%08x ic=%llu\n",
+            tab, a, sz*2, v, sz, (unsigned)m68k_get_reg(NULL,M68K_REG_PC),
+            (unsigned)m68k_get_reg(NULL,M68K_REG_PPC), (unsigned long long)g_icount);
+    fflush(g_log); g_invlink_n++;
+}
 /* ROTWATCH (always-on, bounded): catch the in-combat "character disappears" regression.
  * Forensics on the broken save show the active-player pointer [0x2ebd0] went OFF-ROSTER
  * (0x134692 vs a valid 0x2e7dc+i*0x84 record) and the turn/player index [0x2ebc8]/[0x2f9da]
@@ -2305,12 +2333,12 @@ static inline void rotwatch(uint32_t a, uint32_t v, int sz) {
     }
 }
 static inline void w8(uint32_t a, uint8_t v)  {
-    a &= (RAM_SIZE-1); corrupt_watch(a, v, 1); lives_watch(a, v, 1); moonstone_watch(a, v, 1); rotwatch(a, v, 1);
+    a &= (RAM_SIZE-1); corrupt_watch(a, v, 1); lives_watch(a, v, 1); moonstone_watch(a, v, 1); rotwatch(a, v, 1); invlink_watch(a, v, 1);
     if (g_watch && a>=(g_watch-2) && a<=(g_watch+4))
         fprintf(g_log?g_log:stderr,"  WATCH8 @%06x <= %02x pc=%06x ic=%llu\n", a, v, (unsigned)m68k_get_reg(NULL,M68K_REG_PC), (unsigned long long)g_icount);
     if (sndcode_guard(a, v, 1)) return;
     g_ram[a] = v; }
-static inline void w16(uint32_t a, uint16_t v){ a &= (RAM_SIZE-1); corrupt_watch(a, v, 2); lives_watch(a, v, 2); moonstone_watch(a, v, 2); rotwatch(a, v, 2);
+static inline void w16(uint32_t a, uint16_t v){ a &= (RAM_SIZE-1); corrupt_watch(a, v, 2); lives_watch(a, v, 2); moonstone_watch(a, v, 2); rotwatch(a, v, 2); invlink_watch(a, v, 2);
     if (a == 0x392d4u) { g_curwr_pc = (uint32_t)m68k_get_reg(NULL,M68K_REG_PPC); g_curwr_n++; }
     if (g_watch && a>=(g_watch-2) && a<=(g_watch+4))
         fprintf(g_log?g_log:stderr,"  WATCH16 @%06x <= %04x pc=%06x ic=%llu\n", a, v, (unsigned)m68k_get_reg(NULL,M68K_REG_PC), (unsigned long long)g_icount);
@@ -2320,7 +2348,7 @@ static int g_novblank = 0;     /* deprecated --novblank: now a no-op (gate is de
 static int g_pollonly = 0;     /* --pollonly: never inject VERTB (pure polling, debug) */
 static int g_forcevblank = 0;  /* --forcevblank: inject VERTB every frame (debug) */
 static inline void w32(uint32_t a, uint32_t v){
-    a &= (RAM_SIZE-1); corrupt_watch(a, v, 4); lives_watch(a, v, 4); moonstone_watch(a, v, 4); rotwatch(a, v, 4);
+    a &= (RAM_SIZE-1); corrupt_watch(a, v, 4); lives_watch(a, v, 4); moonstone_watch(a, v, 4); rotwatch(a, v, 4); invlink_watch(a, v, 4);
     if (a == 0x392d4u) { g_curwr_pc = (uint32_t)m68k_get_reg(NULL,M68K_REG_PPC); g_curwr_n++; }
     if (g_watch && a==g_watch && g_log) fprintf(g_log,"  WATCH w32 @%06x <= %08x pc=%06x ic=%llu\n", a, v, (unsigned)m68k_get_reg(NULL,M68K_REG_PC), (unsigned long long)g_icount);
     if (sndcode_guard(a, v, 4)) return;
