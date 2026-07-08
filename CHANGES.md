@@ -43,6 +43,35 @@ Defects in the 1991 game itself that this port corrects.
 
 ---
 
+## 1b. Retail-parity layer (default on; `--noretailparity` reverts)
+
+The commonly circulating ADFs carry an **earlier, pre-release-ish build** of the game engine than the boxed release (verified against SPS preservation images of the retail disks — the retail build even carries a version tag, "v1.4"). Beyond isolated byte defects, the two builds *play differently*: Mindscape fixed bugs and rebalanced the game for retail. This layer brings the port's gameplay up to the retail build — a guarded in-RAM patch table for data/same-size code differences plus PC hooks for retail's inserted logic, all fingerprint-gated so it is inert on non-cracked game data.
+
+**Defect repairs (retail fixed these; the cracked build shipped broken):**
+
+- **Weapon-purchase corruption** — the 10-gold weapon rung's goods-write lost its relocation in the cracked build: it stomped low RAM *and* left the shop's goods variable stale, so the knight equipped garbage. Redirected to the goods variable, as retail does.
+- **Knife-restock loop runs retail's own opcodes** — the two broken size suffixes (byte-wide gold pay = −512/knife; dead knife cap) are patched to the retail instructions; the earlier port hook (`--nogoldfix`) auto-inerts via its byte-guard and remains for parity-off runs.
+- **Dead knights excluded from encounters** — a lives test that treated the 0xff (dead/retired) marker as "alive" widened to retail's signed compare.
+- **Demon-fight corruption cluster** — a stale-pointer per-tick movement write, an action-timer written through a sound-call's parameter pointer into game *data* (a silent wild-write; the timer never armed), missing state-flag clears at fight init (stale hold-latches carried across fights), and an unmasked 8-entry table index. All four repaired as retail did.
+- **Stale-state hygiene** — combat flag clears widened byte→word (the second flag byte stayed stale); shop-intent globals preset per evaluation (stale-intent hole); handler-list installs deduped (the cursor-install site; the effect site was already fixed by `g_tasklist_fix`, which matches retail's own dedup); a task-slot helper no longer clobbers the caller's register.
+- **KO-latch** — retail latches a downed fighter and stops applying further hit damage/animation to them; ported host-side.
+
+**Gameplay / balance (the retail experience):**
+
+- **Stat-gain roll direction** — cracked succeeded on *high* rolls (gains accelerate); retail on *low* (diminishing returns).
+- **Minimum damage floor** — retail clamps armor-reduced damage to ≥ 5; cracked could reduce hits to 0.
+- **Shop economy** — Sword of Sharpness 52 → 100 GP, ring of protection 40 → 50 GP (sell prices follow at half), with the menu strings corrected — the two longer retail lines live in a small string pool placed in a dead data block the retail build deleted.
+- **Knight AI** — knights drink healing potions when hurt at retail's much more eager thresholds (any damage / lives < 5); the healer visit is affordable at retail's gold > 15 for 15 GP (was > 25 for 25); knights **auto-use dragon scrolls** to sic the dragon on their quarry (the whole stage is dead code in the cracked build — re-activated with retail's gates); wander destinations bias toward the nearest map node; chase targets are cleared at fight staging (no stale chases through fights).
+- **Quest-object placement** — the four marked objects are placed with an independent roll per map quadrant (the cracked build reused one roll for all four — correlated placement).
+- **Loot** — the victor takes the loser's *better armor* (hp-adjusted by retail's armor-weight table, loser reset to base) instead of halving their gold; the best-weapon loot entry is listed retail's way; demon close-range timing and aggression thresholds retuned to retail.
+- **Cosmetics** — the fourth knight is retail's **SIR GUNTHER** (the cracked build's "SIR EDWARD"); the overland **'V' key shows the game version tag ("v1.4")** exactly as retail's handler does.
+
+**Kept from the cracked build (deliberate):** the practice-arena monster select works via its (unlabeled) keys as in the cracked build — retail's labeled menu screen is not yet ported. Retail's animation-descriptor data revision is not carried (entangled with pointer tables). The retail loader's sector-checksum verify is irrelevant to the port (clean data by construction).
+
+**Existing fixes re-evaluated against retail** (the "which of ours are still needed" audit): every previously shipped fix addresses either a bug present in *both* builds (choke-haul, pounce-latch, hide-parity/vanish, AUD1 DMACON, edge-walk, chase-engage, day-end TOCTOU — retail restructured that code; our fix is the cracked-side equivalent) or a port-level concern (RNG entropy, guards, QoL) — all stay. `g_dragon_fix` deliberately goes *beyond* retail: the boxed game still never clears the dragon-hunt flag after a lost fight (the invisible-rematch ambush), ours does. One deliberate divergence remains: the **type-4 "curse" life-drain is suppressed** (see section 1) even though retail also ships that mechanic — restoring it for strict retail behavior is a one-line decision if ever wanted.
+
+---
+
 ## 2. Faithfulness fixes
 
 Glitches the port introduced in reproducing the Amiga, fixed to match real hardware.

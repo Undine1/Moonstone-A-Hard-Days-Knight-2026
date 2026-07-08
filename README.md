@@ -66,6 +66,17 @@ The original Mindscape game disks and modules are **not** included (copyright). 
 supply your own `Moonstone ... Disk1/2/3.adf`; the runtime extracts the boot modules from
 them automatically.
 
+**A note on disk provenance:** the ADF images commonly circulating online are cracked
+dumps that carry an **earlier, pre-release-ish build** of the game engine — not the boxed
+retail release (which identifies itself as "v1.4"). The differences are not cosmetic:
+the early build has genuine bugs Mindscape later fixed (broken shop transactions, combat
+state leaks) and different game balance (shop prices, AI behaviour, damage rules).
+Verified against SPS preservation images of the retail disks. The port detects the data
+lineage at startup (see the `LINEAGE:` log line) and, on the cracked build, applies a
+**retail-parity layer** (default on, `--noretailparity` to disable) that restores the
+retail build's fixes and gameplay — see [CHANGES.md](CHANGES.md) § 1b. If you can dump
+your own boxed disks (or use SPS/KryoFlux preservation images), prefer those.
+
 ## License
 
 Copyright © 2026 Undine1. The port's runtime code in this repository is licensed under the
