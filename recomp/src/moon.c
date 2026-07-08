@@ -2858,6 +2858,25 @@ static const struct parity_patch g_parity_tab[] = {
      *     knights that cracked `beq` (==0 only) let through.  opcode 0x67->0x6f, keep
      *     cracked's own branch displacement. */
     { 0x21adcu, 4, {0x67,0x00,0x00,0xb2}, {0x6f,0x00,0x00,0xb2}, "encounter-lives-ble" },
+    /* A1  weapon (0x17) shop rung goods-write: cracked lost the relocation on the
+     *     goods operand -> `move.l #$17,$58.l` writes the weapon id to absolute RAM
+     *     0x58 (vector area) AND leaves the intent goods var STALE (a knight buying
+     *     the 10-gold weapon then equips whatever goods held).  Retail writes the
+     *     goods global.  Same-size operand fix: $00000058 -> the goods var [0x37610]
+     *     (= h4+0x736c; the sibling price/kind rungs write [0x3760c]/[0x3760e]). */
+    { 0x4101cu, 4, {0x00,0x00,0x00,0x58}, {0x00,0x03,0x76,0x10}, "weapon-goods-write" },
+    /* A7  combat-object flag clears widened move.b -> move.w (clears $69 too, not just
+     *     $68): retail resets the full flag word at state transitions where cracked
+     *     left the high byte stale.  Same-size opcode flip 0x11/0x13 -> 0x31/0x33. */
+    { 0x27102u, 1, {0x11}, {0x31}, "clr68-word" },
+    { 0x27126u, 1, {0x11}, {0x31}, "clr68-word" },
+    { 0x2716eu, 1, {0x11}, {0x31}, "clr68-word" },
+    { 0x2724eu, 1, {0x13}, {0x33}, "clr68-word" },
+    { 0x2725eu, 1, {0x13}, {0x33}, "clr68-word" },
+    { 0x273a0u, 1, {0x13}, {0x33}, "clr68-word" },
+    { 0x2741au, 1, {0x13}, {0x33}, "clr68-word" },
+    { 0x2743eu, 1, {0x13}, {0x33}, "clr68-word" },
+    { 0x274fau, 1, {0x13}, {0x33}, "clr68-word" },
     /* B1  stat-gain roll: retail succeeds on (roll+bonus) <= 50, cracked on >= 50
      *     (blt->bgt; same disp).  Mechanism = the post-fight stat-increment gate;
      *     byte-change certain, "stat-gain" naming is the strong hypothesis. */
