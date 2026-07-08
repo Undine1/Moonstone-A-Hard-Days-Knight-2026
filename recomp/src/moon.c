@@ -83,6 +83,7 @@ static int g_inv_request = 0;   /* host pressed the inventory key (Space/I/padY/
 static int g_in_inventory = 0;  /* 1 while the inventory screen is open (so the open-key can't re-open it in a loop) */
 static int g_rest_request = 0;  /* host pressed REST/skip-turn (E / pad Back); injects scancode 0x12 ('E') at the map poll */
 static int g_rest_pending = 0;  /* 1 for the one poll AFTER injecting 'E', to re-clear [0x3bf74] so one press = exactly one skipped turn */
+static int g_ver_request = 0;   /* B17: host 'V' keydown -> inject the game's 'V' index (0x2f) at the map poll (version display) */
 static int g_firewait_hot = 0;  /* set when the "wait for fire" routine (0x22fd0) ran this frame; cleared each frame in capture_frame */
 static int g_mappoll_hot = 0;   /* set when the normal map turn-loop's keyboard poll (0x4024c) ran this frame; the delivery overview is a SEPARATE loop that never hits it -- so firewait && !mappoll = the garbled delivery overview */
 /* REST/inventory injection hardening (2026-07-02 can-kick audit): the request latches
@@ -2957,10 +2958,15 @@ static void apply_retail_parity(void) {
      * valid text. */
     static const char pool0[] = "Buy Sword of Sharpness for 100 GP";   /* -> [0x39b66] */
     static const char pool1[] = "Sell Sword of Sharpness for 50 GP";   /* -> [0x39b8c] */
+    /* B17: retail's version tag (h4+0x7bea holds {0x0001,"v1.4"}); the flag word +
+     * text layout is mirrored so the alert routine sees exactly retail's bytes. */
+    static const uint8_t pool2[] = { 0x00, 0x01, 'v', '1', '.', '4', 0x00 };  /* -> [0x39bae], text at [0x39bb0] */
     if (memcmp(g_ram + 0x39b66u, pool0, sizeof(pool0)) != 0)
         memcpy(g_ram + 0x39b66u, pool0, sizeof(pool0));
     if (memcmp(g_ram + 0x39b8cu, pool1, sizeof(pool1)) != 0)
         memcpy(g_ram + 0x39b8cu, pool1, sizeof(pool1));
+    if (memcmp(g_ram + 0x39baeu, pool2, sizeof(pool2)) != 0)
+        memcpy(g_ram + 0x39baeu, pool2, sizeof(pool2));
     unsigned n = (unsigned)(sizeof(g_parity_tab)/sizeof(g_parity_tab[0])), applied = 0;
     for (unsigned i = 0; i < n; i++) {
         const struct parity_patch *p = &g_parity_tab[i];
@@ -3497,6 +3503,30 @@ void moon_instr_hook(unsigned int pc) {
                     fflush(g_log); an++; } }
             }
         }
+    }
+    /* B17 'V' on the overland map = retail's version display (a retail-only key
+     *     handler between the 'E' end-turn and 'Q' checks: three alert globals,
+     *     then the h34 alert routine with a0 -> the "v1.4" tag, then two input
+     *     helpers, then the normal continuation).  Cracked lacks handler AND tag;
+     *     the tag lives in the parity pool, and the calls run as an rts-CHAIN
+     *     pushed on the guest stack (alert -> h20+$40 -> h20+$666 -> continue at
+     *     0x402a2), exactly retail's order.  Hook at the 'Q' compare, where the
+     *     key is still in d0. */
+    if (g_os && g_retail_parity && pc == 0x40296u
+        && r16(0x40296u) == 0xb07cu && r16(0x40298u) == 0x0051u
+        && (m68k_get_reg(NULL, M68K_REG_D0) & 0xffffu) == 0x56u) {
+        w16(0x7f688u, 1); w16(0x7f684u, 1); w16(0x7f682u, 0);
+        m68k_set_reg(M68K_REG_A0, 0x39bb0u);           /* "v1.4" in the parity pool */
+        uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7);
+        sp -= 4; w32(sp, 0x402a2u);                    /* ...then the dispatcher continuation */
+        sp -= 4; w32(sp, 0x3bf4eu);                    /* ...then h20+$666 (input flush) */
+        sp -= 4; w32(sp, 0x3b928u);                    /* ...then h20+$40 */
+        m68k_set_reg(M68K_REG_A7, sp);
+        m68k_set_reg(M68K_REG_PC, 0x3fae8u);           /* h34+$350: the alert routine */
+        if (g_log) { static int vn = 0; if (vn < 4) {
+            fprintf(g_log, "V-VERSION alert shown fr=%d ic=%llu\n",
+                    g_cur_frame, (unsigned long long)g_icount);
+            fflush(g_log); vn++; } }
     }
     /* B8  wander-destination pick (0x40906): cracked re-rolls the RNG until the
      *     &3 result is nonzero (uniform 1..3 over the 3 nearest map nodes); retail
@@ -4085,6 +4115,9 @@ void moon_instr_hook(unsigned int pc) {
         else if (g_rest_request && r16(0x3bf74u) == 0) {
             w16(0x3bf74u, 0x12); g_rest_request = 0; g_rest_pending = 1;
             g_rest_idx0 = r16(0x2f9dau);                           /* took-signal baseline */
+        }
+        else if (g_ver_request && r16(0x3bf74u) == 0) {            /* B17: 'V' -> version display */
+            w16(0x3bf74u, 0x2f); g_ver_request = 0;                /* 0x2f = the game's 'V' index */
         }
     }
     if (g_os && pc == 0x405b4u) g_in_inventory = 1;   /* inventory screen just opened */
@@ -5707,6 +5740,11 @@ static int run_sdl(int scale) {
                     case SDLK_e:
                         if (d && !g_blt_busy_scope && !g_in_inventory
                             && g_map_live && (g_cur_frame - g_map_live) < 3) g_rest_request = 1; break;
+                    /* V = version display on the overland map (retail-parity B17: retail's own
+                     * map key; the handler is re-added by the g_retail_parity hook at 0x40296). */
+                    case SDLK_v:
+                        if (d && g_retail_parity && !g_blt_busy_scope && !g_in_inventory
+                            && g_map_live && (g_cur_frame - g_map_live) < 3) g_ver_request = 1; break;
                     case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5:
                     case SDLK_6: case SDLK_7: case SDLK_8: case SDLK_9:
                         g_kdigit = d ? (e.key.keysym.sym - SDLK_1 + 1) : 0; break;  /* overlap-popup select */
