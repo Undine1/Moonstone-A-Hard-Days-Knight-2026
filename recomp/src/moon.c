@@ -4291,15 +4291,25 @@ void moon_instr_hook(unsigned int pc) {
          * (a unique weapon, NOT a moonstone) -- deliberately NOT blocked; this is moonstone-only.
          * EXCLUDE slot 5 (Guardian): it LEGITIMATELY holds the moonstone (the random 1-of-4 reward
          * the player takes when beating it), so it must be allowed to win/hold one.  Block only
-         * true enemies = any non-player winner that is NOT the Guardian. */
-        if (d0 == 0x16u && slot != 0u && slot != 1u && slot != 2u && slot != 3u && slot != 5u) {
+         * true enemies = any non-player winner that is NOT the Guardian.
+         * TIGHTENED 2026-07-08 (operator): the DRAGON shares slot 5 with the Guardian (same roster
+         * record, kind byte +0x4d = 0x14 landed / 0x28 flying) and was therefore exempt -- but a
+         * dragon holding the moonstone exposes the SAME unfixed click-crash as the knights did, so
+         * it is blocked too until that root cause is fixed (then the faithful "dragon hoards it,
+         * slay it to reclaim" behaviour can return).  The Guardian (slot 5, non-dragon kind)
+         * remains the only non-player that can hold it. */
+        {
+            uint8_t wkind = (win < RAM_SIZE) ? g_ram[(win + 0x4du) & (RAM_SIZE - 1u)] : 0;
+            int is_dragon = (slot == 5u && (wkind == 0x14u || wkind == 0x28u));
+            if (d0 == 0x16u && ((slot != 0u && slot != 1u && slot != 2u && slot != 3u && slot != 5u) || is_dragon)) {
             m68k_set_reg(M68K_REG_PC, (pc == 0x215c2u) ? 0x21596u   /* routine B: continue to next item */
                                                         : 0x21578u);/* routine A: finish (its normal token exit) */
             g_msleak_blocked++;
             if (g_log)
-                fprintf(g_log, "MS-LEAK-BLOCK fr=%d ic=%llu quest-token=%04x transfer to non-player SUPPRESSED (winner=%06x slot=%d)\n",
-                        g_cur_frame, (unsigned long long)g_icount, d0, win, (int)slot), fflush(g_log);
+                fprintf(g_log, "MS-LEAK-BLOCK fr=%d ic=%llu quest-token=%04x transfer to non-player SUPPRESSED (winner=%06x slot=%d kind=%02x)\n",
+                        g_cur_frame, (unsigned long long)g_icount, d0, win, (int)slot, wkind), fflush(g_log);
             return;
+            }
         }
     }
 
