@@ -2888,24 +2888,13 @@ static const struct parity_patch g_parity_tab[] = {
     /* B11 demon aggression threshold table (8 entries) retuned 70/60/50/40/30/20/15/10
      *     -> 50/40/30/30/20/10/8/6.  Pairs with the andi #7 index-mask hook (A6). */
     { 0x392b4u, 8, {0x46,0x3c,0x32,0x28,0x1e,0x14,0x0f,0x0a}, {0x32,0x28,0x1e,0x1e,0x14,0x0a,0x08,0x06}, "demon-aggr-table" },
-    /* B18 animation-descriptor constant 0xd0 -> 0xcc (17 sites; retail data revision). */
-    { 0x31322u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x318aeu, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x3193eu, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x31c34u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x31daau, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x32016u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x32604u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x32696u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x327a0u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x3294cu, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x32b1cu, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x33824u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x33908u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x33bccu, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x34124u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x341a6u, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
-    { 0x36ecau, 3, {0xff,0xff,0xd0}, {0xff,0xff,0xcc}, "anim-cc" },
+    /* B18 animation-descriptor constants 0xd0 -> 0xcc were REMOVED from the table
+     *     2026-07-08: applied in isolation they are entangled with other retail h4
+     *     animation-pointer-table changes we do NOT carry, so cracked's tables +
+     *     retail's descriptor bytes compute a garbage anim-script pointer (a benign
+     *     unmapped read that terminates the script early -- caught by an A/B of the
+     *     unmapped-access count).  Cosmetic + unidentified; deferred to a whole-h4
+     *     animation-data migration if ever pursued. */
 };
 static void apply_retail_parity(void) {
     if (!g_retail_parity || g_lineage != LIN_CRACKED) return;
@@ -3278,6 +3267,34 @@ void moon_instr_hook(unsigned int pc) {
                 fflush(g_log); gn++;
             } }
         }
+    }
+    /* ===== RETAIL-PARITY PC HOOKS (size-changing retail edits) =====
+     * These carry retail behaviour that INSERTED instructions in the cracked
+     * layout (so they cannot be in-place byte patches -- see the g_parity_tab
+     * table above for the same-size ones).  All gated on g_retail_parity and
+     * byte-guarded so they are inert off the cracked build.  Ledger: A/B items
+     * in extracted/LEDGER_DRAFT.md. */
+    /* B2  minimum damage floor: the armor-reduction helper (0x266a?) ends
+     *     `move.b $8(a2),d1; lsr.w d1,d0; rts`, so heavy armor can reduce a hit's
+     *     damage all the way to 0.  Retail clamps the result to >= 5 before the
+     *     rts (`cmp.w #5,d0; bgt +; move.w #5,d0`).  Apply the same floor. */
+    if (g_os && g_retail_parity && pc == 0x266c0u
+        && r16(0x266beu) == 0xe268u && r16(0x266c0u) == 0x4e75u) {
+        int16_t d0 = (int16_t)(m68k_get_reg(NULL, M68K_REG_D0) & 0xffffu);
+        if (d0 < 5) {
+            uint32_t hi = m68k_get_reg(NULL, M68K_REG_D0) & 0xffff0000u;
+            m68k_set_reg(M68K_REG_D0, hi | 5u);
+        }
+    }
+    /* A6  demon aggression-table index bounds mask: the first threshold lookup
+     *     (0x4263c `cmp.b (a5,d2.w),d0`, table [0x392b4]) indexes with the raw
+     *     word from [0x30394]; retail masks `andi.w #$7,d2` first so the index
+     *     stays inside the 8-entry table.  Mask d2 just before the read (the
+     *     second lookup at 0x426ca is left unmasked in BOTH builds -- matched). */
+    if (g_os && g_retail_parity && pc == 0x4263cu
+        && r16(0x4263cu) == 0xb035u && r16(0x42636u) == 0x4bf9u) {
+        uint32_t d2 = m68k_get_reg(NULL, M68K_REG_D2);
+        m68k_set_reg(M68K_REG_D2, (d2 & 0xffff0000u) | (d2 & 7u));
     }
     /* ===== TOWN-EXIT DAY-END FIX (see g_dayend_fix decl) ===== */
     if (g_os && g_dayend_fix && pc == 0x4044eu && r16(pc) == 0x33c0u) {  /* `move.w D0,$2fa08` = budget re-derive */
