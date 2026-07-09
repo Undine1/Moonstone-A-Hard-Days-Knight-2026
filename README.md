@@ -92,6 +92,20 @@ restores retail's shop code, and the renderer now validates ids (`--noinvmenufix
 No real Moonstone is involved: every actual token transfer in the game is player-sourced
 (verified exhaustively — see CHANGES.md).
 
+**The removed curse.** The original game contains a completely undocumented curse: an
+overland hazard event drains the knight's hit points and marks him cursed, after which he
+loses **one life at every day-end, indefinitely**. A cure exists and is just as
+undocumented — a donation at the town healer lifts the curse (the healer even has a
+dedicated dialog response for it). The mechanic appears in no manual and no period
+walkthrough; its trigger behaves erratically (in our forensics it fired repeatedly once
+all black knights were dead, and its selection logic has never been fully mapped even in
+the code). This port **removes it**: it strikes players as random, and since neither the
+cause nor the cure is discoverable, everyone who ever hit it experienced it as a
+life-draining bug rather than a mechanic. The hazard body is skipped and any stale curse
+flag in an existing save is cleared at day-end. Note this is distinct from Math the
+Wizard's punishment for greedy repeat visitors — a few days of being too "ill" to win a
+fight — which is time-limited, self-curing, and remains in the game.
+
 ## License
 
 Copyright © 2026 Undine1. The port's runtime code in this repository is licensed under the
