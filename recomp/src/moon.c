@@ -2831,25 +2831,25 @@ static int      g_invmenu_fix = 1;   /* ROOT FIX 2026-07-08 (task #11, the moons
                                        * are untouched (verified: token steal-back flow byte-identical).
                                        * --noinvmenufix reverts both layers for A/B. */
 static int      g_invwalk_len = 0;   /* entries visited in the current label walk (reset at the walker entry) */
-static int      g_credpace = 110;    /* INTRO CREDITS PACING (2026-07-09, operator: "credit roll rolls too fast
-                                       * compared to the original... you see the empty moon backdrop for too
-                                       * long"): the moon backdrop IS the loading screen -- the boot main
-                                       * thread does the CPU-bound MFM decode of the animated intro while a
-                                       * vblank palette task (0x2e4c0) runs the credit-page fades; the page
-                                       * SWAPS happen at load milestones on the SAME thread (sequencer
-                                       * 0x2e7fc-0x2e9d0), so vanilla pages blip by in ~75 frames each and
-                                       * the credits end ~fr975 while the load grinds on to ~fr1650 = ~13s
-                                       * of EMPTY moon.  TWO cooperating levers: (1) g_bootboost runs the
-                                       * 68k faster ONLY while executing inside the boot loader/decoder
-                                       * (charge did/boost -- vblank-paced visuals untouched, load window
-                                       * shrinks); (2) a page-boundary hook holds each credit page on screen
-                                       * for at least g_credpace frames (vblank wait injected into the
-                                       * sequencer -- affordable because the boosted loader catches up).
-                                       * Result: unhurried pages, transition right after the last one.
-                                       * --credpace N (frames/page, 0=vanilla), --nocredpace both-off. */
-static int      g_bootboost = 4;     /* boot loader CPU boost factor (see g_credpace; 1 = authentic) */
+static int      g_credpace = 0;      /* INTRO CREDITS PACING (2026-07-09, operator-picked approach v2): the
+                                       * moon backdrop IS the loading screen -- the boot main thread does the
+                                       * CPU-bound MFM decode + seeks of the animated intro while the credit
+                                       * pages flip at LOAD MILESTONES (sequencer 0x2e7fc-0x2e9d0).  Approach:
+                                       * leave the credit roll COMPLETELY ORIGINAL (authentic load pace, all 6
+                                       * pages, original rhythm) and only after the sequencer's post-page-6
+                                       * exit branch (0x2e91c count check taken) WARP the remaining load --
+                                       * g_bootboost CPU charge + the boot seek-settle acceleration -- so the
+                                       * empty moon collapses from ~13s to a few seconds.  g_credpace (min
+                                       * frames/page via a wait-divert at the page boundary) is KEPT as an
+                                       * optional extra but DEFAULTS OFF: holding pages makes load milestones
+                                       * coalesce and the sequencer can then skip whole pages (tried 3 designs
+                                       * 2026-07-09; see the memory notes).  --credpace N re-enables holds. */
+static int      g_bootboost = 4;     /* post-credits boot load warp factor (1 = authentic; --bootboost N) */
 static int      g_bootphase = 1;     /* 1 until the animated-intro program first runs (its stamp fn 0x21330
-                                       * never executes during boot; cleared there).  Gates g_bootboost. */
+                                       * never executes during boot; cleared there).  Gates the warp. */
+static int      g_creditsdone = 0;   /* 1 once the credit sequencer takes its post-page-6 exit branch --
+                                       * the warp (boost + seek accel) only runs from then on, so the whole
+                                       * visible credit roll stays authentic. */
 static int      g_pageframe = -1;    /* frame stamp of the last credit-page boundary */
 static int      g_stackcap_fix = 1;  /* QoL FIX 2026-07-09 (operator 2026-07-03: "an item can be held beyond what
                                        * the inventory screen can display... cap stacks at their intended size as
@@ -3894,6 +3894,15 @@ void moon_instr_hook(unsigned int pc) {
     /* boot phase terminator (see g_bootphase): the animated-intro program's stamp fn. */
     if (g_bootphase && pc == 0x21330u && r16(pc) == 0x23f9u && r32(pc + 2u) == 0x0002a56au)
         g_bootphase = 0;
+    /* credits-done detector (see g_creditsdone): the sequencer's post-page-6 exit -- the count
+     * check at 0x2e91c (`cmpi.w #6,$2ebc4.l`) with the counter at 6.  Page 6 has had its natural
+     * milestone-paced display by then; from here the moon is just a loading screen. */
+    if (g_os && !g_creditsdone && g_bootphase && pc == 0x2e91cu
+        && r16(pc) == 0x0c79u && r32(pc + 2u) == 0x00060002u && r16(0x2ebc4u) >= 6u) {
+        g_creditsdone = 1;
+        if (g_log) { fprintf(g_log, "INTRO-WARP credits done fr=%d vbl=%u (post-credits load warp on)\n",
+                             g_cur_frame, r32(0x2a56au)); fflush(g_log); }
+    }
     /* ===== INTRO CREDITS PAGE PACING (see g_credpace decl): hold each page >= N frames =====
      * 0x2e8d6 = the sequencer's per-page boundary (entry to the flash-to-white before swapping;
      * `lea $264d2.l,A0` resident, boot loader only).  Divert through the boot's own wait-frames
@@ -4250,7 +4259,7 @@ void moon_instr_hook(unsigned int pc) {
      * files are scattered across the disk (the directory track sits mid-disk), so the intro
      * load pays ~25 long seeks of pure dead time on a file-backed "drive".  Boot phase only;
      * the step/cylinder model itself is untouched. */
-    if (g_os && g_dsk_fastwait && g_bootphase && (pc == 0x29c58u || pc == 0x29d5cu)
+    if (g_os && g_dsk_fastwait && g_bootphase && g_creditsdone && (pc == 0x29c58u || pc == 0x29d5cu)
         && r16(pc) == 0x0839u && r32(pc + 2u) == 0x000000bfu)
         g_ca.icr_flags |= 0x01;
     /* Multi-candidate numbered popup: its handler busy-waits on the keyboard buffer
@@ -7386,7 +7395,7 @@ int main(int argc, char **argv) {
              * MFM reader/decoder (or the decruncher overlay) are charged at 1/boost, so the
              * CPU-bound load finishes in fewer frames.  Attract-scope + region gated: mid-game
              * disk loads (scope off) stay authentic. */
-            if (g_os && g_bootboost > 1 && g_bootphase)
+            if (g_os && g_bootboost > 1 && g_bootphase && g_creditsdone)
                 did /= g_bootboost;
             /* Uniform DMA cycle-steal (attract-scoped): see g_dma_steal_pct. */
             int elapsed = did;

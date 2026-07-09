@@ -11,7 +11,7 @@
 # ramfnv input "os" = full HLE boot running the real attract; frame 4000 covers the
 #   window (2000-3000) where an unguarded hook misfire once hid from the 500-frame golden.
 determinism	ramfnv	cold	500	4452388c
-attract	ramfnv	os	4000	b99b7740
+attract	ramfnv	os	4000	8d180f1e
 combatrun	savefnv	moonstone_combatrun.sav	600	7f911e77
 vanishrun	savefnv	moonstone_bug.sav	600	84ad0aeb
 townday	scriptfnv	moonstone_townmap.sav|10:f,16:.,450:d,494:.,504:f,510:.	800	5c580298
