@@ -2844,7 +2844,9 @@ static int      g_credpace = 0;      /* INTRO CREDITS PACING (2026-07-09, operat
                                        * optional extra but DEFAULTS OFF: holding pages makes load milestones
                                        * coalesce and the sequencer can then skip whole pages (tried 3 designs
                                        * 2026-07-09; see the memory notes).  --credpace N re-enables holds. */
-static int      g_bootboost = 4;     /* post-credits boot load warp factor (1 = authentic; --bootboost N) */
+static int      g_bootboost = 14;    /* post-credits boot load warp factor (1 = authentic; --bootboost N;
+                                       * 14 = the knee of the curve -- the remaining ~2.5s tail is the moon's
+                                       * own authored fade-out, not load time) */
 static int      g_bootphase = 1;     /* 1 until the animated-intro program first runs (its stamp fn 0x21330
                                        * never executes during boot; cleared there).  Gates the warp. */
 static int      g_creditsdone = 0;   /* 1 once the credit sequencer takes its post-page-6 exit branch --
