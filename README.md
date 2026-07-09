@@ -77,6 +77,21 @@ lineage at startup (see the `LINEAGE:` log line) and, on the cracked build, appl
 retail build's fixes and gameplay — see [CHANGES.md](CHANGES.md) § 1b. If you can dump
 your own boxed disks (or use SPS/KryoFlux preservation images), prefer those.
 
+**The famous "black knight suddenly has a Moonstone" bug**, seen across every copy of the
+game for three decades, turned out to be two original defects stacked: the game's inventory
+panels render a knight's raw weapon/armor **id fields with no range check**, and several id
+values just past the legal range happen to index the three *Moonstone* name entries (and the
+orb sprites) — so any knight whose equipment field holds a garbage id **displays as carrying
+a Moonstone that does not exist** (ids further out send the hover-label renderer walking
+garbage memory: the notorious inventory crash). That rendering flaw is in **both** builds,
+including boxed retail. What made it epidemic on the circulating ADFs is that the earlier
+build's broken shop code mass-produces exactly such garbage ids (an armor id written into
+the weapon field); retail fixed the producer but kept the rendering flaw, so genuine-but-rare
+sightings on original disks are expected too. The port fixes both ends: the parity layer
+restores retail's shop code, and the renderer now validates ids (`--noinvmenufix` reverts).
+No real Moonstone is involved: every actual token transfer in the game is player-sourced
+(verified exhaustively — see CHANGES.md).
+
 ## License
 
 Copyright © 2026 Undine1. The port's runtime code in this repository is licensed under the
