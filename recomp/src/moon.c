@@ -3935,6 +3935,41 @@ void moon_instr_hook(unsigned int pc) {
             }
         }
     }
+    /* WAVE SPAWN/DEATH TRACE (2026-07-09, operator: "killed a monkey and another popped out at
+     * the same place"): the wave placer 0x24f9e claims a free combat record (0x24f7a) and writes
+     * its X/Y from the spawn table (off-screen entries, alternating via [0x2e1ea]) -- a mid-arena
+     * pop should be impossible.  Log each placement (record, X written, toggle) at the coord-copy
+     * instruction, and each death-bookkeeping pass, to catch the real mechanism.  Read-only, capped. */
+    if (g_os && g_log && pc == 0x24fb2u && r16(pc) == 0x3358u && r16(pc + 2u) == 0x0004u) {
+        static int sn = 0; if (sn < 30) {
+            uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0), a1 = m68k_get_reg(NULL, M68K_REG_A1);
+            fprintf(g_log, "WAVE-SPAWN rec=%06x X=%d tog=%u e1e8=%u fr=%d ic=%llu\n",
+                    a1, (int)(int16_t)r16(a0), r16(0x2e1eau), r16(0x2e1e8u),
+                    g_cur_frame, (unsigned long long)g_icount);
+            fflush(g_log); sn++;
+        }
+    }
+    if (g_os && g_log && pc == 0x2135au && r16(pc) == 0x2079u && r32(pc + 2u) == 0x0002e1f6u) {
+        static int dn = 0; if (dn < 30) {   /* death bookkeeping head (`movea.l $2e1f6,A0` resident) */
+            fprintf(g_log, "WAVE-DEATH e1e4=%u e1e6=%u e1e8=%u fr=%d ic=%llu\n",
+                    r16(0x2e1e4u), r16(0x2e1e6u), r16(0x2e1e8u),
+                    g_cur_frame, (unsigned long long)g_icount);
+            fflush(g_log); dn++;
+        }
+    }
+    if (g_os && g_log && pc == 0x28084u && r16(pc) == 0x4eb9u && r32(pc + 2u) == 0x00024f7au) {
+        static int cn = 0; if (cn < 40) {   /* generic actor-create head (`jsr $24f7a` resident) */
+            uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7);
+            fprintf(g_log, "ACTOR-CREATE X=%d Y=%d kind=%02x face=%u ret=%06x fr=%d ic=%llu\n",
+                    (int)(int16_t)(m68k_get_reg(NULL, M68K_REG_D0) & 0xffffu),
+                    (int)(int16_t)(m68k_get_reg(NULL, M68K_REG_D2) & 0xffffu),
+                    (unsigned)(m68k_get_reg(NULL, M68K_REG_D5) & 0xffu),
+                    (unsigned)(m68k_get_reg(NULL, M68K_REG_D3) & 0xffu),
+                    (sp < RAM_SIZE - 4u) ? r32(sp) : 0u,
+                    g_cur_frame, (unsigned long long)g_icount);
+            fflush(g_log); cn++;
+        }
+    }
     /* ===== INVENTORY-MENU CRASH-PROOFING (see g_invmenu_fix decl) ===== */
     /* Layer 1: item-id validation at the shared hotspot-builder heads (0x2c85e falls through into
      * 0x2c872; hooking both catches every entry path, and a valid item just re-checks harmlessly).
