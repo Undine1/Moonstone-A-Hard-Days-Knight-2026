@@ -2308,6 +2308,23 @@ static inline void invlink_watch(uint32_t a, uint32_t v, int sz) {
             (unsigned)m68k_get_reg(NULL,M68K_REG_PPC), (unsigned long long)g_icount);
     fflush(g_log); g_invlink_n++;
 }
+/* AI-KNIGHT ITEM WATCH (2026-07-09, operator: "knights are looting items/gold in a way that falls
+ * outside of what we're tracking" — proven by his session saves: knight2 gained a ring and knight3
+ * +25 gold between saves with the player uninvolved, and no LOOT-XFER logged.  The known acquisition
+ * paths (loot merge 0x2150e, screen takes, temple buy) don't explain it; the writer is UNIDENTIFIED.
+ * Log every non-zero write into the three AI knights' item structs (rec1-3 -> 0x2ea88/0x2eaa0/0x2eab8,
+ * 0x18 bytes each, contiguous) with the writing PC.  Read-only, capped, cheap range check. */
+static int g_aiitem_n = 0;
+static inline void aiitem_watch(uint32_t a, uint32_t v, int sz) {
+    if (!g_os || v == 0u || g_aiitem_n >= 60 || !g_log) return;
+    uint32_t end = a + (uint32_t)sz;
+    if (end <= 0x2ea88u || a >= 0x2ead0u) return;
+    fprintf(g_log, "AIITEM-SET rec%u off=%x <= %0*x sz%d pc=%06x ppc=%08x ic=%llu\n",
+            1u + (a - 0x2ea88u) / 0x18u, (a - 0x2ea88u) % 0x18u, sz*2, v, sz,
+            (unsigned)m68k_get_reg(NULL,M68K_REG_PC),
+            (unsigned)m68k_get_reg(NULL,M68K_REG_PPC), (unsigned long long)g_icount);
+    fflush(g_log); g_aiitem_n++;
+}
 /* ROTWATCH (always-on, bounded): catch the in-combat "character disappears" regression.
  * Forensics on the broken save show the active-player pointer [0x2ebd0] went OFF-ROSTER
  * (0x134692 vs a valid 0x2e7dc+i*0x84 record) and the turn/player index [0x2ebc8]/[0x2f9da]
@@ -2333,12 +2350,12 @@ static inline void rotwatch(uint32_t a, uint32_t v, int sz) {
     }
 }
 static inline void w8(uint32_t a, uint8_t v)  {
-    a &= (RAM_SIZE-1); corrupt_watch(a, v, 1); lives_watch(a, v, 1); moonstone_watch(a, v, 1); rotwatch(a, v, 1); invlink_watch(a, v, 1);
+    a &= (RAM_SIZE-1); corrupt_watch(a, v, 1); lives_watch(a, v, 1); moonstone_watch(a, v, 1); rotwatch(a, v, 1); invlink_watch(a, v, 1); aiitem_watch(a, v, 1);
     if (g_watch && a>=(g_watch-2) && a<=(g_watch+4))
         fprintf(g_log?g_log:stderr,"  WATCH8 @%06x <= %02x pc=%06x ic=%llu\n", a, v, (unsigned)m68k_get_reg(NULL,M68K_REG_PC), (unsigned long long)g_icount);
     if (sndcode_guard(a, v, 1)) return;
     g_ram[a] = v; }
-static inline void w16(uint32_t a, uint16_t v){ a &= (RAM_SIZE-1); corrupt_watch(a, v, 2); lives_watch(a, v, 2); moonstone_watch(a, v, 2); rotwatch(a, v, 2); invlink_watch(a, v, 2);
+static inline void w16(uint32_t a, uint16_t v){ a &= (RAM_SIZE-1); corrupt_watch(a, v, 2); lives_watch(a, v, 2); moonstone_watch(a, v, 2); rotwatch(a, v, 2); invlink_watch(a, v, 2); aiitem_watch(a, v, 2);
     if (a == 0x392d4u) { g_curwr_pc = (uint32_t)m68k_get_reg(NULL,M68K_REG_PPC); g_curwr_n++; }
     if (g_watch && a>=(g_watch-2) && a<=(g_watch+4))
         fprintf(g_log?g_log:stderr,"  WATCH16 @%06x <= %04x pc=%06x ic=%llu\n", a, v, (unsigned)m68k_get_reg(NULL,M68K_REG_PC), (unsigned long long)g_icount);
@@ -2348,7 +2365,7 @@ static int g_novblank = 0;     /* deprecated --novblank: now a no-op (gate is de
 static int g_pollonly = 0;     /* --pollonly: never inject VERTB (pure polling, debug) */
 static int g_forcevblank = 0;  /* --forcevblank: inject VERTB every frame (debug) */
 static inline void w32(uint32_t a, uint32_t v){
-    a &= (RAM_SIZE-1); corrupt_watch(a, v, 4); lives_watch(a, v, 4); moonstone_watch(a, v, 4); rotwatch(a, v, 4); invlink_watch(a, v, 4);
+    a &= (RAM_SIZE-1); corrupt_watch(a, v, 4); lives_watch(a, v, 4); moonstone_watch(a, v, 4); rotwatch(a, v, 4); invlink_watch(a, v, 4); aiitem_watch(a, v, 4);
     if (a == 0x392d4u) { g_curwr_pc = (uint32_t)m68k_get_reg(NULL,M68K_REG_PPC); g_curwr_n++; }
     if (g_watch && a==g_watch && g_log) fprintf(g_log,"  WATCH w32 @%06x <= %08x pc=%06x ic=%llu\n", a, v, (unsigned)m68k_get_reg(NULL,M68K_REG_PC), (unsigned long long)g_icount);
     if (sndcode_guard(a, v, 4)) return;
