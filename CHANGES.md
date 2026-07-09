@@ -114,6 +114,7 @@ Features beyond the original game.
 **Runtime / packaging**
 
 - **Native, no emulator** — Double-click `moonstone.exe`; runs on Windows with no WinUAE/FS-UAE and no Amiga ROM. The folder is portable.
+- **Intro pacing (credits over the moon)** — The moon backdrop is the boot loading screen: the credit pages flip at load milestones while the animated intro loads from "disk". On the original hardware the slow floppy stretched everything; the port's fast load made the pages blip past in ~1.5 s each and then left the bare moon sitting for ~13 s. Three coordinated tweaks: the boot loader's CPU work and its per-seek head-settle waits are accelerated (boot phase only — nothing after the intro program launches is touched), and each credit page is held on screen for a comfortable minimum (~2.5 s). Net effect: the boot black shrinks from ~7 s to ~2 s, the credit roll reads calmly, and the animated intro arrives ~6 s sooner with the dead moon-gazing time halved. Tunables: `--credpace N` (min frames per page), `--bootboost N`, `--nocredpace` (vanilla pacing).
 - **nb loader + AmigaOS exec/dos HLE** — Loads/relocates the modules with no Kickstart.
 - **OCS blitter + Paula + trackdisk** — Full from-scratch chipset model.
 - **ADF auto-extract** — If the boot modules are missing, reads them straight out of Disk 1's filesystem — a player only drops in the three `.adf` images.

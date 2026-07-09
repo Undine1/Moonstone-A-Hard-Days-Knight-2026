@@ -904,8 +904,8 @@ static void trackdisk_dma(uint32_t dest, int words) {
         uint32_t nbytes = (uint32_t)words * 2;
         if (nbytes > sizeof(mfmtrk)) nbytes = sizeof(mfmtrk);
         for (uint32_t i = 0; i < nbytes; i++) w8(dest + i, mfmtrk[i]);
-        if (g_log) fprintf(g_log, "TRACKDISK read #%llu cyl=%d head=%d track=%d disk=%d sec=%d -> dest=%06x words=%d (%u B)\n",
-                (unsigned long long)g_dsk_reads, cyl, head, track, g_disk_inserted+1,
+        if (g_log) fprintf(g_log, "TRACKDISK read #%llu fr=%d cyl=%d head=%d track=%d disk=%d sec=%d -> dest=%06x words=%d (%u B)\n",
+                (unsigned long long)g_dsk_reads, g_cur_frame, cyl, head, track, g_disk_inserted+1,
                 (int)(int16_t)r16(0x7ffec), dest, words, nbytes);
     }
     /* raise DSKBLK (INTREQ bit1, level 1) so the disk ISR runs and clears the
@@ -2831,6 +2831,26 @@ static int      g_invmenu_fix = 1;   /* ROOT FIX 2026-07-08 (task #11, the moons
                                        * are untouched (verified: token steal-back flow byte-identical).
                                        * --noinvmenufix reverts both layers for A/B. */
 static int      g_invwalk_len = 0;   /* entries visited in the current label walk (reset at the walker entry) */
+static int      g_credpace = 110;    /* INTRO CREDITS PACING (2026-07-09, operator: "credit roll rolls too fast
+                                       * compared to the original... you see the empty moon backdrop for too
+                                       * long"): the moon backdrop IS the loading screen -- the boot main
+                                       * thread does the CPU-bound MFM decode of the animated intro while a
+                                       * vblank palette task (0x2e4c0) runs the credit-page fades; the page
+                                       * SWAPS happen at load milestones on the SAME thread (sequencer
+                                       * 0x2e7fc-0x2e9d0), so vanilla pages blip by in ~75 frames each and
+                                       * the credits end ~fr975 while the load grinds on to ~fr1650 = ~13s
+                                       * of EMPTY moon.  TWO cooperating levers: (1) g_bootboost runs the
+                                       * 68k faster ONLY while executing inside the boot loader/decoder
+                                       * (charge did/boost -- vblank-paced visuals untouched, load window
+                                       * shrinks); (2) a page-boundary hook holds each credit page on screen
+                                       * for at least g_credpace frames (vblank wait injected into the
+                                       * sequencer -- affordable because the boosted loader catches up).
+                                       * Result: unhurried pages, transition right after the last one.
+                                       * --credpace N (frames/page, 0=vanilla), --nocredpace both-off. */
+static int      g_bootboost = 4;     /* boot loader CPU boost factor (see g_credpace; 1 = authentic) */
+static int      g_bootphase = 1;     /* 1 until the animated-intro program first runs (its stamp fn 0x21330
+                                       * never executes during boot; cleared there).  Gates g_bootboost. */
+static int      g_pageframe = -1;    /* frame stamp of the last credit-page boundary */
 static int      g_stackcap_fix = 1;  /* QoL FIX 2026-07-09 (operator 2026-07-03: "an item can be held beyond what
                                        * the inventory screen can display... cap stacks at their intended size as
                                        * shown in the inventory screen"): every acquisition path adds item counts
@@ -3866,6 +3886,44 @@ void moon_instr_hook(unsigned int pc) {
             fflush(g_log);
         }
     }
+    /* ===== INTRO CREDITS PACING (see g_credpace decl) ===== scale the intro script's tick hold
+     * at the 0x2133c wait computation (after `move.l $2248e,D1`, replacing `add.l $252ea,D1`).
+     * Gated on the INTRO-SCRIPT caller (bsr/jsr return address inside the intro program,
+     * 0x21000-0x22000) so the nb loader's own 0x2exxx users of the same helper pass through
+     * untouched, and opcode-guarded so gameplay mog code at this address never matches. */
+    /* boot phase terminator (see g_bootphase): the animated-intro program's stamp fn. */
+    if (g_bootphase && pc == 0x21330u && r16(pc) == 0x23f9u && r32(pc + 2u) == 0x0002a56au)
+        g_bootphase = 0;
+    /* ===== INTRO CREDITS PAGE PACING (see g_credpace decl): hold each page >= N frames =====
+     * 0x2e8d6 = the sequencer's per-page boundary (entry to the flash-to-white before swapping;
+     * `lea $264d2.l,A0` resident, boot loader only).  Divert through the boot's own wait-frames
+     * service (0x2e294, D0 = frames) with the remainder of this page's minimum, using the pushed-
+     * return guest-call pattern; the wait is vblank-counted, and the boosted loader (g_bootboost)
+     * makes up the stalled load time. */
+    if (g_os && g_credpace > 0 && pc == 0x2e8d6u
+        && r16(pc) == 0x41f9u && r32(pc + 2u) == 0x000264d2u) {
+        /* All timing in GUEST vblanks ([0x2a56a]) -- the host frame counter freezes during the
+         * intro-skip fast-forward, which would re-arm the hold forever and strand the skip. */
+        static int32_t diverted = -1;
+        int32_t now = (int32_t)r32(0x2a56au);
+        if (diverted != now) {           /* skip the re-entry pass right after our own wait */
+            int elapsed = (g_pageframe >= 0) ? (now - g_pageframe) : 40;
+            int want = g_credpace - elapsed;
+            g_pageframe = now;
+            if (want > 0 && want <= g_credpace) {
+                diverted = now + want;   /* the wait returns here on exactly this vblank */
+                uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7) - 4u;
+                m68k_set_reg(M68K_REG_A7, sp);
+                w32(sp, pc);                          /* return to the boundary after the wait */
+                m68k_set_reg(M68K_REG_D0, (uint32_t)want);
+                m68k_set_reg(M68K_REG_PC, 0x2e294u);  /* the boot's wait-N-frames service */
+                if (g_log) { static int cw = 0; if (cw < 16) {
+                    fprintf(g_log, "CREDPACE page-hold %d frames vbl=%d fr=%d\n", want, now, g_cur_frame);
+                    fflush(g_log); cw++; } }
+                return;
+            }
+        }
+    }
     /* ===== INVENTORY-MENU CRASH-PROOFING (see g_invmenu_fix decl) ===== */
     /* Layer 1: item-id validation at the shared hotspot-builder heads (0x2c85e falls through into
      * 0x2c872; hooking both catches every entry path, and a valid item just re-checks harmlessly).
@@ -4166,7 +4224,7 @@ void moon_instr_hook(unsigned int pc) {
      * which only runs once the engine is fully loaded and ticking -- strictly after
      * the one-time module load.  From here on, any store into the engine's CODE
      * bytes (0x43224..0x43e00) is a wild write and gets dropped+logged. */
-    if (!g_snd_loaded && pc == 0x4333cu && r16(pc) == 0x49f9u) g_snd_loaded = 1;  /* opcode-guarded: `lea $42fd4,A4` resident */
+    if (!g_snd_loaded && pc == 0x4333cu && r16(pc) == 0x49f9u) { g_snd_loaded = 1; g_bootphase = 0; }  /* opcode-guarded: `lea $42fd4,A4` resident; sound engine ticking = definitely past the boot phase (g_bootphase belt) */
     /* FLOPPY MOTOR/SEEK BUSY-WAIT ACCELERATION (see g_dsk_fastwait note above).
      * Mog's trackdisk driver busy-polls CIA-A ICR ($bfed01) bit0 for a TimerA
      * underflow at two points -- 0x3b7b8 (`btst #0,$bfed01; beq $3b7b8`, the single
@@ -4185,6 +4243,15 @@ void moon_instr_hook(unsigned int pc) {
                                   * read-clears the flag we set, so the set is consumed by
                                   * the very same instruction; on overlaid code a phantom
                                   * TimerA flag would linger for a later genuine reader. */
+        g_ca.icr_flags |= 0x01;
+    /* Same acceleration for the BOOT loader's own motor/settle polls -- exact mirrors of the
+     * Mog driver's pair: 0x29c58 (`btst #0,$bfed01; beq self` after TimerA=0x0864, the ~3ms
+     * per-step delay) and 0x29d5c (TimerA=0x8bd8, the ~50ms seek/motor settle).  The boot
+     * files are scattered across the disk (the directory track sits mid-disk), so the intro
+     * load pays ~25 long seeks of pure dead time on a file-backed "drive".  Boot phase only;
+     * the step/cylinder model itself is untouched. */
+    if (g_os && g_dsk_fastwait && g_bootphase && (pc == 0x29c58u || pc == 0x29d5cu)
+        && r16(pc) == 0x0839u && r32(pc + 2u) == 0x000000bfu)
         g_ca.icr_flags |= 0x01;
     /* Multi-candidate numbered popup: its handler busy-waits on the keyboard buffer
      * [0x3bf74] for a rawkey, translating it via the 0xc1b3 table (routine 0x3ff42)
@@ -7147,6 +7214,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--noinvmenufix")) g_invmenu_fix=0; /* A/B: disable garbage-item-id skip + label-walk hardening */
         else if (!strcmp(argv[i],"--nostackcap")) g_stackcap_fix=0;  /* A/B: disable item stack caps at acquisition sites */
         else if (!strcmp(argv[i],"--nogamblecap")) g_gamble_cap=0;   /* A/B: disable the tavern payout 150-gold clamp */
+        else if (!strcmp(argv[i],"--credpace")&&i+1<argc) g_credpace=atoi(argv[++i]); /* intro credit min frames/page (0=vanilla) */
+        else if (!strcmp(argv[i],"--nocredpace")) { g_credpace=0; g_bootboost=1; } /* A/B: vanilla intro pacing */
+        else if (!strcmp(argv[i],"--bootboost")&&i+1<argc) g_bootboost=atoi(argv[++i]); /* boot loader CPU boost (1=authentic) */
         else if (!strcmp(argv[i],"--nogoldfix")) g_gold_fix=0;   /* A/B: restore the cracked-build knife-restock gold corruption */
         else if (!strcmp(argv[i],"--noretailparity")) g_retail_parity=0;   /* A/B: disable the retail-parity data/code patches (keeps the cracked-baseline behaviour + goldens) */
         else if (!strcmp(argv[i],"--noretailsfx")) g_retail_sfx=0;   /* A/B: disable the B15 retail UI-feedback-sound sites (parity stays otherwise on) */
@@ -7171,7 +7241,7 @@ int main(int argc, char **argv) {
          * save at startup.  Both print a SAVETEST-HASH of RAM at the end so a save+reload
          * continuation can be proven bit-identical to an uninterrupted run. */
         else if (!strcmp(argv[i],"--savestate-at")&&i+2<argc) { savestate_at=atoi(argv[++i]); savestate_path=argv[++i]; }
-        else if (!strcmp(argv[i],"--loadstate")&&i+1<argc) loadstate_path=argv[++i];
+        else if (!strcmp(argv[i],"--loadstate")&&i+1<argc) { loadstate_path=argv[++i]; g_bootphase=0; } /* a savestate is never the boot phase */
         /* --loadstate-at FRAME FILE: load mid-run (after the machine is warmed up by
          * running to FRAME) instead of at cold boot -- mirrors the live F9 path. */
         else if (!strcmp(argv[i],"--loadstate-at")&&i+2<argc) { loadstate_at=atoi(argv[++i]); loadstate_path=argv[++i]; }
@@ -7312,6 +7382,12 @@ int main(int argc, char **argv) {
             int did = m68k_execute(160);
             if (did <= 0) { if (++zeroburst >= 8) { halt("cpu halted (double bus fault / runaway)"); break; } }
             else zeroburst = 0;
+            /* Boot-loader CPU boost (see g_credpace/g_bootboost): bursts spent inside the boot
+             * MFM reader/decoder (or the decruncher overlay) are charged at 1/boost, so the
+             * CPU-bound load finishes in fewer frames.  Attract-scope + region gated: mid-game
+             * disk loads (scope off) stay authentic. */
+            if (g_os && g_bootboost > 1 && g_bootphase)
+                did /= g_bootboost;
             /* Uniform DMA cycle-steal (attract-scoped): see g_dma_steal_pct. */
             int elapsed = did;
             if (g_blt_busy_scope && g_dma_steal_pct > 0)
