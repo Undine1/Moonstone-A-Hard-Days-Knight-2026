@@ -129,6 +129,14 @@ static int      g_winwait_frame = -1;   /* g_cur_frame when the win-screen fire-
 static uint16_t g_map_pal[16] = {0};    /* last-good overland-map palette (COLOR0..15), snapshotted in normal play */
 static int      g_dbg_paldiff = 0;      /* diag: last scene-9 delivery-window palette diff vs g_map_pal */
 static double   g_dbg_coh = 0.0;        /* diag: last scene-9 delivery-window bitplane coherence */
+/* GUARDIAN RETURN palette guard.  The Guardian reward screen returns through a dedicated
+ * fire-wait, then starts the next overland-map palette tween at 0x413b8 in the common
+ * cracked build.  Original footage enters this transition through black and never exposes
+ * the map under the reward palette; the native capture otherwise does so for about 30
+ * frames.  Bracket that one tween by guest PCs/state rather than by image heuristics. */
+static int g_guardian_return_fade = 0;  /* 0=idle, 1=reward dismissed, 2=map tween started */
+static int g_guardian_fade_seen = 0;    /* [0x417b4] has gone nonzero since the map tween started */
+static int g_guardian_fade_deadline = -1; /* bounded failsafe in displayed frames */
 static int g_menusel_prev = 0;  /* edge-state for the overlap-popup selection */
 
 /* ---- typed-text entry (Select-Knight name field + any [0x3bf74] text poll) ----
@@ -3258,6 +3266,29 @@ void moon_instr_hook(unsigned int pc) {
      * press the first map's fire-wait (jsr 0x22fd0 returns to 0x22890) so it forwards without a key-press
      * -- caller-gated so the disk-swap fire-wait (needs the autoswap settle) is left to autoswap. */
     if (g_os) {
+        /* GUARDIAN RETURN: after the reward fire-wait returns at 0x2275a, the NEXT
+         * 0x413b8 palette setup is specifically the overland-map tween.  Its earlier
+         * reward-screen fade has already run, so this does not catch unrelated fades. */
+        if (g_lineage == LIN_CRACKED && pc == 0x2275au) {
+            g_guardian_return_fade = 1;
+            g_guardian_fade_seen = 0;
+            g_guardian_fade_deadline = g_cur_frame + 240;
+            if (g_log) fprintf(g_log, "GUARDIAN-RETURN arm fr=%d ic=%llu\n",
+                               g_cur_frame, (unsigned long long)g_icount);
+        }
+        if (g_lineage == LIN_CRACKED && g_guardian_return_fade == 1 && pc == 0x413b8u) {
+            g_guardian_return_fade = 2;
+            if (g_log) fprintf(g_log, "GUARDIAN-RETURN map-fade fr=%d ic=%llu\n",
+                               g_cur_frame, (unsigned long long)g_icount);
+        }
+        if (g_guardian_return_fade && g_guardian_fade_deadline >= 0 &&
+            g_cur_frame > g_guardian_fade_deadline) {
+            if (g_log) fprintf(g_log, "GUARDIAN-RETURN timeout fr=%d state=%d\n",
+                               g_cur_frame, g_guardian_return_fade);
+            g_guardian_return_fade = 0;
+            g_guardian_fade_seen = 0;
+            g_guardian_fade_deadline = -1;
+        }
         if (pc == 0x22820u) { g_delivery_win = 1200;   /* ~24s window; the palette test keeps it safe even if it overruns */
             g_winwait_frame = -1;                      /* reset the win-screen auto-advance timer */
             if (g_log) fprintf(g_log, "DELIVERY arm @22820 fr=%d ic=%llu scene=%u\n",
@@ -5858,8 +5889,8 @@ static double frame_ink_fraction(const uint8_t *fb, int h) {
 #define TRANSITION_HOLD_MAX 8
 #define TRANSITION_HOLD_INK 0.06   /* hold only when <6% of pixels are lit (mid-clear) */
 #define GARBLE_HOLD_MAX 150        /* give-ritual (scene 3): cap (~3s) fail-safe against a mis-detect */
-#define GARBLE_HOLD_DELIVERY 1400  /* moonstone delivery black-out cap per continuous held run; > the 1200-frame
-                                    * delivery window (g_delivery_win) so the window, not this cap, bounds it. */
+#define GARBLE_HOLD_BLACKOUT 1400  /* scoped black-out cap per continuous held run; > the 1200-frame
+                                    * delivery window (g_delivery_win) so the window, not this cap, bounds it */
 static int g_hold_run = 0;
 static int g_garble_hold = 0;
 
@@ -5899,6 +5930,23 @@ static void capture_frame(void) {
             else if (sc == 0u && g_disp_base == 0x6bdfau && tfill > 20)
                 g_delivery_win = 0;                 /* cutscene is compositing -> delivery over */
         }
+        /* GUARDIAN RETURN display policy: black only the exact post-reward map tween.
+         * [0x417b4] is the guest's live palette-task pointer; wait until it has actually
+         * become nonzero before allowing a zero to mean completion.  --rawcapture keeps
+         * the unfiltered transition available for deterministic A/B verification. */
+        if (g_guardian_return_fade == 2) {
+            uint32_t fade_task = r32(0x417b4u);
+            if (fade_task != 0) {
+                if (!g_guardian_fade_seen) g_garble_hold = 0;
+                g_guardian_fade_seen = 1;
+                if (!g_rawcapture) g_render_garbled = 2;
+            } else if (g_guardian_fade_seen) {
+                if (g_log) fprintf(g_log, "GUARDIAN-RETURN fade-complete fr=%d\n", g_cur_frame);
+                g_guardian_return_fade = 0;
+                g_guardian_fade_seen = 0;
+                g_guardian_fade_deadline = -1;
+            }
+        }
         if (!g_rawcapture && palette_distinct_nonzero() <= 3 &&
             frame_ink_fraction(g_cap_tmp,h) < TRANSITION_HOLD_INK &&
             g_hold_run < TRANSITION_HOLD_MAX &&
@@ -5913,23 +5961,22 @@ static void capture_frame(void) {
                         g_cur_frame, g_hold_run);
             return;
         }
-        /* GIVE-CUTSCENE garble suppression: render_rgb flagged the displayed give-ritual buffer as a
-         * mid-composite garble -> hold the last good frame (the black fade) so the garbage is never
-         * shown, until the real cutscene composites (coherent -> flag clears) or the cap expires. */
-        if (g_render_garbled && g_garble_hold < (g_render_garbled==2 ? GARBLE_HOLD_DELIVERY : GARBLE_HOLD_MAX)) {
+        /* Scoped transition suppression: render_rgb can flag the displayed give-ritual buffer as a
+         * mid-composite garble (mode 1), while the delivery and Guardian guards request black (mode 2). */
+        if (g_render_garbled && g_garble_hold < (g_render_garbled==2 ? GARBLE_HOLD_BLACKOUT : GARBLE_HOLD_MAX)) {
             g_garble_hold++;
             if (g_render_garbled == 2) {
-                /* DELIVERY: BLACK OUT rather than hold the last frame.  The map palette is clobbered
+                /* SCOPED TRANSITIONS: BLACK OUT rather than hold the last frame.  The delivery map palette is clobbered
                  * BEFORE the latch arms (0x22820), so the last captured frame is itself the garbled map
                  * -- holding it just freezes the garble (the live bug: garb=2 every frame, hold firing,
-                 * but the held frame IS the garbled map).  A forced black is clean and is what the
-                 * operator prefers for this whole delivery window. */
+                 * but the held frame IS the garbled map).  The Guardian return also needs black to match
+                 * the original transition while its map palette tween is active. */
                 memset(g_cap, 0, sizeof(g_cap));
                 g_cap_w = w; g_cap_h = h; g_cap_valid = 1;
             }
             if (dlog) { static int n=0; if (n++<600) fprintf(g_log, "CAP %c scene=%u garb=%d pdiff=%d coh=%.2f tfill=%d win=%d\n", g_render_garbled==2?'B':'H', dsc, g_render_garbled, g_dbg_paldiff, g_dbg_coh, tfill, g_delivery_win); }
             if (g_rdbg && g_log)
-                fprintf(g_log, "GARBLE-HOLD fr=%d run=%d mode=%d (Stonehenge transition garbled, %s)\n",
+                fprintf(g_log, "GARBLE-HOLD fr=%d run=%d mode=%d (scoped transition, %s)\n",
                         g_cur_frame, g_garble_hold, g_render_garbled,
                         g_render_garbled==2 ? "blacked out" : "holding last frame");
             return;
@@ -7365,6 +7412,11 @@ static int load_state(const char *path) {
         paula_sidecar_reset();   /* Paula reload-protocol statics live outside the blob: rebuild them
                                   * from the just-restored registers (see paula_sidecar_reset) */
         g_ew_armed = 0;          /* edge-walk fix trajectory capture: transient per-turn state, drop on load */
+        /* Host-only Guardian transition state is deliberately not serialized.  A warm F9 during
+         * the reward/map handoff must not carry its palette blackout into an unrelated save. */
+        g_guardian_return_fade = 0;
+        g_guardian_fade_seen = 0;
+        g_guardian_fade_deadline = -1;
         if (g_loadbuf) { free(g_loadbuf); g_loadbuf = NULL; }
         g_loadbuf = staged_stream;
         staged_stream = NULL;
