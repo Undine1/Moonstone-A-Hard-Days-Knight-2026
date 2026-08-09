@@ -1,12 +1,26 @@
 # Moonstone Reborn
 
-Native Windows port of *Moonstone: A Hard Days Knight* (Mindscape, 1991). An
-embedded 68000 core runs the original Amiga game code on a from-scratch model of
-the OCS custom chips, with no external emulator or Kickstart ROM required.
+Ready-to-play native Windows port of *Moonstone: A Hard Days Knight*
+(Mindscape, 1991). The original Amiga game runs through an embedded 68000 core
+and custom OCS implementation, with no external emulator or Kickstart ROM.
+
+## Download and play
+
+1. Open the [Releases page](https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026/releases).
+2. Download **`Moonstone-Reborn-Windows-x64.zip`**. Do not download GitHub's
+   automatically generated "Source code" archives.
+3. Extract the complete ZIP, then double-click **`moonstone.exe`**.
+
+That is all. There is no installer, command line, build process, emulator, or
+ROM setup. The package is portable and requires 64-bit Windows. Keep
+`moonstone.exe`, `SDL2.dll`, and the `data` folder together.
+
+The included `README.txt` contains the controls and a short troubleshooting
+note.
 
 ## Highlights
 
-- Portable native Windows executable with automatic disk swapping.
+- Automatic disk swapping with no interruption.
 - Keyboard, mouse, and game-controller support.
 - Quicksave and quickload anywhere, including during combat.
 - Faithful graphics and Paula audio through the custom OCS runtime.
@@ -26,69 +40,31 @@ original-game bugs here:
 See [CHANGES.md](CHANGES.md) for the historical sources and the distinction
 between original-game, disk-revision, and port-runtime fixes.
 
-## Game revisions and disk provenance
+## Game revisions
 
-The SPS-preserved boxed-retail disk set used for comparison contains a game
-engine that identifies itself in-game as **v1.4**. The commonly circulating
-Crystal-cracked ADF set contains a structurally different engine revision with
-**no numeric version tag**. It should therefore be called the *Crystal cracked
-build*, not v1.0, v1.3, or any other guessed version.
+The SPS-preserved boxed-retail reference contains a game engine that identifies
+itself as **v1.4**. The commonly circulating Crystal-cracked ADF engine differs
+structurally and has **no numeric version tag**; it should not be assigned a
+guessed version number.
 
-The port detects that common ADF lineage and applies a default retail-parity
-layer. This brings verified fixes, rules, balance, and behaviour into line with
-the retail v1.4 reference where practical. Some additional safeguards go beyond
-retail v1.4 where its code remains fragile.
+The port's default retail-parity layer brings verified fixes, rules, balance,
+and behaviour into line with the retail v1.4 reference where practical. Some
+additional safeguards go beyond retail v1.4 where its code remains fragile.
 
 ## The removed disease/curse
 
 The original game contains a designed disease mechanic. Its handler drains hit
 points and sets a hidden flag that removes one life at every day-end until the
-healer clears it. The manual broadly warns that Ratmen carry a deadly disease
-and recommends treatment, but the repeating life drain has no visible status or
+healer clears it. The manual warns that Ratmen carry a deadly disease and
+recommends treatment, but the repeating life drain has no visible status or
 useful in-game feedback, and the exact event selector proved erratic in testing.
 
-This port deliberately removes that mechanic: the disease handler is suppressed
-and stale disease flags in existing saves are cleared. This is a gameplay choice,
-not an original-game bug fix. Math the Wizard's separate, temporary illness
-remains unchanged.
-
-## Game data
-
-The copyrighted Mindscape game disks, modules, and artwork are not included.
-Supply your own three original disk images as
-`Moonstone ... Disk1/2/3.adf`; the runtime extracts the required modules
-automatically. Boxed-disk SPS/KryoFlux preservation images are the preferred
-reference when available.
-
-## Layout
-
-| Path | What |
-|------|------|
-| `recomp/src/moon.c` | OCS runtime, host harness, and compatibility fixes. |
-| `recomp/src/loader.c` | Module loader and AmigaOS exec/dos HLE. |
-| `recomp/build.sh` | Builds the Windows executable with Zig. |
-| `recomp/RE_NOTES.md` | Detailed reverse-engineering notes. |
-| `recomp/tools/` | Reverse-engineering, audio, and image tools. |
-
-## Building
-
-Third-party dependencies are downloaded separately:
-
-- Zig 0.16.0 in `recomp/tools/zig-x86_64-windows-0.16.0/`
-- SDL2 2.32.10 in `recomp/vendor/SDL2/`
-- Musashi 68000 core in `recomp/vendor/Musashi-master/`
-
-Then run:
-
-```sh
-bash recomp/build.sh
-```
-
-The executable and SDL2 runtime are written to `recomp/build/`.
+This port deliberately removes that mechanic. This is a gameplay choice, not an
+original-game bug fix. Math the Wizard's separate temporary illness remains
+unchanged.
 
 ## License
 
-Copyright © 2026 Undine1. The native runtime is licensed under the
+Copyright © 2026 Undine1. The native runtime source is licensed under the
 [GNU General Public License v3.0](LICENSE). The original game code, data, and
-artwork remain © 1991 Mindscape International / Rob Anderson and are not
-distributed here.
+artwork remain © 1991 Mindscape International / Rob Anderson.

@@ -1,112 +1,84 @@
 ================================================================
-  MOONSTONE  -  A Hard Days Knight        (native Windows port)
+  MOONSTONE - A Hard Days Knight         native Windows port
 ================================================================
 
-This is the original 1991 Amiga game MOONSTONE, running NATIVELY on
-Windows.  There is NO emulator (no WinUAE / FS-UAE).  The real Amiga
-68000 game code is executed directly by an embedded CPU core, on top
-of a from-scratch model of the Amiga's custom chips (graphics, the
-blitter, the copper, and 4-channel Paula audio).
-
-The copyrighted original floppy disks are not distributed with this
-project. Supply your own three ADF images in the "data" folder; the
-game extracts what it needs and swaps between them AUTOMATICALLY.
+This is a ready-to-play Windows package. No installation, command
+line, emulator, or Amiga ROM is required.
 
 
 ---------------------------------------------------------------
- HOW TO RUN
+ HOW TO PLAY
 ---------------------------------------------------------------
 
-Just double-click:
+1. Extract the complete ZIP.
+2. Double-click:
 
-    moonstone.exe
+       moonstone.exe
 
-A window opens and the game boots straight to the MOONSTONE title
-screen and main menu. Keep your supplied game data in the "data"
-folder next to the exe. Once set up, you can move or copy the whole
-MoonstoneNative folder anywhere.
-
-Requires: 64-bit Windows.  SDL2.dll (included) must stay next to the
-exe.
+Requires 64-bit Windows. Keep moonstone.exe, SDL2.dll, and the data
+folder together. The folder is portable and can be moved anywhere.
 
 
 ---------------------------------------------------------------
  CONTROLS
 ---------------------------------------------------------------
 
-  SKIP THE INTRO .... press fire (Space / Enter / Ctrl, or any
-                      controller button) during the intro to jump
-                      straight to the title menu.
+  SKIP THE INTRO
+    Press fire (Space / Enter / Ctrl, or any controller button).
 
   GAME CONTROLLER (Xbox / generic XInput pad - recommended)
-    Left stick / D-pad . move (menu cursor, overland knight, combat knight)
-    A / RB / LB / RT ... attack / select / confirm / "press fire"
+    Left stick / D-pad . move
+    A / RB / LB / RT ... attack / select / confirm
     B .................. cancel / right-click
-    Y / Start ......... open INVENTORY (on the overland map)
-    Back .............. REST / skip to the next turn (on the overland map)
-    (plug-and-play; hot-plug supported; quit is Esc or the window close box)
-
-  NAME ENTRY (Select Knight)
-    Type your knight's name on the keyboard (A-Z, 0-9, space);
-    Backspace edits, Enter/fire confirms.
+    Y / Start ........... open inventory on the map
+    Back ................. rest / end the current turn
 
   KEYBOARD + MOUSE
-    Arrow keys ........ move (menu cursor / knight)
-    Mouse ............. also moves the cursor (used on some screens)
+    Arrow keys ........... move
+    Mouse ................. move the pointer
     Ctrl / Enter /
-      Left-click ...... attack / select / confirm / "press fire"
-    Space  (or I) ..... open INVENTORY (on the overland map) -- the Amiga control
-    E ................. REST / skip to the next turn (overland map) -- the Amiga control
-    Right-click ....... cancel / back
-    Esc ............... quit
+      Left-click ......... attack / select / confirm
+    Space or I ........... open inventory on the map
+    E ..................... rest / end the current turn
+    Right-click .......... cancel / back
+    Esc ................... quit
 
-  SAVE / LOAD  (this port adds saving -- the 1991 original had none)
-    F5 ............... QUICKSAVE  (save your progress anywhere, even mid-fight)
-    F9 ............... QUICKLOAD  (restore your last quicksave)
-    (one save slot, written as 'moonstone.sav' next to the game; a brief
-     "GAME SAVED" / "GAME LOADED" appears in the window title bar)
+  NAME ENTRY
+    Type a name with the keyboard. Backspace edits; Enter confirms.
 
-Notes:
+  SAVE / LOAD
+    F5 .................... quicksave anywhere, including combat
+    F9 .................... quickload the last quicksave
 
-  * SELECTION POPUP (when entering a spot offers two choices, e.g. a
-    wilderness zone vs. the neighbouring city): push UP for the first
-    option, DOWN for the second (or press the 1 / 2 keys).
+    One save slot is written as moonstone.sav next to the game.
+
+  SELECTION POPUPS
+    Press Up for the first option and Down for the second.
+    The number keys 1 and 2 also work.
 
 
 ---------------------------------------------------------------
- WHAT'S IN THIS FOLDER
+ WHAT IS IN THIS FOLDER
 ---------------------------------------------------------------
 
   moonstone.exe          the native game
-  SDL2.dll               window / input / sound library (keep next to exe)
-  data\                  your locally supplied original game data:
-      Moonstone ... Disk1/2/3.adf         the three original floppy images
-      nb, program, mog, crystal           modules extracted by the runtime
+  SDL2.dll               window, input, and audio support
+  README.txt             this guide
+  LICENSE.txt            native runtime license
+  data\                  required game data
 
-The supplied data remains original Mindscape disk content; this port
-only adds the native runtime around it.
+Do not rename or remove SDL2.dll or the data folder.
 
 
 ---------------------------------------------------------------
- ADVANCED / TROUBLESHOOTING
+ TROUBLESHOOTING
 ---------------------------------------------------------------
 
-The exe finds "data\" relative to its own location.  If you keep the
-data elsewhere you can point at it:
+If the game does not open, make sure the complete ZIP was extracted
+and SDL2.dll and the data folder are still next to moonstone.exe.
 
-    moonstone.exe --dataset PATH\to\data --diskdir PATH\to\data
+Project page and native runtime source:
+https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026
 
-Other options:
-    --scale N        window scale (default 3)
-    --hardpan        faithful Amiga hard L/R stereo (default blends the
-                     channels slightly for a more natural sound)
-    --audioblend N   stereo crossfeed 0-50 (0 = hard-pan, 50 = mono; default 35)
-    --noautoswap     turn OFF automatic disk swapping (you will then be
-                     prompted to swap disks, as on a real Amiga)
-
-If the window does not open, make sure SDL2.dll is in the same folder
-as moonstone.exe.
-
-  MOONSTONE (c) 1991 Mindscape International / Rob Anderson.
-  Native runtime: original game code under an embedded 68000 core +
-  custom-chip model.  No Amiga ROM is required or included.
+MOONSTONE (c) 1991 Mindscape International / Rob Anderson.
+Native runtime (c) 2026 Undine1, licensed under GPL v3.

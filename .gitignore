@@ -37,6 +37,7 @@ mindscape
 # --- Built binaries (shipped via GitHub Releases, not the source tree) ---
 *.exe
 *.dll
+*.zip
 *.a
 *.lib
 *.res
