@@ -10,8 +10,8 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 2. Download **`Moonstone-Reborn-Windows-x64.zip`**. Do not download GitHub's
    automatically generated "Source code" archives.
 3. Extract the complete ZIP.
-4. Copy your own three uncompressed Moonstone ADF disk images into the included
-   `data` folder and rename them exactly:
+4. Supply your own ADF files into the included `data` folder. The ADF files
+   should come in a batch of three disk files and should be named specifically:
    - `Disk1.adf`
    - `Disk2.adf`
    - `Disk3.adf`
@@ -29,10 +29,11 @@ note.
 ## Highlights
 
 - Automatic disk swapping with no interruption.
+- Skippable intro — press Space, Enter, or Ctrl on the keyboard, or A, B, LB,
+  RB, or RT on a controller.
 - Keyboard, mouse, and game-controller support.
 - Quicksave and quickload anywhere, including during combat.
 - Faithful graphics and Paula audio through the custom OCS runtime.
-- Retail-parity support for the commonly circulating cracked ADF revision.
 
 ## Confirmed original Amiga bugs fixed
 
@@ -50,26 +51,23 @@ between original-game, disk-revision, and port-runtime fixes.
 
 ## Game revisions
 
-The SPS-preserved boxed-retail reference contains a game engine that identifies
-itself as **v1.4**. The commonly circulating Crystal-cracked ADF engine differs
-structurally and has **no numeric version tag**; it should not be assigned a
-guessed version number.
+The SPS-preserved boxed-retail reference (`.IPF` format) contains a game engine
+that identifies itself as **v1.4**. The commonly circulating `.ADF` release
+differs structurally and has **no numeric version tag**.
 
-The port's default retail-parity layer brings verified fixes, rules, balance,
-and behaviour into line with the retail v1.4 reference where practical. Some
-additional safeguards go beyond retail v1.4 where its code remains fragile.
+This port (*Moonstone 2026*) brings fixes, rules, balance, and behaviour into
+line with the retail v1.4 reference where practical. Some additional safeguards
+go beyond retail v1.4 where its code remains fragile.
 
 ## The removed disease/curse
 
-The original game contains a designed disease mechanic. Its handler drains hit
-points and sets a hidden flag that removes one life at every day-end until the
-healer clears it. The manual warns that Ratmen carry a deadly disease and
-recommends treatment, but the repeating life drain has no visible status or
-useful in-game feedback, and the exact event selector proved erratic in testing.
-
-This port deliberately removes that mechanic. This is a gameplay choice, not an
-original-game bug fix. Math the Wizard's separate temporary illness remains
-unchanged.
+The original game contains a disease mechanic. The disease drains hit points
+and removes one life at every day-end until the healer clears it. The manual
+warns that Ratmen carry a deadly disease and recommends treatment, but there is
+no mention of the specifics, nor is there any in-game feedback about this. I
+personally had no idea what was happening and thought it was a bug, and from the
+videos I watched, other people had the same experience. So I've decided to
+remove this feature from the game.
 
 ## License
 

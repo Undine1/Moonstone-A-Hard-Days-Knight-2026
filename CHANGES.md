@@ -34,40 +34,25 @@ Historical reports:
   likewise describe removing various access faults and bugs from supported Amiga
   releases.
 
-## Retail v1.4 and the common cracked ADFs
+## Retail v1.4 and the common ADF release
 
-Direct comparison of the preserved game modules established two distinct engine
-revisions:
+The SPS-preserved boxed-retail reference (`.IPF` format) contains a game engine
+that identifies itself as **v1.4**. The commonly circulating `.ADF` release
+differs structurally and has **no numeric version tag**.
 
-- The SPS-preserved boxed-retail reference contains an in-game **v1.4** tag.
-- The common Crystal-cracked ADF engine has **no numeric version tag** and differs
-  structurally from the retail engine. No evidence supports calling it v1.0,
-  v1.3, or another guessed number.
-
-The WHDLoad install/slave also has its own version numbers; those are unrelated
-to the game's v1.4 engine tag. WHDLoad confirms that three game releases exist,
-which is another reason not to treat every Amiga disk image as identical.
-
-The port's default retail-parity layer translates verified retail v1.4 repairs
-and gameplay differences onto the common Crystal ADF revision. This reproduces
-verified retail behaviour across shopping, combat state, AI, damage, loot, and
-other gameplay paths. Additional safety fixes go beyond retail v1.4 where
-appropriate; this is targeted compatibility work, not a wholesale replacement
-with the retail binary.
+This port (*Moonstone 2026*) brings fixes, rules, balance, and behaviour into
+line with the retail v1.4 reference where practical. Some additional safeguards
+go beyond retail v1.4 where its code remains fragile.
 
 ## Deliberate change: disease/curse removed
 
-The disease/curse is designed original gameplay, not a port bug. Its handler
-drains hit points and arms a hidden flag that removes one life at each day-end
-until the healer clears it. The original manual warns that Ratmen carry a deadly
-disease and recommends prompt treatment, but the repeating life loss has no
-visible status or clear in-game explanation.
-
-The port intentionally suppresses the disease handler and clears an already-set
-flag from existing saves at the next day-end. It was removed because its hidden,
-repeating penalty appeared to players as random life loss, and its event
-selection behaved erratically during investigation. Math the Wizard's separate
-temporary illness is retained.
+The original game contains a disease mechanic. The disease drains hit points
+and removes one life at every day-end until the healer clears it. The manual
+warns that Ratmen carry a deadly disease and recommends treatment, but there is
+no mention of the specifics, nor is there any in-game feedback about this. I
+personally had no idea what was happening and thought it was a bug, and from the
+videos I watched, other people had the same experience. So I've decided to
+remove this feature from the game.
 
 Manual reference: [Moonstone Amiga manual](https://www.lemonamiga.com/doc/moonstone-a-hard-days-knight/1109).
 

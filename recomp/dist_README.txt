@@ -11,14 +11,14 @@ disks are not included; you must supply your own three ADF images.
 ---------------------------------------------------------------
 
 1. Extract the complete ZIP.
-2. Copy your three uncompressed Moonstone ADF images into the data folder.
-3. Rename them exactly:
+2. Supply your own ADF files into the included data folder. The ADF files
+   should come in a batch of three disk files and should be named specifically:
 
        Disk1.adf
        Disk2.adf
        Disk3.adf
 
-4. Double-click:
+3. Double-click:
 
        moonstone.exe
 
@@ -33,13 +33,15 @@ together. The folder is portable.
 ---------------------------------------------------------------
 
   SKIP THE INTRO
-    Press fire (Space / Enter / Ctrl, or any controller button).
+    Press Space, Enter, or Ctrl on the keyboard, or A, B, LB, RB, or RT
+    on a controller.
 
   GAME CONTROLLER (Xbox / generic XInput pad - recommended)
     Left stick / D-pad . move
     A / RB / LB / RT ... attack / select / confirm
     B .................. cancel / right-click
-    Y / Start ........... open inventory on the map
+    Y ................... open inventory on the map
+    Start ............... pause / resume walk and day animations
     Back ................. rest / end the current turn
 
   KEYBOARD + MOUSE
