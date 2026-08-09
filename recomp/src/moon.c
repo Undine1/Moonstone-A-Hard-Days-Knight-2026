@@ -24,6 +24,9 @@
 #include <math.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <io.h>
+#else
+#include <unistd.h>
 #endif
 #include "m68k.h"
 #include "loader.h"
@@ -221,17 +224,11 @@ static void inlog(const char *what, uint16_t v);  /* fwd */
 #define CIA_LO     0xA00000u
 #define CIA_HI     0xC00000u
 
-static uint8_t  g_ram[RAM_SIZE + 4];    /* +4 GUARD bytes (2026-07-02): several helpers mask
-                                         * the base index once and then touch a+1..a+3
-                                         * (r16/r32, w16/w32, blt_r16/blt_w16, the Paula
-                                         * OVER-READ detector), so an access at the top word
-                                         * of chip RAM spills up to 3 bytes past RAM_SIZE --
-                                         * an OOB read, or worse a WRITE into g_custom (next
-                                         * object).  The guard absorbs those spills: reads
-                                         * see 0, writes land in dead space.  Every bulk op
-                                         * (save blob, ram dumps, memset, load_hunk) sizes
-                                         * itself with RAM_SIZE explicitly, so formats and
-                                         * determinism are unchanged. */
+static uint8_t  g_ram[RAM_SIZE + 4];    /* +4 legacy guard bytes retained as a final belt;
+                                         * all CPU/blitter/Paula multi-byte paths now mask
+                                         * EACH byte so top-of-chip-RAM accesses mirror at
+                                         * 2MB without touching host memory out of bounds.
+                                         * Bulk operations intentionally remain RAM_SIZE. */
 static uint16_t g_custom[0x100];        /* word registers at DFF000.. */
 static uint8_t  g_ciaa[16], g_ciab[16];
 static int      g_os;                   /* fwd: AmigaOS HLE enabled (defined below) */
@@ -411,7 +408,9 @@ static int g_cflog = 0;   /* --cflog: trace compose blits (dst in display/master
 static int g_cur_frame;   /* fwd (defined below); used by the --cflog blit trace */
 
 static inline uint16_t blt_r16(uint32_t a) {
-    a &= (RAM_SIZE-1); return (uint16_t)((g_ram[a]<<8)|g_ram[a+1]);
+    const uint32_t mask = RAM_SIZE - 1u;
+    a &= mask;
+    return (uint16_t)(((uint16_t)g_ram[a] << 8) | g_ram[(a + 1u) & mask]);
 }
 static int sndcode_guard(uint32_t a, uint32_t v, int sz); /* fwd: sound-code write guard */
 static uint32_t g_watch;                                  /* fwd: --watch addr (blt_w16 logs too) */
@@ -424,7 +423,7 @@ static inline void blt_w16(uint32_t a, uint16_t v) {
         fprintf(g_log ? g_log : stderr, "  BLT-WATCH16 @%06x <= %04x  BLTDPT=%06x BLTSIZE-ic=%llu\n",
                 a, v, (((uint32_t)g_custom[0x054>>1] << 16) | g_custom[0x056>>1]) & 0x1ffffe,
                 (unsigned long long)g_icount);
-    g_ram[a]=(uint8_t)(v>>8); g_ram[a+1]=(uint8_t)v;
+    g_ram[a]=(uint8_t)(v>>8); g_ram[(a+1u)&(RAM_SIZE-1u)]=(uint8_t)v;
 }
 
 static inline uint32_t blt_getptr(uint32_t hi_off) {
@@ -1386,7 +1385,8 @@ static void paula_tick_one(int ch) {
      * error" screech the operator hears.  Log it (throttled, deduped) with the
      * offending channel / pointer / length / PC so the cause can be pinned. */
     if (c->enabled && c->wordhalf == 0 && g_log
-        && g_ram[a]==0x46 && g_ram[a+1]==0x4F && g_ram[a+2]==0x52 && g_ram[a+3]==0x4D) {
+        && g_ram[a]==0x46 && g_ram[(a+1u)&(RAM_SIZE-1u)]==0x4F
+        && g_ram[(a+2u)&(RAM_SIZE-1u)]==0x52 && g_ram[(a+3u)&(RAM_SIZE-1u)]==0x4D) {
         static int over_n = 0; static uint32_t over_last = 0;
         if (a != over_last && over_n < 80) {
             over_last = a; over_n++;
@@ -1396,7 +1396,7 @@ static void paula_tick_one(int ch) {
             fflush(g_log);
         }
     }
-    c->sample = (int8_t)g_ram[a + c->wordhalf];
+    c->sample = (int8_t)g_ram[(a + c->wordhalf) & (RAM_SIZE-1u)];
     /* TRUMPET DIAG (--trumpetmode): the intro trumpet plays on AUD0 (lead) + AUD3 (echo ~0.37s
      * late, same sample 0x0b980c) = the "dun dun"; the real Amiga plays it once.  Output-only. */
     if (g_os && g_blt_busy_scope && g_trumpetmode == 1 && ch == 3) {
@@ -2145,8 +2145,19 @@ static uint32_t g_watch = 0;   /* watch writes to this address (0=off) */
 static uint32_t g_watchrd = 0; /* watch READS of this address: log each distinct reader PC (--watchrd; dev) */
 uint64_t g_dumpat = 0; const char *g_dumpat_path = NULL;
 static inline uint8_t  r8(uint32_t a)  { return g_ram[a & (RAM_SIZE-1)]; }
-static inline uint16_t r16(uint32_t a) { a &= (RAM_SIZE-1); return (uint16_t)((g_ram[a]<<8)|g_ram[a+1]); }
-static inline uint32_t r32(uint32_t a) { a &= (RAM_SIZE-1); return ((uint32_t)g_ram[a]<<24)|((uint32_t)g_ram[a+1]<<16)|((uint32_t)g_ram[a+2]<<8)|g_ram[a+3]; }
+static inline uint16_t r16(uint32_t a) {
+    const uint32_t mask = RAM_SIZE - 1u;
+    a &= mask;
+    return (uint16_t)(((uint16_t)g_ram[a] << 8) | g_ram[(a + 1u) & mask]);
+}
+static inline uint32_t r32(uint32_t a) {
+    const uint32_t mask = RAM_SIZE - 1u;
+    a &= mask;
+    return ((uint32_t)g_ram[a] << 24) |
+           ((uint32_t)g_ram[(a + 1u) & mask] << 16) |
+           ((uint32_t)g_ram[(a + 2u) & mask] << 8) |
+           (uint32_t)g_ram[(a + 3u) & mask];
+}
 /* SOUND-ENGINE CODE-WRITE GUARD (fix for the 2026-06-18 loot/equip crash).
  *
  * Background: hovering a black knight's "blue orb" item in the loot/equip screen
@@ -2233,9 +2244,10 @@ static inline void corrupt_watch(uint32_t a, uint32_t v, int sz) {
  * log showed no real decrement).  The logged rec#/old->v/PC names the source: a legit combat
  * death writes from pc=0x21434/0x21446; a stray/wild write (random loss) shows a different PC.
  * Read-only, capped.  --- after a repro, grep moonstone.log for LIVES-WATCH. */
+static int g_gameplay_watches_armed = 0; /* armed only once Mog's live dispatcher has run */
 static int g_lives_wn = 0;
 static inline void lives_watch(uint32_t a, uint32_t v, int sz) {
-    if (!g_os) return;
+    if (!g_os || !g_gameplay_watches_armed) return;
     uint32_t end = a + (uint32_t)sz;
     for (int i = 0; i < 4; i++) {
         uint32_t rec = 0x2e7dcu + (uint32_t)i*0x84u;
@@ -2261,7 +2273,7 @@ static inline void lives_watch(uint32_t a, uint32_t v, int sz) {
  * skipped, and the address early-out keeps it off the hot path.  Read-only (logging). */
 static int g_mswatch_n = 0;
 static inline void moonstone_watch(uint32_t a, uint32_t v, int sz) {
-    if (!g_os || v == 0u) return;
+    if (!g_os || !g_gameplay_watches_armed || v == 0u) return;
     if (a < 0x2e7dcu || a >= 0x2eb00u) return;          /* records + quest-struct region only */
     uint32_t end = a + (uint32_t)sz;
     for (int i = 0; i < 4; i++) {
@@ -2290,7 +2302,7 @@ static inline void moonstone_watch(uint32_t a, uint32_t v, int sz) {
  * capped, off the hot path via the address early-out.  Grep the log for INVLINK-SET. */
 static int g_invlink_n = 0;
 static inline void invlink_watch(uint32_t a, uint32_t v, int sz) {
-    if (!g_os || v == 0u || g_invlink_n >= 40 || !g_log) return;
+    if (!g_os || !g_gameplay_watches_armed || v == 0u || g_invlink_n >= 40 || !g_log) return;
     uint32_t end = a + (uint32_t)sz;
     if (end <= 0x2fe44u || a >= 0x37456u) return;         /* fast reject */
     uint32_t tab;
@@ -2316,7 +2328,7 @@ static inline void invlink_watch(uint32_t a, uint32_t v, int sz) {
  * 0x18 bytes each, contiguous) with the writing PC.  Read-only, capped, cheap range check. */
 static int g_aiitem_n = 0;
 static inline void aiitem_watch(uint32_t a, uint32_t v, int sz) {
-    if (!g_os || v == 0u || g_aiitem_n >= 60 || !g_log) return;
+    if (!g_os || !g_gameplay_watches_armed || v == 0u || g_aiitem_n >= 60 || !g_log) return;
     uint32_t end = a + (uint32_t)sz;
     if (end <= 0x2ea88u || a >= 0x2ead0u) return;
     fprintf(g_log, "AIITEM-SET rec%u off=%x <= %0*x sz%d pc=%06x ppc=%08x ic=%llu\n",
@@ -2324,6 +2336,10 @@ static inline void aiitem_watch(uint32_t a, uint32_t v, int sz) {
             (unsigned)m68k_get_reg(NULL,M68K_REG_PC),
             (unsigned)m68k_get_reg(NULL,M68K_REG_PPC), (unsigned long long)g_icount);
     fflush(g_log); g_aiitem_n++;
+}
+static void gameplay_watches_reset(int armed) {
+    g_gameplay_watches_armed = armed;
+    g_lives_wn = g_mswatch_n = g_invlink_n = g_aiitem_n = 0;
 }
 /* ROTWATCH (always-on, bounded): catch the in-combat "character disappears" regression.
  * Forensics on the broken save show the active-player pointer [0x2ebd0] went OFF-ROSTER
@@ -2360,7 +2376,7 @@ static inline void w16(uint32_t a, uint16_t v){ a &= (RAM_SIZE-1); corrupt_watch
     if (g_watch && a>=(g_watch-2) && a<=(g_watch+4))
         fprintf(g_log?g_log:stderr,"  WATCH16 @%06x <= %04x pc=%06x ic=%llu\n", a, v, (unsigned)m68k_get_reg(NULL,M68K_REG_PC), (unsigned long long)g_icount);
     if (sndcode_guard(a, v, 2)) return;
-    g_ram[a]=(uint8_t)(v>>8); g_ram[a+1]=(uint8_t)v; }
+    g_ram[a]=(uint8_t)(v>>8); g_ram[(a+1u)&(RAM_SIZE-1u)]=(uint8_t)v; }
 static int g_novblank = 0;     /* deprecated --novblank: now a no-op (gate is default) */
 static int g_pollonly = 0;     /* --pollonly: never inject VERTB (pure polling, debug) */
 static int g_forcevblank = 0;  /* --forcevblank: inject VERTB every frame (debug) */
@@ -2369,7 +2385,10 @@ static inline void w32(uint32_t a, uint32_t v){
     if (a == 0x392d4u) { g_curwr_pc = (uint32_t)m68k_get_reg(NULL,M68K_REG_PPC); g_curwr_n++; }
     if (g_watch && a==g_watch && g_log) fprintf(g_log,"  WATCH w32 @%06x <= %08x pc=%06x ic=%llu\n", a, v, (unsigned)m68k_get_reg(NULL,M68K_REG_PC), (unsigned long long)g_icount);
     if (sndcode_guard(a, v, 4)) return;
-    g_ram[a]=(uint8_t)(v>>24); g_ram[a+1]=(uint8_t)(v>>16); g_ram[a+2]=(uint8_t)(v>>8); g_ram[a+3]=(uint8_t)v; }
+    g_ram[a]=(uint8_t)(v>>24);
+    g_ram[(a+1u)&(RAM_SIZE-1u)]=(uint8_t)(v>>16);
+    g_ram[(a+2u)&(RAM_SIZE-1u)]=(uint8_t)(v>>8);
+    g_ram[(a+3u)&(RAM_SIZE-1u)]=(uint8_t)v; }
 
 static int in_ram(uint32_t a)    { return a < RAM_SIZE; }
 static int in_custom(uint32_t a) { return a >= CUSTOM_LO && a < CUSTOM_HI; }
@@ -2918,6 +2937,14 @@ static int      g_choke_haul_fix = 1;  /* ROOT FIX 2026-07-01: the canopy-choke 
                                        * swing the haul toward the arena INTERIOR (centre 160) so it can never
                                        * exit -- left half keeps +150 (unchanged), right half gets -150; only
                                        * the previously-off-screen case changes.  --nochokefix A/B. */
+static int      g_choke_stab_fix = 1;  /* PATH FIX 2026-08-09 (verified in both extracted reference builds): a successful
+                                       * Down+Attack escape selects the upward-stab script (0x343f4), but a
+                                       * lethal hit immediately overwrites it with the monkey death/release
+                                       * script (0x34494) before the renderer gets one frame.  Defer the
+                                       * existing release path until the selected stab script returns to the
+                                       * choke handler; HP<=0 + the canopy-state bit is the save-safe pending
+                                       * marker, so no host sidecar or save-format change is needed.
+                                       * --nochokestabfix A/B. */
 static int      g_taskdedup_n = 0;
 /* (Removed 2026-06-25: g_lifeguard / the @0x260a4 +0x82 clear.  It was REDUNDANT -- the new-game
  * per-record init already clears +0x82 at 0x260d8 -- so it did nothing for the random life loss,
@@ -3283,8 +3310,9 @@ void moon_instr_hook(unsigned int pc) {
         uint32_t a1 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A1);  /* knight being flagged */
         uint32_t a0 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A0);  /* event/script object  */
         fprintf(g_log, "PENALTY-SET +0x82=1 knight@%06x lives=%02x  event@%06x [+40]=%04x [+4d]=%02x  ppc=%08x ic=%llu\n",
-                a1, (a1 < 0x200000u ? g_ram[a1+0x49u] : 0xffu), a0,
-                (a0 < 0x200000u ? r16(a0+0x40u) : 0xffffu), (a0 < 0x200000u ? g_ram[a0+0x4du] : 0xffu),
+                a1, (a1 < RAM_SIZE-0x49u ? g_ram[a1+0x49u] : 0xffu), a0,
+                (a0 < RAM_SIZE-0x4du ? r16(a0+0x40u) : 0xffffu),
+                (a0 < RAM_SIZE-0x4du ? g_ram[a0+0x4du] : 0xffu),
                 (unsigned)m68k_get_reg(NULL, M68K_REG_PPC), (unsigned long long)g_icount);
         fflush(g_log);
         g_penaltyset_n++;
@@ -3840,6 +3868,44 @@ void moon_instr_hook(unsigned int pc) {
             fflush(g_log); en++;
         }
     }
+    /* LETHAL CANOPY-ESCAPE STAB (2026-08-09): both extracted cracked and boxed-
+     * retail reference builds write the stab cursor at 0x27196, apply damage,
+     * then on a lethal hit run
+     * the release path immediately and replace that cursor with the death
+     * script -- no stab frame can render.  Yield once with 0x343f4 intact.
+     * When that script naturally returns to the canopy handler, HP<=0 plus
+     * +0x69 bit2 identifies the deferred release without any host-only state;
+     * this also survives an F5/F9 taken during the animation. */
+    if (g_choke_stab_fix && g_os && pc == 0x271b6u
+        && r16(pc) == 0x6e00u && r16(pc + 2u) == 0x0060u) { /* `bgt.w $27218` after choker HP subtraction */
+        uint32_t a1 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A1); /* active monkey */
+        if (a1 < RAM_SIZE - 0x52u && r8(a1 + 0x4du) == 0x24u
+            && (int16_t)r16(a1 + 0x50u) <= 0 && r32(0x2eaf8u) == 0x343f4u) {
+            m68k_set_reg(M68K_REG_PC, 0x27218u);            /* yield with the stab cursor intact */
+            if (g_log) { static int csd = 0; if (csd < 12) {
+                fprintf(g_log, "CHOKE-STAB defer monkey=%06x hp=%d fr=%d ic=%llu\n",
+                        a1, (int)(int16_t)r16(a1 + 0x50u), g_cur_frame,
+                        (unsigned long long)g_icount);
+                fflush(g_log); csd++;
+            } }
+            return;
+        }
+    }
+    if (g_choke_stab_fix && g_os && pc == 0x27180u
+        && r16(pc) == 0x4eb9u && r32(pc + 2u) == 0x00022fe6u) { /* canopy handler input-call head */
+        uint32_t a1 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A1); /* active monkey */
+        if (a1 < RAM_SIZE - 0x6au && r8(a1 + 0x4du) == 0x24u
+            && (int16_t)r16(a1 + 0x50u) <= 0 && (r8(a1 + 0x69u) & 0x04u)) {
+            m68k_set_reg(M68K_REG_PC, 0x271bau);            /* original show/release/death sequence */
+            if (g_log) { static int csr = 0; if (csr < 12) {
+                fprintf(g_log, "CHOKE-STAB release monkey=%06x hp=%d fr=%d ic=%llu\n",
+                        a1, (int)(int16_t)r16(a1 + 0x50u), g_cur_frame,
+                        (unsigned long long)g_icount);
+                fflush(g_log); csr++;
+            } }
+            return;
+        }
+    }
     /* OPCODE-GUARDED (2026-07-02 audit): during the INTRO this address holds a different
      * routine (an extent tracker; 0x272a8 = `blt`), and the unguarded hook misfired on it
      * every boot -- writing a garbage word through the intro's A0 and jumping into the
@@ -4270,7 +4336,10 @@ void moon_instr_hook(unsigned int pc) {
      * which only runs once the engine is fully loaded and ticking -- strictly after
      * the one-time module load.  From here on, any store into the engine's CODE
      * bytes (0x43224..0x43e00) is a wild write and gets dropped+logged. */
-    if (!g_snd_loaded && pc == 0x4333cu && r16(pc) == 0x49f9u) { g_snd_loaded = 1; g_bootphase = 0; }  /* opcode-guarded: `lea $42fd4,A4` resident; sound engine ticking = definitely past the boot phase (g_bootphase belt) */
+    if (pc == 0x4333cu && r16(pc) == 0x49f9u) {             /* opcode-guarded: `lea $42fd4,A4` resident */
+        if (!g_snd_loaded) { g_snd_loaded = 1; g_bootphase = 0; }
+        if (!g_gameplay_watches_armed) gameplay_watches_reset(1); /* boot-table population must not consume live diagnostic caps */
+    }
     /* FLOPPY MOTOR/SEEK BUSY-WAIT ACCELERATION (see g_dsk_fastwait note above).
      * Mog's trackdisk driver busy-polls CIA-A ICR ($bfed01) bit0 for a TimerA
      * underflow at two points -- 0x3b7b8 (`btst #0,$bfed01; beq $3b7b8`, the single
@@ -4765,6 +4834,12 @@ void moon_instr_hook(unsigned int pc) {
          * crashed (ILLEGAL @0x500).  Re-base on EVERY entry (not one-shot) so the
          * Mog relaunch also lands its pools in free RAM above the code. */
         if (pc == 0x21000u && g_program_served) {
+            /* This entry is also the gameplay-module relaunch boundary.  Disarm
+             * diagnostics and the code-write guard while the new module is being
+             * populated; the live sound dispatcher re-arms both afterward. */
+            g_snd_loaded = 0;
+            g_sndguard_hits = 0;
+            gameplay_watches_reset(0);
             /* The gfx pool must clear TWO fixed regions, not just the code image:
              *   (a) program/Mog's loaded code at 0x21000..0x67210, and
              *   (b) the DISPLAY DOUBLE-BUFFER, which `program`/`Mog` keep at FIXED
@@ -7045,61 +7120,157 @@ static const int SAVE_REGS[] = {
  * (stale after loading an inventory-open save; neutralized by the g_map_live
  * capture gate).  If you add state that feeds EMULATION and fits none of the
  * buckets, it belongs in the blob with a SAVE_VERSION bump. */
-/* ONE (de)serializer drives both directions so save & load can never drift out
- * of sync.  dir=1 => write, dir=0 => read.  Returns 1 on full success. */
-static int sv_blob(FILE *f, int dir, void *p, size_t n) {
-    return dir ? (fwrite(p,1,n,f)==n) : (fread(p,1,n,f)==n);
+/* ONE bounded memory (de)serializer drives both directions so save & load can
+ * never drift out of sync.  Files are read completely and validated before a
+ * read cursor is pointed at live state; a truncated save therefore cannot
+ * leave half-restored RAM/register sidecars behind. */
+typedef struct {
+    uint8_t *buf;
+    size_t cap, pos;
+    int dir;                    /* 1 = state -> buffer, 0 = buffer -> state */
+} SvCursor;
+
+static int sv_blob(SvCursor *s, void *p, size_t n) {
+    if (s->pos > s->cap || n > s->cap - s->pos) return 0;
+    if (s->buf) {
+        if (s->dir) memcpy(s->buf + s->pos, p, n);
+        else        memcpy(p, s->buf + s->pos, n);
+    }
+    s->pos += n;
+    return 1;
 }
-static int sv_serialize(FILE *f, int dir, uint32_t *regs, int nregs) {
+static int sv_serialize(SvCursor *s, uint32_t *regs, int nregs) {
     int ok = 1;
-    ok &= sv_blob(f, dir, regs, (size_t)nregs*sizeof(uint32_t)); /* 68000 CPU registers (portable) */
-    ok &= sv_blob(f, dir, g_ram, RAM_SIZE);            /* all 2MB chip RAM            */
-    ok &= sv_blob(f, dir, g_custom, sizeof(g_custom)); /* DFF000 custom registers     */
-    ok &= sv_blob(f, dir, g_ciaa, sizeof(g_ciaa));
-    ok &= sv_blob(f, dir, g_ciab, sizeof(g_ciab));
-    ok &= sv_blob(f, dir, &g_ca, sizeof(g_ca));        /* CIA-A live timers + latches */
-    ok &= sv_blob(f, dir, &g_cb, sizeof(g_cb));        /* CIA-B live timers + latches */
-    ok &= sv_blob(f, dir, g_paula, sizeof(g_paula));   /* 4 audio channels            */
-    ok &= sv_blob(f, dir, &g_cycles, sizeof(g_cycles));
-    ok &= sv_blob(f, dir, &g_icount, sizeof(g_icount));
-    ok &= sv_blob(f, dir, &g_frame_cycle, sizeof(g_frame_cycle));
-    ok &= sv_blob(f, dir, &g_vpos, sizeof(g_vpos));
-    ok &= sv_blob(f, dir, &g_hpos, sizeof(g_hpos));
-    ok &= sv_blob(f, dir, &g_beam_line, sizeof(g_beam_line));
-    ok &= sv_blob(f, dir, &g_beam_hpos, sizeof(g_beam_hpos));
-    ok &= sv_blob(f, dir, &g_heap, sizeof(g_heap));    /* HLE bump-allocator pointer  */
-    ok &= sv_blob(f, dir, &g_disk_inserted, sizeof(g_disk_inserted));
-    ok &= sv_blob(f, dir, &g_chng_low, sizeof(g_chng_low));
-    ok &= sv_blob(f, dir, &g_dsk_cyl, sizeof(g_dsk_cyl));     /* floppy head position (matters mid-load) */
-    ok &= sv_blob(f, dir, &g_dsk_head, sizeof(g_dsk_head));
-    ok &= sv_blob(f, dir, &g_dsk_sel, sizeof(g_dsk_sel));
-    ok &= sv_blob(f, dir, &g_dsk_known, sizeof(g_dsk_known));
-    ok &= sv_blob(f, dir, &g_dsk_reads, sizeof(g_dsk_reads));
-    ok &= sv_blob(f, dir, &g_autoswap_armed, sizeof(g_autoswap_armed));
-    ok &= sv_blob(f, dir, &g_autoswap_settle, sizeof(g_autoswap_settle));
-    ok &= sv_blob(f, dir, &g_blt_busy_until, sizeof(g_blt_busy_until));
-    ok &= sv_blob(f, dir, &g_blt_busy_scope, sizeof(g_blt_busy_scope));
-    ok &= sv_blob(f, dir, &g_blit_count, sizeof(g_blit_count));
-    ok &= sv_blob(f, dir, g_diskev_done, sizeof(g_diskev_done));
+    ok &= sv_blob(s, regs, (size_t)nregs*sizeof(uint32_t)); /* 68000 CPU registers (portable) */
+    ok &= sv_blob(s, g_ram, RAM_SIZE);            /* all 2MB chip RAM            */
+    ok &= sv_blob(s, g_custom, sizeof(g_custom)); /* DFF000 custom registers     */
+    ok &= sv_blob(s, g_ciaa, sizeof(g_ciaa));
+    ok &= sv_blob(s, g_ciab, sizeof(g_ciab));
+    ok &= sv_blob(s, &g_ca, sizeof(g_ca));        /* CIA-A live timers + latches */
+    ok &= sv_blob(s, &g_cb, sizeof(g_cb));        /* CIA-B live timers + latches */
+    ok &= sv_blob(s, g_paula, sizeof(g_paula));   /* 4 audio channels            */
+    ok &= sv_blob(s, &g_cycles, sizeof(g_cycles));
+    ok &= sv_blob(s, &g_icount, sizeof(g_icount));
+    ok &= sv_blob(s, &g_frame_cycle, sizeof(g_frame_cycle));
+    ok &= sv_blob(s, &g_vpos, sizeof(g_vpos));
+    ok &= sv_blob(s, &g_hpos, sizeof(g_hpos));
+    ok &= sv_blob(s, &g_beam_line, sizeof(g_beam_line));
+    ok &= sv_blob(s, &g_beam_hpos, sizeof(g_beam_hpos));
+    ok &= sv_blob(s, &g_heap, sizeof(g_heap));    /* HLE bump-allocator pointer  */
+    ok &= sv_blob(s, &g_disk_inserted, sizeof(g_disk_inserted));
+    ok &= sv_blob(s, &g_chng_low, sizeof(g_chng_low));
+    ok &= sv_blob(s, &g_dsk_cyl, sizeof(g_dsk_cyl));     /* floppy head position (matters mid-load) */
+    ok &= sv_blob(s, &g_dsk_head, sizeof(g_dsk_head));
+    ok &= sv_blob(s, &g_dsk_sel, sizeof(g_dsk_sel));
+    ok &= sv_blob(s, &g_dsk_known, sizeof(g_dsk_known));
+    ok &= sv_blob(s, &g_dsk_reads, sizeof(g_dsk_reads));
+    ok &= sv_blob(s, &g_autoswap_armed, sizeof(g_autoswap_armed));
+    ok &= sv_blob(s, &g_autoswap_settle, sizeof(g_autoswap_settle));
+    ok &= sv_blob(s, &g_blt_busy_until, sizeof(g_blt_busy_until));
+    ok &= sv_blob(s, &g_blt_busy_scope, sizeof(g_blt_busy_scope));
+    ok &= sv_blob(s, &g_blit_count, sizeof(g_blit_count));
+    ok &= sv_blob(s, g_diskev_done, sizeof(g_diskev_done));
     /* dos-HLE streamer: save the file NAME + cursor; the buffer itself (a host
      * pointer) is reconstructed on load by re-reading the dataset file. */
-    ok &= sv_blob(f, dir, g_loadname, sizeof(g_loadname));
-    ok &= sv_blob(f, dir, &g_loadpos, sizeof(g_loadpos));
-    ok &= sv_blob(f, dir, &g_loadsize, sizeof(g_loadsize));
-    ok &= sv_blob(f, dir, &g_program_served, sizeof(g_program_served));
+    ok &= sv_blob(s, g_loadname, sizeof(g_loadname));
+    ok &= sv_blob(s, &g_loadpos, sizeof(g_loadpos));
+    ok &= sv_blob(s, &g_loadsize, sizeof(g_loadsize));
+    ok &= sv_blob(s, &g_program_served, sizeof(g_program_served));
     return ok;
 }
 
-static int save_state(const char *path) {
-    FILE *f = fopen(path, "wb");
+static size_t sv_payload_size(void) {
+    uint32_t regs[SAVE_NREGS] = {0};
+    SvCursor s = { NULL, SIZE_MAX, 0, 1 };
+    return sv_serialize(&s, regs, SAVE_NREGS) ? s.pos : 0;
+}
+
+static int sv_replace_file(const char *tmp, const char *path) {
+#ifdef _WIN32
+    return MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+    return rename(tmp, path) == 0;
+#endif
+}
+
+/* Validate and reconstruct the only host-pointer sidecar before committing a
+ * loaded payload.  A changed/missing dataset file makes the load fail cleanly
+ * with the running machine untouched instead of leaving an oversized cursor. */
+static int sv_prepare_streamer(const uint8_t *payload, size_t payload_size,
+                               uint8_t **stream_out) {
+    const size_t tail = sizeof(g_loadname) + sizeof(g_loadpos) +
+                        sizeof(g_loadsize) + sizeof(g_program_served);
+    char name[sizeof(g_loadname)];
+    long pos, size;
+    *stream_out = NULL;
+    if (payload_size < tail) return 0;
+    size_t off = payload_size - tail;
+    memcpy(name, payload + off, sizeof(name)); off += sizeof(name);
+    memcpy(&pos, payload + off, sizeof(pos)); off += sizeof(pos);
+    memcpy(&size, payload + off, sizeof(size));
+    if (!memchr(name, '\0', sizeof(name)) || pos < 0 || size < 0 || pos > size) return 0;
+    if (!name[0]) return pos == 0 && size == 0;
+
+    char path[256];
+    long found = find_file(name, path, sizeof(path));
+    if (found < 0 || found != size) return 0;
+    FILE *f = fopen(path, "rb");
     if (!f) return 0;
+    size_t want = (size_t)size;
+    uint8_t *buf = (uint8_t*)malloc(want ? want : 1u);
+    size_t got = buf ? fread(buf, 1, want, f) : 0;
+    int extra = fgetc(f);
+    int read_error = ferror(f);
+    int close_error = fclose(f) != 0;
+    if (!buf || got != want || extra != EOF || read_error || close_error) {
+        free(buf);
+        return 0;
+    }
+    *stream_out = buf;
+    return 1;
+}
+
+static int save_state(const char *path) {
     uint32_t ver = SAVE_VERSION, ram = RAM_SIZE, nregs = SAVE_NREGS;
     uint32_t regs[SAVE_NREGS];
     for (int i = 0; i < SAVE_NREGS; i++) regs[i] = m68k_get_reg(NULL, SAVE_REGS[i]);
-    int ok = (fwrite(SAVE_MAGIC,1,8,f)==8);
-    ok = ok && (fwrite(&ver,4,1,f)==1) && (fwrite(&ram,4,1,f)==1) && (fwrite(&nregs,4,1,f)==1);
-    ok = ok && sv_serialize(f, 1, regs, SAVE_NREGS);
-    fclose(f);
+    size_t payload_size = sv_payload_size();
+    uint8_t *payload = payload_size ? (uint8_t*)malloc(payload_size) : NULL;
+    SvCursor s = { payload, payload_size, 0, 1 };
+    int ok = payload && sv_serialize(&s, regs, SAVE_NREGS) && s.pos == payload_size;
+
+    size_t tmp_size = strlen(path) + 40u;
+    char *tmp = ok ? (char*)malloc(tmp_size) : NULL;
+    int tmp_valid = 0;
+    if (!tmp) ok = 0;
+    if (ok) {
+        tmp[0] = 0;
+#ifdef _WIN32
+        unsigned long pid = (unsigned long)GetCurrentProcessId();
+#else
+        unsigned long pid = (unsigned long)getpid();
+#endif
+        int n = snprintf(tmp, tmp_size, "%s.tmp.%lu", path, pid);
+        if (n < 0 || (size_t)n >= tmp_size) ok = 0;
+        else tmp_valid = 1;
+    }
+
+    FILE *f = ok ? fopen(tmp, "wb") : NULL;
+    if (!f) ok = 0;
+    if (ok) ok = fwrite(SAVE_MAGIC,1,8,f)==8 &&
+                 fwrite(&ver,4,1,f)==1 && fwrite(&ram,4,1,f)==1 &&
+                 fwrite(&nregs,4,1,f)==1 && fwrite(payload,1,payload_size,f)==payload_size;
+    if (f) {
+        if (ok && fflush(f) != 0) ok = 0;
+#ifdef _WIN32
+        if (ok && _commit(_fileno(f)) != 0) ok = 0;
+#endif
+        if (fclose(f) != 0) ok = 0;
+    }
+    if (ok) ok = sv_replace_file(tmp, path);
+    if (!ok && tmp_valid) remove(tmp);
+    free(tmp);
+    free(payload);
     if (g_log) fprintf(g_log, "SAVESTATE %s ok=%d ic=%llu\n", path, ok, (unsigned long long)g_icount);
     return ok;
 }
@@ -7113,9 +7284,28 @@ static int load_state(const char *path) {
     ok = ok && (fread(&ram,4,1,f)==1) && ram==RAM_SIZE;
     ok = ok && (fread(&nregs,4,1,f)==1) && nregs==(uint32_t)SAVE_NREGS;
     if (!ok) { fclose(f); return 0; }
+
+    size_t payload_size = sv_payload_size();
+    uint8_t *payload = payload_size ? (uint8_t*)malloc(payload_size) : NULL;
+    if (!payload) { fclose(f); return 0; }
+    size_t got = fread(payload, 1, payload_size, f);
+    int extra = fgetc(f);                 /* exact length: reject both truncation and trailing junk */
+    int read_error = ferror(f);
+    int close_error = fclose(f) != 0;
+    if (got != payload_size || extra != EOF || read_error || close_error) {
+        free(payload);
+        return 0;
+    }
+
+    uint8_t *staged_stream = NULL;
+    if (!sv_prepare_streamer(payload, payload_size, &staged_stream)) {
+        free(payload);
+        return 0;
+    }
     uint32_t regs[SAVE_NREGS];
-    ok = sv_serialize(f, 0, regs, SAVE_NREGS);
-    fclose(f);
+    SvCursor s = { payload, payload_size, 0, 0 };
+    ok = sv_serialize(&s, regs, SAVE_NREGS) && s.pos == payload_size;
+    free(payload);
     if (ok) {
         /* Restore the CPU: SR FIRST (sets supervisor/user mode + IRQ mask so A7 maps
          * to the correct stack), then all other registers.  Pure values, no pointers. */
@@ -7124,27 +7314,12 @@ static int load_state(const char *path) {
         paula_sidecar_reset();   /* Paula reload-protocol statics live outside the blob: rebuild them
                                   * from the just-restored registers (see paula_sidecar_reset) */
         g_ew_armed = 0;          /* edge-walk fix trajectory capture: transient per-turn state, drop on load */
-    }
-    /* Rebuild the streamer's in-memory file copy: g_loadbuf is a host pointer that
-     * wasn't serialized -- re-read the (deterministic) dataset file by name and
-     * restore the cursor that sv_serialize just loaded into g_loadpos/g_loadsize. */
-    if (ok) {
         if (g_loadbuf) { free(g_loadbuf); g_loadbuf = NULL; }
-        if (g_loadname[0]) {
-            char p[256]; long sz = find_file(g_loadname, p, sizeof(p));
-            FILE *lf = (sz >= 0) ? fopen(p, "rb") : NULL;
-            if (lf) {
-                g_loadbuf = (uint8_t*)malloc(sz > 0 ? sz : 1);
-                long got = g_loadbuf ? (long)fread(g_loadbuf, 1, sz, lf) : 0;
-                fclose(lf);
-                if (got != g_loadsize && g_log)
-                    fprintf(g_log, "LOADSTATE warn: streamer '%s' re-read %ld != saved %ld\n",
-                            g_loadname, got, g_loadsize);
-            } else if (g_log) {
-                fprintf(g_log, "LOADSTATE warn: streamer file '%s' not found in dataset\n", g_loadname);
-            }
-        }
+        g_loadbuf = staged_stream;
+        staged_stream = NULL;
+        gameplay_watches_reset(g_snd_loaded); /* warm F9 stays armed; cold --loadstate waits for dispatcher */
     }
+    free(staged_stream);
     if (g_log) fprintf(g_log, "LOADSTATE %s ok=%d ic=%llu\n", path, ok, (unsigned long long)g_icount);
     return ok;
 }
@@ -7251,6 +7426,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--notaskfix")) g_tasklist_fix=0;           /* A/B: disable the task-list root fix (dedup + effect-only removal + cursor value-removal hardening) */
         else if (!strcmp(argv[i],"--noaud1fix")) g_aud1_dmafix=0;            /* A/B: disable the AUD1 stray-DMACON-disable fix (0x4371c) */
         else if (!strcmp(argv[i],"--nochokefix")) g_choke_haul_fix=0;
+        else if (!strcmp(argv[i],"--nochokestabfix")) g_choke_stab_fix=0;
         else if (!strcmp(argv[i],"--noedgewalkfix")) g_edgewalk_fix=0;   /* A/B: disable the overland AI fallback-goal arrival fix */
         else if (!strcmp(argv[i],"--nochaseengagefix")) g_chase_engage_fix=0;   /* A/B: disable the chase-arrival engage fix */
         else if (!strcmp(argv[i],"--nodayendfix")) g_dayend_fix=0;   /* A/B: disable the town-exit day-end fix */
