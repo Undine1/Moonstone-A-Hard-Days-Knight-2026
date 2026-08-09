@@ -41,7 +41,7 @@ together. The folder is portable.
     A / RB / LB / RT ... attack / select / confirm
     B .................. cancel / right-click
     Y ................... open inventory on the map
-    Start ............... pause / resume walk and day animations
+    Start ............... pause / resume during combat
     Select / Back ........ rest / end the current turn (pass the day)
 
   KEYBOARD + MOUSE
@@ -50,6 +50,7 @@ together. The folder is portable.
     Ctrl / Enter /
       Left-click ......... attack / select / confirm
     Space or I ........... open inventory on the map
+    Space (in combat) .... pause / resume
     E ..................... rest / end the current turn
     Right-click .......... cancel / back
     Esc ................... quit
