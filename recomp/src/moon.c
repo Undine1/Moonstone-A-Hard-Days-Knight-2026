@@ -5887,21 +5887,17 @@ static void capture_frame(void) {
         int tfill = 0;                              /* per-mille nonzero of the fresh render (body, not row0) */
         if (g_delivery_win > 0) { long nz=0,tot=0; for (int k=0;k<FB_W*FB_H*3;k+=48){ tot++; if (g_cap_tmp[k]) nz++; } tfill=(int)(tot?nz*1000/tot:0); }
         unsigned dsc = dlog ? (unsigned)r32(0x2fb1cu) : 0;
-        /* DELIVERY display policy: the window now only ENDS itself when the season cutscene composites
-         * to the display double-buffer 0x6bdfa (scene 0, tfill>20).  The old per-phase garble blackouts
-         * ("first map"/"second map" -> BLACK) are GONE -- both were the SAME BACKBUF-RECOVER bug
-         * (substituting the stale 0x80000 compose master), now gated off during delivery (see render_rgb).
-         * The win screen, the disk prompt, and the "ceremony / Loading" relaunch screen all render clean. */
+        /* DELIVERY display policy: keep the completed-quest screen visible, but black the stale
+         * overland-map master that the post-win `program` relaunch exposes directly.  This is not a
+         * BACKBUF-RECOVER substitution: with seamless prompt skipping enabled, scene 0 points at
+         * 0x80000 itself for ~150 frames while that buffer still contains the map.  The real season
+         * cutscene composites to 0x6bdfa and closes the delivery window below. */
         if (g_delivery_win > 0) {
             uint32_t sc = r32(0x2fb1cu);
-            if (sc == 0u && g_disp_base == 0x6bdfau && tfill > 20)
+            if (!g_rawcapture && sc == 0u && g_disp_base == 0x80000u && tfill > 110)
+                g_render_garbled = 2;                 /* stale map under the ending/load palette -> black */
+            else if (sc == 0u && g_disp_base == 0x6bdfau && tfill > 20)
                 g_delivery_win = 0;                 /* cutscene is compositing -> delivery over */
-            /* No garble blackout here any more.  BOTH "garbled maps" were the SAME bug: BACKBUF-RECOVER
-             * swapping the empty/sparse displayed buffer for the fuller compose master (0x80000 = the
-             * stale overland map) -- once for the bg8.piv win screen, once for the relaunch.  Gating
-             * BACKBUF-RECOVER off during the delivery (render_rgb, g_delivery_win==0) stops it at the
-             * source, so neither screen garbles now: verified the win screen AND the "ceremony of the
-             * Moonstone / Loading" relaunch screen both render clean, blackout never fires (2026-06-27). */
         }
         if (!g_rawcapture && palette_distinct_nonzero() <= 3 &&
             frame_ink_fraction(g_cap_tmp,h) < TRANSITION_HOLD_INK &&
