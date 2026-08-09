@@ -8,8 +8,9 @@ Windows.  There is NO emulator (no WinUAE / FS-UAE).  The real Amiga
 of a from-scratch model of the Amiga's custom chips (graphics, the
 blitter, the copper, and 4-channel Paula audio).
 
-The three original floppy disks are bundled as data, and the game
-swaps between them AUTOMATICALLY
+The copyrighted original floppy disks are not distributed with this
+project. Supply your own three ADF images in the "data" folder; the
+game extracts what it needs and swaps between them AUTOMATICALLY.
 
 
 ---------------------------------------------------------------
@@ -21,9 +22,9 @@ Just double-click:
     moonstone.exe
 
 A window opens and the game boots straight to the MOONSTONE title
-screen and main menu.  Everything it needs is in the "data" folder
-next to the exe - you can move or copy the whole MoonstoneNative
-folder anywhere.
+screen and main menu. Keep your supplied game data in the "data"
+folder next to the exe. Once set up, you can move or copy the whole
+MoonstoneNative folder anywhere.
 
 Requires: 64-bit Windows.  SDL2.dll (included) must stay next to the
 exe.
@@ -78,12 +79,12 @@ Notes:
 
   moonstone.exe          the native game
   SDL2.dll               window / input / sound library (keep next to exe)
-  data\                  the original game data:
-      nb, program, mog, crystal           game boot modules
+  data\                  your locally supplied original game data:
       Moonstone ... Disk1/2/3.adf         the three original floppy images
+      nb, program, mog, crystal           modules extracted by the runtime
 
-The data is the original Mindscape disk content; this port only adds
-the native runtime around it.
+The supplied data remains original Mindscape disk content; this port
+only adds the native runtime around it.
 
 
 ---------------------------------------------------------------
