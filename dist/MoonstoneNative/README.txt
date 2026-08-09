@@ -42,7 +42,7 @@ together. The folder is portable.
     B .................. cancel / right-click
     Y ................... open inventory on the map
     Start ............... pause / resume walk and day animations
-    Back ................. rest / end the current turn
+    Select / Back ........ rest / end the current turn (pass the day)
 
   KEYBOARD + MOUSE
     Arrow keys ........... move
