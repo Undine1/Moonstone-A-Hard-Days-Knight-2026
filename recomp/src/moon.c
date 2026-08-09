@@ -15,7 +15,7 @@
  * Public License (LICENSE) for more details.
  *
  * The original Moonstone game and its data are NOT part of this program and are
- * not distributed with it; you must supply your own legally-owned copy.
+ * not distributed with it; you must supply your own ADF files.
  */
 #include <stdint.h>
 #include <stdio.h>
