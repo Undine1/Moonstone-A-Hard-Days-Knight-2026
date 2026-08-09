@@ -2,8 +2,8 @@
   MOONSTONE - A Hard Days Knight         native Windows port
 ================================================================
 
-This is a ready-to-play Windows package. No installation, command
-line, emulator, or Amiga ROM is required.
+This is a prebuilt Windows package. The copyrighted original game
+disks are not included; you must supply your own three ADF images.
 
 
 ---------------------------------------------------------------
@@ -11,12 +11,21 @@ line, emulator, or Amiga ROM is required.
 ---------------------------------------------------------------
 
 1. Extract the complete ZIP.
-2. Double-click:
+2. Copy your three uncompressed Moonstone ADF images into the data folder.
+3. Rename them exactly:
+
+       Disk1.adf
+       Disk2.adf
+       Disk3.adf
+
+4. Double-click:
 
        moonstone.exe
 
-Requires 64-bit Windows. Keep moonstone.exe, SDL2.dll, and the data
-folder together. The folder is portable and can be moved anywhere.
+On first launch, the game extracts its required boot modules from
+Disk1.adf automatically. Each ADF must be 901,120 bytes. Requires
+64-bit Windows. Keep moonstone.exe, SDL2.dll, and the data folder
+together. The folder is portable.
 
 
 ---------------------------------------------------------------
@@ -65,7 +74,8 @@ folder together. The folder is portable and can be moved anywhere.
   SDL2.dll               window, input, and audio support
   README.txt             this guide
   LICENSE.txt            native runtime license
-  data\                  required game data
+  THIRD-PARTY-NOTICES.txt  third-party licenses and credits
+  data\                  place your three ADF images here
 
 Do not rename or remove SDL2.dll or the data folder.
 
@@ -74,8 +84,9 @@ Do not rename or remove SDL2.dll or the data folder.
  TROUBLESHOOTING
 ---------------------------------------------------------------
 
-If the game does not open, make sure the complete ZIP was extracted
-and SDL2.dll and the data folder are still next to moonstone.exe.
+If the game does not open, check that all three files are directly in
+the data folder and named Disk1.adf, Disk2.adf, and Disk3.adf. Also
+make sure SDL2.dll is still next to moonstone.exe.
 
 Project page and native runtime source:
 https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026

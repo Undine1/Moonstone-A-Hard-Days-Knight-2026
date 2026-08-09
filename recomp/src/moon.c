@@ -47,8 +47,8 @@
 #define MOON_BUILD (__DATE__ " " __TIME__)
 
 /* Directory containing the executable (filled in main() from the OS), used to
- * resolve the bundled `data/` folder so the game runs by double-click from any
- * location -- not only from the dev `recomp/` working dir.  Empty until set. */
+ * resolve the player-supplied `data/` folder so the game runs by double-click
+ * from any location -- not only from the dev `recomp/` working dir. */
 static char g_exedir[1024] = "";
 static void compute_exedir(const char *argv0) {
 #ifdef _WIN32
@@ -68,14 +68,22 @@ static void compute_exedir(const char *argv0) {
         if (slash) *slash = 0; else g_exedir[0] = 0;
     }
 }
-/* Does `dir` exist and contain a recognizable game data file? */
-static int dir_has_data(const char *dir) {
-    if (!dir || !*dir) return 0;
-    char p[1100];
-    snprintf(p, sizeof(p), "%s/program", dir);   /* the loaded `program` module */
+static int dir_has_file(const char *dir, const char *name) {
+    if (!dir || !*dir || !name || !*name) return 0;
+    char p[1300];
+    int n = snprintf(p, sizeof(p), "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= sizeof(p)) return 0;
     FILE *f = fopen(p, "rb");
     if (f) { fclose(f); return 1; }
     return 0;
+}
+/* Recognize either an already-extracted dataset or a clean first-run folder
+ * containing the player's Disk 1 ADF.  The latter must be selected before
+ * ensure_boot_modules() can extract nb/program/mog/crystal from that image. */
+static int dir_has_data(const char *dir) {
+    return dir_has_file(dir, "program") ||
+           dir_has_file(dir, "Moonstone - A Hard Days Knight_Disk1.adf") ||
+           dir_has_file(dir, "Disk1.adf");
 }
 
 /* digital joystick + fire state (set by host input) */
@@ -913,13 +921,12 @@ static void trackdisk_dma(uint32_t dest, int words) {
     update_ipl();
 }
 
-/* Directory to load the three ADF images from (the bundled `data/` folder, set
- * exe-relative in main(); overridable with --diskdir).  Empty = search the dev
- * fallback paths only. */
+/* Directory to load the player's three ADF images from (the exe-relative
+ * `data/` folder by default; overridable with --diskdir). */
 static const char *g_diskdir = "";
 
 /* Load the three decoded-sector ADF images.  Search order per disk:
- *   1. <g_diskdir>/<full name>   (the bundled `data/` folder, exe-relative)
+ *   1. <g_diskdir>/<full name>   (the player-supplied `data/` folder)
  *   2. <g_diskdir>/Disk<N>.adf   (short name, if the bundle was renamed)
  *   3. dev fallbacks ../, ../../, ./, ""  (running from recomp/ or repo root)
  * so the same binary works both from the dev tree and from the distributable. */
@@ -1051,6 +1058,54 @@ static void ensure_boot_modules(const char *datadir, const char *adfdir) {
         }
         free(adf);
     }
+}
+
+static long data_file_size(const char *dir, const char *name) {
+    if (!dir || !*dir || !name || !*name) return -1;
+    char p[1300];
+    int n = snprintf(p, sizeof(p), "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= sizeof(p)) return -1;
+    FILE *f = fopen(p, "rb");
+    if (!f) return -1;
+    long size = -1;
+    if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
+    fclose(f);
+    return size;
+}
+
+/* A normal double-click starts before SDL has opened a window.  Validate the
+ * complete player-supplied dataset here so missing/misnamed disks produce an
+ * actionable setup message instead of a silent loader exit or a later stall. */
+static int game_data_ready(const char *datadir, const char *adfdir) {
+    static const char *mods[4] = { "nb", "program", "mog", "crystal" };
+    static const char *full[3] = {
+        "Moonstone - A Hard Days Knight_Disk1.adf",
+        "Moonstone - A Hard Days Knight_Disk2.adf",
+        "Moonstone - A Hard Days Knight_Disk3.adf" };
+    static const char *shrt[3] = { "Disk1.adf", "Disk2.adf", "Disk3.adf" };
+    for (int m = 0; m < 4; m++)
+        if (data_file_size(datadir, mods[m]) <= 0) return 0;
+    for (int d = 0; d < 3; d++) {
+        long size = data_file_size(adfdir, full[d]);
+        if (size < 0) size = data_file_size(adfdir, shrt[d]);
+        if (size != ADF_BYTES) return 0;
+    }
+    return 1;
+}
+
+static void report_game_data_error(int show_gui) {
+    static const char msg[] =
+        "Moonstone needs your three original, uncompressed ADF disk images.\n\n"
+        "Place them directly in the data folder next to moonstone.exe and name them:\n\n"
+        "Disk1.adf\nDisk2.adf\nDisk3.adf\n\n"
+        "Each file must be 901,120 bytes. The data folder must be writable on first launch.";
+    if (g_log) { fprintf(g_log, "SETUP ERROR: %s\n", msg); fflush(g_log); }
+    fprintf(stderr, "%s\n", msg);
+#ifdef _WIN32
+    if (show_gui) MessageBoxA(NULL, msg, "Moonstone - setup required", MB_OK | MB_ICONERROR);
+#else
+    (void)show_gui;
+#endif
 }
 
 /* ======================================================= Paula 4-ch audio */
@@ -7470,9 +7525,9 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--disasm")&&i+2<argc) { disasm_addr=(uint32_t)strtoul(argv[++i],0,0); disasm_len=atoi(argv[++i]); }
     }
 
-    /* ---- resolve data paths (exe-relative `data/` for the distributable) ----
+    /* ---- resolve data paths (exe-relative player-supplied `data/`) ----
      * Pick the dataset directory: an explicit --dataset wins; otherwise prefer
-     * the bundled <exedir>/data when it exists, then the dev tree.  The ADF dir
+     * <exedir>/data when it contains Disk 1 or extracted modules, then the dev tree.  The ADF dir
      * (--diskdir) and the loaded module default to the same place so a
      * double-clicked exe finds everything next to itself. */
     {
@@ -7517,6 +7572,10 @@ int main(int argc, char **argv) {
      * the four boot modules (nb/program/mog/crystal) out of Disk 1's filesystem
      * so they don't have to extract them by hand.  No-op once they exist. */
     ensure_boot_modules(g_dataset, g_diskdir);
+    if (g_os && !game_data_ready(g_dataset, g_diskdir)) {
+        report_game_data_error(sdl);
+        return 1;
+    }
 
     /* Fingerprint the game-data lineage from the mog module (see detect_lineage):
      * hooks carry per-lineage addresses; unknown data runs guarded-inert. */

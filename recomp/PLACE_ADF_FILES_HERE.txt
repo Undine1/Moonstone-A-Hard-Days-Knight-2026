@@ -1,0 +1,12 @@
+COPY YOUR OWN MOONSTONE ADF FILES INTO THIS FOLDER
+
+The original game disks are not included.
+
+Use three uncompressed, standard 901,120-byte ADF images and rename them:
+
+    Disk1.adf
+    Disk2.adf
+    Disk3.adf
+
+Then double-click moonstone.exe. On first launch, the runtime extracts the
+required boot files from Disk1.adf automatically.

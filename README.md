@@ -4,16 +4,24 @@ Ready-to-play native Windows port of *Moonstone: A Hard Days Knight*
 (Mindscape, 1991). The original Amiga game runs through an embedded 68000 core
 and custom OCS implementation, with no external emulator or Kickstart ROM.
 
-## Download and play
+## Download and setup
 
 1. Open the [Releases page](https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026/releases).
 2. Download **`Moonstone-Reborn-Windows-x64.zip`**. Do not download GitHub's
    automatically generated "Source code" archives.
-3. Extract the complete ZIP, then double-click **`moonstone.exe`**.
+3. Extract the complete ZIP.
+4. Copy your own three uncompressed Moonstone ADF disk images into the included
+   `data` folder and rename them exactly:
+   - `Disk1.adf`
+   - `Disk2.adf`
+   - `Disk3.adf`
+5. Double-click **`moonstone.exe`**.
 
-That is all. There is no installer, command line, build process, emulator, or
-ROM setup. The package is portable and requires 64-bit Windows. Keep
-`moonstone.exe`, `SDL2.dll`, and the `data` folder together.
+Each ADF must be the standard 901,120-byte size. The copyrighted game disks are
+not included. On first launch, the runtime extracts the required boot modules
+from Disk 1 automatically. There is no installer or build process. The package
+is portable and requires 64-bit Windows; keep `moonstone.exe`, `SDL2.dll`, and
+the `data` folder together.
 
 The included `README.txt` contains the controls and a short troubleshooting
 note.
@@ -67,4 +75,5 @@ unchanged.
 
 Copyright © 2026 Undine1. The native runtime source is licensed under the
 [GNU General Public License v3.0](LICENSE). The original game code, data, and
-artwork remain © 1991 Mindscape International / Rob Anderson.
+artwork remain © 1991 Mindscape International / Rob Anderson. Third-party
+components and notices are listed in `THIRD-PARTY-NOTICES.txt` in the release.

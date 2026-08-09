@@ -47,6 +47,7 @@ mindscape
 
 # --- Build output / caches ---
 /recomp/build/
+/dist/release-staging/
 __pycache__/
 *.pyc
 
