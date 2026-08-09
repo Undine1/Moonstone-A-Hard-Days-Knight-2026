@@ -31,7 +31,7 @@ note.
 - Automatic disk swapping with no interruption.
 - Skippable intro — press Space, Enter, or Ctrl on the keyboard, or A, B, LB,
   RB, or RT on a controller.
-- Keyboard, mouse, and game-controller support.
+- Complete keyboard and game-controller support, with optional mouse control.
 - Quicksave and quickload anywhere, including during combat.
 - Faithful graphics and Paula audio through the custom OCS runtime.
 

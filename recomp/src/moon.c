@@ -90,11 +90,13 @@ static int dir_has_data(const char *dir) {
 static int g_ji_up, g_ji_dn, g_ji_lf, g_ji_rt;   /* directions */
 static int g_fire2;                               /* port-1 fire (/FIR1) */
 static int g_kdigit = 0;        /* SDL number key 1-9 held (1..9), else 0 (menu selection) */
-static int g_inv_request = 0;   /* host pressed the inventory key (Space/I/padY/padStart); injected at the map poll */
+static int g_inv_request = 0;   /* host pressed the inventory key (Space/I/pad Y); injected at the map poll */
 static int g_in_inventory = 0;  /* 1 while the inventory screen is open (so the open-key can't re-open it in a loop) */
 static int g_rest_request = 0;  /* host pressed REST/skip-turn (E / pad Back); injects scancode 0x12 ('E') at the map poll */
 static int g_rest_pending = 0;  /* 1 for the one poll AFTER injecting 'E', to re-clear [0x3bf74] so one press = exactly one skipped turn */
 static int g_ver_request = 0;   /* B17: host 'V' keydown -> inject the game's 'V' index (0x2f) at the map poll (version display) */
+static int g_quest_quit_request = 0; /* host 'Q' keydown -> inject the game's original map quit index (0x10) */
+static int g_quest_quit_pending = 0; /* raw Q injected; clear it after translation before the guest restart jump */
 static int g_firewait_hot = 0;  /* set when the "wait for fire" routine (0x22fd0) ran this frame; cleared each frame in capture_frame */
 static int g_mappoll_hot = 0;   /* set when the normal map turn-loop's keyboard poll (0x4024c) ran this frame; the delivery overview is a SEPARATE loop that never hits it -- so firewait && !mappoll = the garbled delivery overview */
 /* REST/inventory injection hardening (2026-07-02 can-kick audit): the request latches
@@ -109,8 +111,8 @@ static int g_inv_pending = 0;       /* Space injected; verify it was honored on 
 static int g_rest_tries = 0, g_inv_tries = 0;   /* bounded re-arm counters */
 static uint16_t g_rest_idx0 = 0;    /* turn index [0x2f9da] at REST injection (change = honored) */
 static uint16_t g_popup_injected = 0; /* rawkey our popup injection left in [0x3bf74] (retracted at the next map poll) */
-static int g_pause_request = 0;     /* host Space edge -> feed the walk/day-animation PAUSE gate (faithful restore) */
-static int g_walk_live = 0;         /* g_cur_frame stamp of the last pause-gate poll (capture scope for Space-pause) */
+static int g_pause_request = 0;     /* host Space edge -> feed the original combat PAUSE gate */
+static int g_combat_pause_live = 0; /* g_cur_frame stamp of the last combat pause-gate poll */
 /* MOONSTONE-DELIVERY garbled-map latch (2026-06-24).  The "return matching Moonstone to its home
  * village" handler (node 0x1b) branches to 0x22820 when the returned token matches; from 0x22876 it
  * displays the overland map (scene 9), waits for fire (0x2288a), then 0x231e6 + the 0x2289e relaunch
@@ -178,7 +180,7 @@ static uint8_t keysym_to_idx(int sym) {
         case '8': return 0x09; case '9': return 0x0a;
         case ' ': return 0x39;                 /* Space  */
         case 0x08: return 0x0e;                /* SDLK_BACKSPACE -> index 0x0e (FSM backspace) */
-        case 0x0d: return 0x1c;                /* SDLK_RETURN    -> index 0x1c (FSM confirm)   */
+        case 0x0d: case SDLK_KP_ENTER: return 0x1c; /* Return / keypad Enter -> FSM confirm */
         default: return 0;
     }
 }
@@ -4568,24 +4570,24 @@ void moon_instr_hook(unsigned int pc) {
 
     /* OPEN INVENTORY on the overland map: the map turn-loop polls [0x3bf74] at 0x4024c,
      * translates it (jsr 0x3ff42), and on ASCII space (0x20) opens the inventory (jsr
-     * 0x405b4).  When the operator presses the inventory input (Space / I / pad Y / pad
-     * Start -> g_inv_request), inject the Space 0xc1b3-index (0x39, which 0x3ff42 maps to
+     * 0x405b4).  When the operator presses the inventory input (Space / I / pad Y ->
+     * g_inv_request), inject the Space 0xc1b3-index (0x39, which 0x3ff42 maps to
      * ASCII 0x20) so the poll opens it.  The open-map inventory was otherwise unreachable
      * (Space was wired to fire; no pad button was bound).  Gated to that one poll PC, so
      * it's inert everywhere else (combat/menus/towns use different polls). */
-    /* SPACE-PAUSE (faithful feature restore, 2026-07-02 audit): the walk/day-transition
-     * animation loop (0x2173c front-end / byte-identical Mog copy) polls a pause gate
-     * every iteration: [0x3bf74] -> 0x3ff42 translate -> ASCII 0x20 pauses, then
+    /* SPACE-PAUSE (faithful feature restore, 2026-07-02 audit): the active combat
+     * loop (0x2173c front-end / byte-identical Mog copy) polls a pause gate every
+     * iteration: [0x3bf74] -> 0x3ff42 translate -> ASCII 0x20 pauses, then
      * busy-waits for the NEXT key.  On hardware the CIA keyboard ISR feeds the buffer;
      * the port never did, so the original pause feature was unreachable dead code (and
      * would have hung forever if entered -- nothing could release the wait).  Feed it:
-     * a host Space edge (captured only while the gate is actually polling, g_walk_live)
+     * a host Space edge (captured only while the gate is polling, g_combat_pause_live)
      * injects scancode 0x39 at the gate read; the next Space edge is injected at the
      * busy-wait to release it (the loop's own follow-up clears the buffer).  Both PCs
      * opcode-guarded: gate reads 0x21a8c/0x1c755c (`move.w $3bf74,D0` = 0x3039), waits
      * 0x21aa4/0x1c7574 (`tst.w $3bf74` = 0x4a79). */
     if (g_os && (pc == 0x21a8cu || pc == 0x1c755cu) && r16(pc) == 0x3039u) {
-        g_walk_live = g_cur_frame;          /* the pause gate is polling NOW (capture scope) */
+        g_combat_pause_live = g_cur_frame;  /* combat pause gate is polling now */
         if (g_pause_request && r16(0x3bf74u) == 0) {
             w16(0x3bf74u, 0x39); g_pause_request = 0;
             if (g_log) { static int pn = 0; if (pn < 40) { pn++;
@@ -4593,7 +4595,7 @@ void moon_instr_hook(unsigned int pc) {
         }
     }
     if (g_os && (pc == 0x21aa4u || pc == 0x1c7574u) && r16(pc) == 0x4a79u) {
-        g_walk_live = g_cur_frame;          /* paused (busy-wait): keep the capture scope live */
+        g_combat_pause_live = g_cur_frame;  /* paused: keep the capture scope live */
         if (g_pause_request) {
             w16(0x3bf74u, 0x39); g_pause_request = 0;   /* release the wait */
             if (g_log) { static int rn = 0; if (rn < 40) { rn++;
@@ -4623,6 +4625,15 @@ void moon_instr_hook(unsigned int pc) {
                     pc, r16(0x2f9dcu), r16(0x2fa08u), g_cur_frame, (unsigned long long)g_icount);
             fflush(g_log);
         }
+    }
+    /* The original Q branch jumps out of the map loop without clearing the raw-key
+     * word.  Once 0x3ff42 has translated our injected 0x10 to ASCII Q in D0, retract
+     * the raw word before the comparison executes; D0 still drives the real branch. */
+    if (g_os && g_quest_quit_pending && pc == 0x40296u
+        && r16(pc) == 0xb07cu && r16(pc + 2u) == 0x0051u
+        && ((uint16_t)m68k_get_reg(NULL, M68K_REG_D0)) == 0x0051u) {
+        if (r16(0x3bf74u) == 0x10u) w16(0x3bf74u, 0);
+        g_quest_quit_pending = 0;
     }
     if (g_os && pc == 0x4024cu) {           /* overland-map keyboard poll */
         g_mappoll_hot = 1;                  /* the normal map turn-loop ran this frame (distinguishes it from the delivery overview) */
@@ -4669,6 +4680,10 @@ void moon_instr_hook(unsigned int pc) {
         else if (g_rest_request && r16(0x3bf74u) == 0) {
             w16(0x3bf74u, 0x12); g_rest_request = 0; g_rest_pending = 1;
             g_rest_idx0 = r16(0x2f9dau);                           /* took-signal baseline */
+        }
+        else if (g_quest_quit_request && r16(0x3bf74u) == 0) {     /* original map 'Q' command */
+            w16(0x3bf74u, 0x10); g_quest_quit_request = 0;         /* 0x10 translates to ASCII 'Q' */
+            g_quest_quit_pending = 1;
         }
         else if (g_ver_request && r16(0x3bf74u) == 0) {            /* B17: 'V' -> version display */
             w16(0x3bf74u, 0x2f); g_ver_request = 0;                /* 0x2f = the game's 'V' index */
@@ -6304,24 +6319,29 @@ static int run_sdl(int scale) {
                     case SDLK_LEFT:  kb_l = d; break;
                     case SDLK_RIGHT: kb_r = d; break;
                     case SDLK_LCTRL: case SDLK_RCTRL:
-                    case SDLK_RETURN: kb_fire = d; break;
+                    case SDLK_RETURN: case SDLK_KP_ENTER: kb_fire = d; break;
                     /* Space = open INVENTORY on the map (the faithful Amiga control);
                      * fire stays on Ctrl/Enter/mouse/pad.  I is a backup.  Gated to
                      * in-game so Space still SKIPS the attract intro. */
                     case SDLK_SPACE: case SDLK_i:
                         if (d && !g_blt_busy_scope && !g_in_inventory
                             && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
-                        /* Space during the walk/day ANIMATION = the original PAUSE key
-                         * (gate polling stamps g_walk_live; mutually exclusive with the
+                        /* Space during COMBAT = the original PAUSE key (gate polling
+                         * stamps g_combat_pause_live; mutually exclusive with the
                          * map poll, so one key serves both faithfully). */
                         if (d && sym == SDLK_SPACE && !g_blt_busy_scope
-                            && g_walk_live && (g_cur_frame - g_walk_live) < 3) g_pause_request = 1;
+                            && g_combat_pause_live && (g_cur_frame - g_combat_pause_live) < 3) g_pause_request = 1;
                         break;
                     /* E = REST / skip to the next turn on the overland map (the faithful Amiga
                      * key).  Edge-only (keydown), in-game; inert during the attract/inventory. */
                     case SDLK_e:
                         if (d && !g_blt_busy_scope && !g_in_inventory
                             && g_map_live && (g_cur_frame - g_map_live) < 3) g_rest_request = 1; break;
+                    /* Q = the original map command for abandoning the current quest and
+                     * returning through the game's own setup/restart flow. */
+                    case SDLK_q:
+                        if (d && !g_blt_busy_scope && !g_in_inventory
+                            && g_map_live && (g_cur_frame - g_map_live) < 3) g_quest_quit_request = 1; break;
                     /* V = version display on the overland map (retail-parity B17: retail's own
                      * map key; the handler is re-added by the g_retail_parity hook at 0x40296). */
                     case SDLK_v:
@@ -6394,14 +6414,14 @@ static int run_sdl(int scale) {
                     && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
                 prev_inv_btn = inv_btn;
             }
-            /* Start = PAUSE the walk/day animation (the faithful Space-pause, on a pad
-             * button): edge-detected, armed only while the pause gate is polling --
+            /* Start = PAUSE combat (the faithful Space-pause, on a pad button):
+             * edge-detected, armed only while the pause gate is polling --
              * press to freeze, press again to resume. */
             {
                 int pause_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START);
                 static int prev_pause_btn = 0;
                 if (pause_btn && !prev_pause_btn && !g_blt_busy_scope
-                    && g_walk_live && (g_cur_frame - g_walk_live) < 3) g_pause_request = 1;
+                    && g_combat_pause_live && (g_cur_frame - g_combat_pause_live) < 3) g_pause_request = 1;
                 prev_pause_btn = pause_btn;
             }
             /* Back = REST / skip to the next turn on the overland map (edge-detected, in-game
@@ -6420,7 +6440,7 @@ static int run_sdl(int scale) {
             else pad_my = (dd?6:0) - (du?6:0);
         }
         if (g_blt_busy_scope && (pad_fire|pad_rmb))
-            skip_intro = 1;   /* a controller BUTTON (A/B/RB/RT/Start) skips the intro
+            skip_intro = 1;   /* a controller BUTTON (A/B/LB/RB/RT) skips the intro
                                * (not stick/d-pad nudges, so drift can't skip it) */
         /* --skipat N (diag, cushion-loss repro 2026-07-02): trigger the intro-skip
          * automatically at host frame N, so the post-skip audio-queue state can be
@@ -6437,7 +6457,10 @@ static int run_sdl(int scale) {
         g_ji_lf = kb_l | pad_l;  g_ji_rt = kb_r | pad_r;
         g_fire  = g_fire2 = kb_fire | m_fire | pad_fire;
         g_rmb   = m_rmb | pad_rmb;
-        g_mouse_dx += pad_mx;  g_mouse_dy += pad_my;
+        /* A keyboard must cover the original joystick-driven pointer screens too.
+         * Mirror arrows into JOY0 cursor motion exactly as controller directions do. */
+        g_mouse_dx += pad_mx + (kb_r ? 6 : 0) - (kb_l ? 6 : 0);
+        g_mouse_dy += pad_my + (kb_d ? 6 : 0) - (kb_u ? 6 : 0);
 
         /* NATURAL INTRO END (operator 2026-07-03): a fully-watched intro used to drop
          * into the same ~20 s landing zone the skip did (loader black + looping chant,
@@ -6542,8 +6565,13 @@ static int run_sdl(int scale) {
             g_rest_request = g_inv_request = 0;
             g_rest_tries = g_inv_tries = 0;
         }
-        if (g_pause_request && (g_cur_frame - g_walk_live) > 5)
-            g_pause_request = 0;   /* walk animation ended before we could inject: drop the stale pause */
+        if ((g_quest_quit_request || g_quest_quit_pending || g_ver_request)
+            && (g_cur_frame - g_map_live) > 5) {
+            if (g_quest_quit_pending && r16(0x3bf74u) == 0x10u) w16(0x3bf74u, 0);
+            g_quest_quit_request = g_quest_quit_pending = g_ver_request = 0;
+        }
+        if (g_pause_request && (g_cur_frame - g_combat_pause_live) > 5)
+            g_pause_request = 0;   /* combat ended before we could inject: drop stale pause */
         /* Render via capture_frame so the live window gets the same vblank-aligned
          * snapshot + empty-backbuffer recovery + scene-transition hold as the dump
          * path (clean scene switches, no half-decoded frames). */
@@ -7009,13 +7037,14 @@ static int vertb_gate(void) {
  * intro to gameplay without a live window.  Syntax: comma-separated events
  *   FRAME:KEYS   (KEYS held from FRAME until the next event's frame)
  * KEYS is a string of: u d l r (direction), f (fire: BOTH CIA-A PRA bit6 /FIR0
- * and bit7 /FIR1, covering mouse-button and joystick-fire), '.'/empty=neutral.
+ * and bit7 /FIR1, covering mouse-button and joystick-fire), e (rest), q (quit
+ * current quest), '.'/empty=neutral.
  * Directions drive the digital joystick (JOY1DAT) AND nudge the mouse counter
  * (JOY0DAT) by +/-MOUSE_STEP each read, so the script works whether the active
  * screen polls the joystick or the mouse.  Example:
  *   --script "300:f,360:.,2000:r,2200:f" */
 #define MAX_SCRIPT 64
-typedef struct { int frame; int u,d,l,r,fire,rest; } ScriptEv;
+typedef struct { int frame; int u,d,l,r,fire,rest,quest_quit; } ScriptEv;
 static ScriptEv g_script[MAX_SCRIPT];
 static int      g_nscript = 0;
 #define MOUSE_STEP 3
@@ -7027,12 +7056,13 @@ static void parse_script(const char *s) {
         if (end == s) break;
         if (*end != ':') break;
         s = end + 1;
-        ScriptEv ev = { (int)fr, 0,0,0,0,0,0 };
+        ScriptEv ev = { (int)fr, 0,0,0,0,0,0,0 };
         while (*s && *s != ',') {
             switch (*s) {
                 case 'u': ev.u=1; break; case 'd': ev.d=1; break;
                 case 'l': ev.l=1; break; case 'r': ev.r=1; break;
-                case 'f': ev.fire=1; break; case 'e': ev.rest=1; break; case '.': break;
+                case 'f': ev.fire=1; break; case 'e': ev.rest=1; break;
+                case 'q': ev.quest_quit=1; break; case '.': break;
                 default: break;
             }
             s++;
@@ -7053,9 +7083,13 @@ static void apply_script(int fr) {
     g_fire = e->fire; g_fire2 = e->fire;
     g_mouse_dx = (e->r?MOUSE_STEP:0) - (e->l?MOUSE_STEP:0);
     g_mouse_dy = (e->d?MOUSE_STEP:0) - (e->u?MOUSE_STEP:0);
-    /* 'e' token = a ONE-SHOT REST/skip-turn pulse (like a single 'E' keypress): fire g_rest_request
-     * only on the frame this event first becomes active, not every frame it stays latest. */
-    { static int last_idx = -1; if (idx != last_idx) { if (e->rest) g_rest_request = 1; last_idx = idx; } }
+    /* 'e'/'q' tokens are one-shot keypresses: fire their requests only when the
+     * event first becomes active, not every frame it remains the latest event. */
+    { static int last_idx = -1; if (idx != last_idx) {
+        if (e->rest) g_rest_request = 1;
+        if (e->quest_quit) g_quest_quit_request = 1;
+        last_idx = idx;
+    } }
 }
 
 /* ---- scripted typed text (--type "FRAME:TEXT,...") --------------------------
@@ -7209,7 +7243,7 @@ static const int SAVE_REGS[] = {
  *      (adding to the blob would break save-version compat).
  *   3. HOST-INPUT state (the g_rest_, g_inv_, g_pause_ families, plus
  *      g_popup_injected / keyq / g_menusel_prev): scoped by liveness stamps
- *      (g_map_live, g_walk_live) with scene-change retracts -- self-healing
+ *      (g_map_live, g_combat_pause_live) with scene-change retracts -- self-healing
  *      across loads, keep it that way.
  *   4. DIAG-ONLY (watch counters, log dedup state): stale values only cost log
  *      noise; never let one feed an emulation decision.

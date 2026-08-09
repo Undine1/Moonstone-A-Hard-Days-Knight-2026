@@ -37,26 +37,32 @@ together. The folder is portable.
     on a controller.
 
   GAME CONTROLLER (Xbox / generic XInput pad - recommended)
-    Left stick / D-pad . move
+    Left stick / D-pad . move / move the pointer
     A / RB / LB / RT ... attack / select / confirm
-    B .................. cancel / right-click
     Y ................... open inventory on the map
     Start ............... pause / resume during combat
     Select / Back ........ rest / end the current turn (pass the day)
 
-  KEYBOARD + MOUSE
-    Arrow keys ........... move
-    Mouse ................. move the pointer
+  KEYBOARD (no mouse required)
+    Arrow keys ........... move / move the pointer
     Ctrl / Enter /
-      Left-click ......... attack / select / confirm
+      Numpad Enter ....... attack / select / confirm
     Space or I ........... open inventory on the map
     Space (in combat) .... pause / resume
     E ..................... rest / end the current turn
-    Right-click .......... cancel / back
+    Q ..................... abandon the current quest / return to setup
+    V ..................... show the game version on the map
     Esc ................... quit
 
+  MOUSE (optional)
+    Mouse movement ........ move the pointer
+    Left-click ........... attack / select / confirm
+
+  The original game has no separate Back / Cancel command. Use the pointer
+  to select each screen's on-screen exit or return control.
+
   NAME ENTRY
-    Type a name with the keyboard. Backspace edits; Enter confirms.
+    Type a name with the keyboard. Backspace edits; Enter or Numpad Enter confirms.
 
   SAVE / LOAD
     F5 .................... quicksave anywhere, including combat
