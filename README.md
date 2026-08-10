@@ -1,4 +1,4 @@
-# Moonstone Reborn
+# Moonstone 2026
 
 Prebuilt native Windows port of *Moonstone: A Hard Days Knight*
 (Mindscape, 1991). The original Amiga game runs through an embedded 68000 core
@@ -7,7 +7,7 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 ## Download and setup
 
 1. Open the [Releases page](https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026/releases).
-2. Download **`Moonstone-Reborn-Windows-x64.zip`**. Do not download GitHub's
+2. Download **`Moonstone-2026-Windows-x64.zip`**. Do not download GitHub's
    automatically generated "Source code" archives.
 3. Extract the complete ZIP.
 4. Supply your own ADF files into the included `data` folder. The ADF files

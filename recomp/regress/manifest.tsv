@@ -1,4 +1,4 @@
-# Moonstone Reborn regression goldens.  Columns are TAB-separated:
+# Moonstone 2026 regression goldens.  Columns are TAB-separated:
 #   name <tab> kind <tab> input <tab> frame <tab> golden
 # kind=ramfnv : cold-boot to <frame>, FNV-1a hash of all RAM == golden  (engine/behaviour)
 #   input is "cold" (ignored).  Catches any unintended change to game behaviour.

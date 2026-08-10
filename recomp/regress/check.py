@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Moonstone Reborn — regression check.
+"""Moonstone 2026 — regression check.
 
 Runs a manifest of golden states against the built engine and flags any drift,
 so a fix that quietly comes undone is caught here in seconds instead of mid-playthrough.

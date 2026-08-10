@@ -1,4 +1,4 @@
-# Moonstone Reborn — Changes from the 1991 Amiga game
+# Moonstone 2026 — Changes from the 1991 Amiga game
 
 _Last updated: 2026-08-10._
 

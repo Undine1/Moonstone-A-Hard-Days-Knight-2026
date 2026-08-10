@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ROOT=".."
-OUT="$ROOT/dist/release-staging/Moonstone-Reborn-Windows-x64"
+OUT="$ROOT/dist/release-staging/Moonstone-2026-Windows-x64"
 
 echo "[1/3] building moonstone.exe ..."
 bash build.sh moonstone
@@ -33,4 +33,4 @@ echo "Contents:"
 ( cd "$OUT" && find . -maxdepth 2 -type f | sort )
 echo
 echo "No ADFs, extracted game modules, saves, logs, or source files were copied."
-echo "Compress the Moonstone-Reborn-Windows-x64 folder as Moonstone-Reborn-Windows-x64.zip."
+echo "Compress the Moonstone-2026-Windows-x64 folder as Moonstone-2026-Windows-x64.zip."

@@ -1,4 +1,4 @@
-/* Moonstone Reborn — a native (no-emulator) port of "Moonstone: A Hard Days
+/* Moonstone 2026 — a native (no-emulator) port of "Moonstone: A Hard Days
  * Knight" (Amiga, 1991).  The original 68000 game code runs under an embedded
  * Musashi CPU core on top of a from-scratch model of the Amiga OCS chipset
  * (blitter, copper, bitplane display, hardware sprites, Paula audio, CIA,

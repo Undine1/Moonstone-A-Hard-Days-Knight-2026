@@ -1,4 +1,4 @@
-/* Moonstone Reborn — AmigaDOS Hunk loader (part of github.com/Undine1/moonstone-reborn)
+/* Moonstone 2026 — AmigaDOS Hunk loader (part of github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026)
  * Copyright (C) 2026 Undine1 <github.com/Undine1>.  GNU GPL v3 — see LICENSE. */
 #ifndef MOON_LOADER_H
 #define MOON_LOADER_H
