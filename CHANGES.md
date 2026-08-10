@@ -4,12 +4,10 @@ _Last updated: 2026-08-10._
 
 ## Confirmed historical Amiga bug fixes
 
-- **Two-troll overhead-swing freeze/reset — fixed.** Two trolls performing the
-  overhead club attack together could freeze the game or reset the Amiga.
-- **Enemy-inventory Moonstone/invalid-item crash — fixed.** Moonstone entries
-  appearing in another character's inventory could Guru, freeze, or crash the
-  game when hovered over or taken.
-- **Various other bug and stability fixes.**
+- **Fixed: Two trolls performing overhead club swings simultaneously could
+  crash the game.**
+- **Fixed: A bugged Moonstone appearing in an enemy inventory could crash the
+  game.**
 
 Historical reports:
 

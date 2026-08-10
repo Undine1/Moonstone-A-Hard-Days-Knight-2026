@@ -39,11 +39,10 @@ the executable; changes take effect after restarting the game.
 
 ## Confirmed original Amiga bugs fixed
 
-- **Two trolls performing overhead club swings simultaneously could freeze or
-  reset the game — fixed.**
-- **Enemy-inventory Moonstone/invalid-item displays could freeze or Guru the
-  game — fixed.**
-- **Various other bug and stability fixes.**
+- **Fixed: Two trolls performing overhead club swings simultaneously could
+  crash the game.**
+- **Fixed: A bugged Moonstone appearing in an enemy inventory could crash the
+  game.**
 
 See [CHANGES.md](CHANGES.md) for the historical sources.
 
