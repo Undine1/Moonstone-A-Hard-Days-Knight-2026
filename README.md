@@ -67,6 +67,17 @@ personally had no idea what was happening and thought it was a bug, and from the
 videos I watched, other people had the same experience. So I've decided to
 remove this feature from the game.
 
+## Final notes
+
+Multiplayer has not been tested.
+
+Moonstone 2026 took considerable time, effort, and expense to complete. If you
+enjoyed a bug-free playthrough and would like to buy me a coffee:
+
+- **EVM:** `0x759500A80C17978df1B92d2497A80786290115c2`
+- **BTC:** `3FF42zRE1qAdwmcoLvuRGa3FEZeYW1LyYi`
+- **Solana:** `AwaQbXeYnAKhszJ4Y4cCY6ApBqvkSoCZLDgczPjogynb`
+
 ## License
 
 Copyright © 2026 Undine1. The native runtime source is licensed under the
