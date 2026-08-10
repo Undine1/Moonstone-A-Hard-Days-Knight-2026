@@ -4,9 +4,9 @@ _Last updated: 2026-08-10._
 
 ## Confirmed historical Amiga bug fixes
 
-- **Fixed: Two trolls performing overhead club swings simultaneously could
-  crash the game.**
-- **Fixed: A bugged Moonstone appearing in an enemy inventory could crash the
+- **Fixed: Two trolls performing overhead club swings simultaneously always
+  crashed the game.**
+- **Fixed: A bugged Moonstone appearing in an enemy inventory crashed the
   game.**
 
 Historical reports:
