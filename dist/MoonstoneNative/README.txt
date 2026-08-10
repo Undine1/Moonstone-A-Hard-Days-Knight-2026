@@ -63,9 +63,6 @@ together. The folder is portable.
     Mouse movement ........ move the pointer
     Left-click ........... attack / select / confirm
 
-  The original game has no separate Back / Cancel command. Use the pointer
-  to select each screen's on-screen exit or return control.
-
   NAME ENTRY
     Type a name with the keyboard. Backspace edits; Enter or Numpad Enter confirms.
 
