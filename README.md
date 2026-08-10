@@ -43,6 +43,7 @@ the executable; changes take effect after restarting the game.
   the game.**
 - **Fixed: A bugged Moonstone appearing in an enemy inventory crashed the
   game.**
+- **Various other bug fixes.**
 
 See [CHANGES.md](CHANGES.md) for the historical sources.
 

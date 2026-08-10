@@ -8,6 +8,7 @@ _Last updated: 2026-08-10._
   the game.**
 - **Fixed: A bugged Moonstone appearing in an enemy inventory crashed the
   game.**
+- **Various other bug fixes.**
 
 Historical reports:
 
