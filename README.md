@@ -1,6 +1,6 @@
 # Moonstone Reborn
 
-Ready-to-play native Windows port of *Moonstone: A Hard Days Knight*
+Prebuilt native Windows port of *Moonstone: A Hard Days Knight*
 (Mindscape, 1991). The original Amiga game runs through an embedded 68000 core
 and custom OCS implementation, with no external emulator or Kickstart ROM.
 
@@ -17,9 +17,9 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
    - `Disk3.adf`
 5. Double-click **`moonstone.exe`**.
 
-Each ADF must be the standard 901,120-byte size. The copyrighted game disks are
-not included. On first launch, the runtime extracts the required boot modules
-from Disk 1 automatically. There is no installer or build process. The package
+Each ADF must be the standard 901,120-byte size. The ADF files are not included.
+On first launch, the runtime extracts the required boot modules from Disk 1
+automatically. There is no installer or build process. The package
 is portable and requires 64-bit Windows; keep `moonstone.exe`, `SDL2.dll`, and
 the `data` folder together.
 
@@ -39,17 +39,13 @@ the executable; changes take effect after restarting the game.
 
 ## Confirmed original Amiga bugs fixed
 
-Only bugs corroborated by Amiga players before this port are labelled as
-original-game bugs here:
-
 - **Two trolls performing overhead club swings simultaneously could freeze or
   reset the game — fixed.**
 - **Enemy-inventory Moonstone/invalid-item displays could freeze or Guru the
   game — fixed.**
 - **Various other bug and stability fixes.**
 
-See [CHANGES.md](CHANGES.md) for the historical sources and the distinction
-between original-game, disk-revision, and port-runtime fixes.
+See [CHANGES.md](CHANGES.md) for the historical sources.
 
 ## Game revisions
 

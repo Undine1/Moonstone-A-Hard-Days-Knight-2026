@@ -2,25 +2,14 @@
 
 _Last updated: 2026-08-10._
 
-This is intentionally a short public summary. Low-level implementation details,
-addresses, diagnostics, and individual port-runtime corrections belong in the
-source and reverse-engineering notes, not in a claim that every fix was an
-original-game defect.
-
 ## Confirmed historical Amiga bug fixes
-
-These are the bugs this project publicly calls original-game bugs. They were
-described by Amiga players years before this port; the reports do not establish
-that every disk revision behaved identically.
 
 - **Two-troll overhead-swing freeze/reset — fixed.** Two trolls performing the
   overhead club attack together could freeze the game or reset the Amiga.
 - **Enemy-inventory Moonstone/invalid-item crash — fixed.** Moonstone entries
   appearing in another character's inventory could Guru, freeze, or crash the
   game when hovered over or taken.
-- **Various other bug and stability fixes.** These are deliberately not all
-  presented as original-game bugs: some repair the common cracked data revision,
-  and others correct or harden the native port itself.
+- **Various other bug and stability fixes.**
 
 Historical reports:
 
@@ -55,15 +44,3 @@ videos I watched, other people had the same experience. So I've decided to
 remove this feature from the game.
 
 Manual reference: [Moonstone Amiga manual](https://www.lemonamiga.com/doc/moonstone-a-hard-days-knight/1109).
-
-## Other port changes
-
-- Native Windows runtime with an embedded 68000 core and custom OCS graphics,
-  audio, input, and disk support; no external emulator or Kickstart ROM needed.
-- Automatic disk swapping, faster file-backed loading, complete, configurable
-  keyboard and controller support, optional mouse control, and quicksave/quickload.
-- Numerous graphics, audio, timing, persistence, compatibility, and defensive
-  runtime fixes.
-
-The detailed engineering history remains in `recomp/RE_NOTES.md` and the source
-comments for maintainers who need it.

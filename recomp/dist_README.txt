@@ -2,8 +2,7 @@
   MOONSTONE - A Hard Days Knight         native Windows port
 ================================================================
 
-This is a prebuilt Windows package. The copyrighted original game
-disks are not included; you must supply your own three ADF images.
+This is a prebuilt Windows package. ADF files are not included.
 
 
 ---------------------------------------------------------------
@@ -32,16 +31,14 @@ together. The folder is portable.
  CONTROLS
 ---------------------------------------------------------------
 
-  To change keyboard or controller bindings, edit controls.ini beside
-  moonstone.exe and restart the game. Separate multiple bindings with commas.
-  Use "none" by itself to unbind that device's action. Deleting the file
-  restores built-in defaults. The bindings listed below are the defaults.
+  Edit controls.ini beside moonstone.exe and restart the game.
+  Deleting it restores the defaults shown below.
 
   SKIP THE INTRO
     Press Space, Enter, or Ctrl on the keyboard, or A, B, LB, RB, or RT
     on a controller.
 
-  GAME CONTROLLER (Xbox / generic XInput pad - recommended)
+  GAME CONTROLLER (Xbox / generic XInput pad)
     Left stick / D-pad . move / move the pointer
     A / RB / LB / RT ... attack / select / confirm
     Y ................... open inventory on the map
@@ -75,21 +72,6 @@ together. The folder is portable.
   SELECTION POPUPS
     Press Up for the first option and Down for the second.
     The number keys 1 and 2 also work.
-
-
----------------------------------------------------------------
- WHAT IS IN THIS FOLDER
----------------------------------------------------------------
-
-  moonstone.exe          the native game
-  SDL2.dll               window, input, and audio support
-  controls.ini           editable keyboard and controller bindings
-  README.txt             this guide
-  LICENSE.txt            native runtime license
-  THIRD-PARTY-NOTICES.txt  third-party licenses and credits
-  data\                  place your three ADF images here
-
-Do not rename or remove SDL2.dll or the data folder.
 
 
 ---------------------------------------------------------------
