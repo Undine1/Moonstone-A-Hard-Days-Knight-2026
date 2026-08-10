@@ -24,14 +24,16 @@ is portable and requires 64-bit Windows; keep `moonstone.exe`, `SDL2.dll`, and
 the `data` folder together.
 
 The included `README.txt` contains the controls and a short troubleshooting
-note.
+note. Keyboard and controller bindings can be changed in `controls.ini` beside
+the executable; changes take effect after restarting the game.
 
 ## Highlights
 
 - Automatic disk swapping with no interruption.
-- Skippable intro — press Space, Enter, or Ctrl on the keyboard, or A, B, LB,
-  RB, or RT on a controller.
-- Complete keyboard and game-controller support, with optional mouse control.
+- Skippable intro — by default, press Space, Enter, or Ctrl on the keyboard, or
+  A, B, LB, RB, or RT on a controller.
+- Complete and configurable keyboard and game-controller support, with optional
+  mouse control.
 - Quicksave and quickload anywhere, including during combat.
 - Faithful graphics and Paula audio through the custom OCS runtime.
 

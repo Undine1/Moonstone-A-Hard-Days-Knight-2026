@@ -6,6 +6,7 @@
 # --- Copyrighted Amiga game data (Mindscape) — NEVER commit ---
 *.adf
 /dist/MoonstoneNative/data/
+/dist/MoonstoneNative/controls.ini
 # extracted/decompressed game HDD contents (sprites, backgrounds, tiles, modules)
 /portable/
 # game-asset file types (defensive, wherever they appear)

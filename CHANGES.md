@@ -1,6 +1,6 @@
 # Moonstone Reborn — Changes from the 1991 Amiga game
 
-_Last updated: 2026-08-09._
+_Last updated: 2026-08-10._
 
 This is intentionally a short public summary. Low-level implementation details,
 addresses, diagnostics, and individual port-runtime corrections belong in the
@@ -60,8 +60,8 @@ Manual reference: [Moonstone Amiga manual](https://www.lemonamiga.com/doc/moonst
 
 - Native Windows runtime with an embedded 68000 core and custom OCS graphics,
   audio, input, and disk support; no external emulator or Kickstart ROM needed.
-- Automatic disk swapping, faster file-backed loading, complete keyboard and
-  controller support, optional mouse control, and quicksave/quickload.
+- Automatic disk swapping, faster file-backed loading, complete, configurable
+  keyboard and controller support, optional mouse control, and quicksave/quickload.
 - Numerous graphics, audio, timing, persistence, compatibility, and defensive
   runtime fixes.
 

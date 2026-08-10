@@ -90,12 +90,12 @@ static int dir_has_data(const char *dir) {
 static int g_ji_up, g_ji_dn, g_ji_lf, g_ji_rt;   /* directions */
 static int g_fire2;                               /* port-1 fire (/FIR1) */
 static int g_kdigit = 0;        /* SDL number key 1-9 held (1..9), else 0 (menu selection) */
-static int g_inv_request = 0;   /* host pressed the inventory key (Space/I/pad Y); injected at the map poll */
+static int g_inv_request = 0;   /* host pressed the configured inventory action; injected at the map poll */
 static int g_in_inventory = 0;  /* 1 while the inventory screen is open (so the open-key can't re-open it in a loop) */
-static int g_rest_request = 0;  /* host pressed REST/skip-turn (E / pad Back); injects scancode 0x12 ('E') at the map poll */
+static int g_rest_request = 0;  /* host pressed configured REST/skip-turn; injects scancode 0x12 ('E') at the map poll */
 static int g_rest_pending = 0;  /* 1 for the one poll AFTER injecting 'E', to re-clear [0x3bf74] so one press = exactly one skipped turn */
-static int g_ver_request = 0;   /* B17: host 'V' keydown -> inject the game's 'V' index (0x2f) at the map poll (version display) */
-static int g_quest_quit_request = 0; /* host 'Q' keydown -> inject the game's original map quit index (0x10) */
+static int g_ver_request = 0;   /* B17: configured version action -> inject the game's 'V' index (0x2f) at the map poll */
+static int g_quest_quit_request = 0; /* configured abandon action -> inject the game's original map quit index (0x10) */
 static int g_quest_quit_pending = 0; /* raw Q injected; clear it after translation before the guest restart jump */
 static int g_firewait_hot = 0;  /* set when the "wait for fire" routine (0x22fd0) ran this frame; cleared each frame in capture_frame */
 static int g_mappoll_hot = 0;   /* set when the normal map turn-loop's keyboard poll (0x4024c) ran this frame; the delivery overview is a SEPARATE loop that never hits it -- so firewait && !mappoll = the garbled delivery overview */
@@ -111,8 +111,9 @@ static int g_inv_pending = 0;       /* Space injected; verify it was honored on 
 static int g_rest_tries = 0, g_inv_tries = 0;   /* bounded re-arm counters */
 static uint16_t g_rest_idx0 = 0;    /* turn index [0x2f9da] at REST injection (change = honored) */
 static uint16_t g_popup_injected = 0; /* rawkey our popup injection left in [0x3bf74] (retracted at the next map poll) */
-static int g_pause_request = 0;     /* host Space edge -> feed the original combat PAUSE gate */
+static int g_pause_request = 0;     /* configured host pause edge -> feed the original combat PAUSE gate */
 static int g_combat_pause_live = 0; /* g_cur_frame stamp of the last combat pause-gate poll */
+static int g_name_entry_live = 0;   /* g_cur_frame stamp of the custom-name keyboard poll */
 /* MOONSTONE-DELIVERY garbled-map latch (2026-06-24).  The "return matching Moonstone to its home
  * village" handler (node 0x1b) branches to 0x22820 when the returned token matches; from 0x22876 it
  * displays the overland map (scene 9), waits for fire (0x2288a), then 0x231e6 + the 0x2289e relaunch
@@ -1068,6 +1069,372 @@ static void ensure_boot_modules(const char *datadir, const char *adfdir) {
         }
         free(adf);
     }
+}
+
+/* ---- user-editable live controls ------------------------------------------
+ * `controls.ini` lives beside moonstone.exe.  It changes only the SDL host
+ * bindings; the Amiga-side controls and all guest state remain untouched.
+ * Compiled defaults are installed first, so a missing file or a malformed
+ * action can never leave a clean package without working controls. */
+#define CONTROL_MAX_BINDINGS 16
+typedef enum {
+    CONTROL_UP = 0, CONTROL_DOWN, CONTROL_LEFT, CONTROL_RIGHT,
+    CONTROL_FIRE, CONTROL_INVENTORY, CONTROL_PAUSE, CONTROL_END_TURN,
+    CONTROL_ABANDON_QUEST, CONTROL_SHOW_VERSION, CONTROL_QUIT,
+    CONTROL_QUICKSAVE, CONTROL_QUICKLOAD, CONTROL_SKIP_INTRO,
+    CONTROL_COUNT
+} ControlAction;
+typedef enum { CONTROL_PAD_BUTTON = 0, CONTROL_PAD_AXIS = 1 } ControlPadKind;
+typedef struct {
+    ControlPadKind kind;
+    int id;
+    int direction;                 /* +1 / -1 for axes; ignored for buttons */
+} ControlPadInput;
+typedef struct {
+    SDL_Scancode keys[CONTROL_MAX_BINDINGS];
+    int key_count;
+    ControlPadInput pads[CONTROL_MAX_BINDINGS];
+    int pad_count;
+} ControlBinding;
+static ControlBinding g_controls[CONTROL_COUNT];
+static const char *g_control_names[CONTROL_COUNT] = {
+    "up", "down", "left", "right", "attack_select", "inventory", "pause",
+    "end_turn", "abandon_quest", "show_version", "quit", "quicksave",
+    "quickload", "skip_intro"
+};
+
+static void control_add_key(ControlAction action, SDL_Scancode key) {
+    ControlBinding *b = &g_controls[action];
+    for (int i = 0; i < b->key_count; i++) if (b->keys[i] == key) return;
+    if (b->key_count < CONTROL_MAX_BINDINGS) b->keys[b->key_count++] = key;
+}
+static void control_add_pad(ControlAction action, ControlPadKind kind, int id, int direction) {
+    ControlBinding *b = &g_controls[action];
+    for (int i = 0; i < b->pad_count; i++)
+        if (b->pads[i].kind == kind && b->pads[i].id == id && b->pads[i].direction == direction) return;
+    if (b->pad_count < CONTROL_MAX_BINDINGS)
+        b->pads[b->pad_count++] = (ControlPadInput){ kind, id, direction };
+}
+static void controls_set_defaults(void) {
+    memset(g_controls, 0, sizeof(g_controls));
+#define CONTROL_DEFAULT_KEY(action, keycode) control_add_key(action, SDL_GetScancodeFromKey(keycode))
+    CONTROL_DEFAULT_KEY(CONTROL_UP, SDLK_UP);
+    CONTROL_DEFAULT_KEY(CONTROL_DOWN, SDLK_DOWN);
+    CONTROL_DEFAULT_KEY(CONTROL_LEFT, SDLK_LEFT);
+    CONTROL_DEFAULT_KEY(CONTROL_RIGHT, SDLK_RIGHT);
+    CONTROL_DEFAULT_KEY(CONTROL_FIRE, SDLK_LCTRL);
+    CONTROL_DEFAULT_KEY(CONTROL_FIRE, SDLK_RCTRL);
+    CONTROL_DEFAULT_KEY(CONTROL_FIRE, SDLK_RETURN);
+    CONTROL_DEFAULT_KEY(CONTROL_FIRE, SDLK_KP_ENTER);
+    CONTROL_DEFAULT_KEY(CONTROL_INVENTORY, SDLK_SPACE);
+    CONTROL_DEFAULT_KEY(CONTROL_INVENTORY, SDLK_i);
+    CONTROL_DEFAULT_KEY(CONTROL_PAUSE, SDLK_SPACE);
+    CONTROL_DEFAULT_KEY(CONTROL_END_TURN, SDLK_e);
+    CONTROL_DEFAULT_KEY(CONTROL_ABANDON_QUEST, SDLK_q);
+    CONTROL_DEFAULT_KEY(CONTROL_SHOW_VERSION, SDLK_v);
+    CONTROL_DEFAULT_KEY(CONTROL_QUIT, SDLK_ESCAPE);
+    CONTROL_DEFAULT_KEY(CONTROL_QUICKSAVE, SDLK_F5);
+    CONTROL_DEFAULT_KEY(CONTROL_QUICKLOAD, SDLK_F9);
+    CONTROL_DEFAULT_KEY(CONTROL_SKIP_INTRO, SDLK_SPACE);
+    CONTROL_DEFAULT_KEY(CONTROL_SKIP_INTRO, SDLK_RETURN);
+    CONTROL_DEFAULT_KEY(CONTROL_SKIP_INTRO, SDLK_KP_ENTER);
+    CONTROL_DEFAULT_KEY(CONTROL_SKIP_INTRO, SDLK_LCTRL);
+    CONTROL_DEFAULT_KEY(CONTROL_SKIP_INTRO, SDLK_RCTRL);
+#undef CONTROL_DEFAULT_KEY
+
+    control_add_pad(CONTROL_UP, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_UP, 0);
+    control_add_pad(CONTROL_UP, CONTROL_PAD_AXIS, SDL_CONTROLLER_AXIS_LEFTY, -1);
+    control_add_pad(CONTROL_DOWN, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_DOWN, 0);
+    control_add_pad(CONTROL_DOWN, CONTROL_PAD_AXIS, SDL_CONTROLLER_AXIS_LEFTY, +1);
+    control_add_pad(CONTROL_LEFT, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_LEFT, 0);
+    control_add_pad(CONTROL_LEFT, CONTROL_PAD_AXIS, SDL_CONTROLLER_AXIS_LEFTX, -1);
+    control_add_pad(CONTROL_RIGHT, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 0);
+    control_add_pad(CONTROL_RIGHT, CONTROL_PAD_AXIS, SDL_CONTROLLER_AXIS_LEFTX, +1);
+    control_add_pad(CONTROL_FIRE, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_A, 0);
+    control_add_pad(CONTROL_FIRE, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 0);
+    control_add_pad(CONTROL_FIRE, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 0);
+    control_add_pad(CONTROL_FIRE, CONTROL_PAD_AXIS, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, +1);
+    control_add_pad(CONTROL_INVENTORY, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_Y, 0);
+    control_add_pad(CONTROL_PAUSE, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_START, 0);
+    control_add_pad(CONTROL_END_TURN, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_BACK, 0);
+    control_add_pad(CONTROL_SKIP_INTRO, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_A, 0);
+    control_add_pad(CONTROL_SKIP_INTRO, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_B, 0);
+    control_add_pad(CONTROL_SKIP_INTRO, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 0);
+    control_add_pad(CONTROL_SKIP_INTRO, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 0);
+    control_add_pad(CONTROL_SKIP_INTRO, CONTROL_PAD_AXIS, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, +1);
+}
+
+static char *control_trim(char *s) {
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    char *end = s + strlen(s);
+    while (end > s && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) *--end = 0;
+    return s;
+}
+static void control_normalize(const char *src, char *dst, size_t cap) {
+    size_t n = 0;
+    if (!cap) return;
+    for (; *src && n + 1 < cap; src++) {
+        unsigned char c = (unsigned char)*src;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) dst[n++] = (char)c;
+    }
+    dst[n] = 0;
+}
+static int control_action_from_name(const char *name) {
+    char n[64];
+    control_normalize(name, n, sizeof(n));
+    for (int i = 0; i < CONTROL_COUNT; i++) {
+        char canonical[64];
+        control_normalize(g_control_names[i], canonical, sizeof(canonical));
+        if (!strcmp(n, canonical)) return i;
+    }
+    if (!strcmp(n, "moveup")) return CONTROL_UP;
+    if (!strcmp(n, "movedown")) return CONTROL_DOWN;
+    if (!strcmp(n, "moveleft")) return CONTROL_LEFT;
+    if (!strcmp(n, "moveright")) return CONTROL_RIGHT;
+    if (!strcmp(n, "attack") || !strcmp(n, "fire")) return CONTROL_FIRE;
+    if (!strcmp(n, "combatpause")) return CONTROL_PAUSE;
+    if (!strcmp(n, "rest")) return CONTROL_END_TURN;
+    if (!strcmp(n, "quitquest")) return CONTROL_ABANDON_QUEST;
+    if (!strcmp(n, "version")) return CONTROL_SHOW_VERSION;
+    if (!strcmp(n, "save")) return CONTROL_QUICKSAVE;
+    if (!strcmp(n, "load")) return CONTROL_QUICKLOAD;
+    if (!strcmp(n, "introskip")) return CONTROL_SKIP_INTRO;
+    return -1;
+}
+static SDL_Scancode control_key_from_name(const char *name) {
+    char n[64];
+    control_normalize(name, n, sizeof(n));
+    if (!strcmp(n, "up") || !strcmp(n, "uparrow")) return SDL_SCANCODE_UP;
+    if (!strcmp(n, "down") || !strcmp(n, "downarrow")) return SDL_SCANCODE_DOWN;
+    if (!strcmp(n, "left") || !strcmp(n, "leftarrow")) return SDL_SCANCODE_LEFT;
+    if (!strcmp(n, "right") || !strcmp(n, "rightarrow")) return SDL_SCANCODE_RIGHT;
+    if (!strcmp(n, "leftctrl") || !strcmp(n, "lctrl")) return SDL_SCANCODE_LCTRL;
+    if (!strcmp(n, "rightctrl") || !strcmp(n, "rctrl")) return SDL_SCANCODE_RCTRL;
+    if (!strcmp(n, "return") || !strcmp(n, "enter")) return SDL_SCANCODE_RETURN;
+    if (!strcmp(n, "keypadenter") || !strcmp(n, "numpadenter") || !strcmp(n, "kpenter")) return SDL_SCANCODE_KP_ENTER;
+    if (!strcmp(n, "escape") || !strcmp(n, "esc")) return SDL_SCANCODE_ESCAPE;
+    SDL_Keycode key = SDL_GetKeyFromName(name);
+    return key == SDLK_UNKNOWN ? SDL_SCANCODE_UNKNOWN : SDL_GetScancodeFromKey(key);
+}
+static int control_pad_from_name(const char *name, ControlPadInput *out) {
+    char n[64];
+    control_normalize(name, n, sizeof(n));
+#define PAD_BUTTON(token, button) if (!strcmp(n, token)) { *out = (ControlPadInput){ CONTROL_PAD_BUTTON, button, 0 }; return 1; }
+#define PAD_AXIS(token, axis, dir) if (!strcmp(n, token)) { *out = (ControlPadInput){ CONTROL_PAD_AXIS, axis, dir }; return 1; }
+    PAD_BUTTON("a", SDL_CONTROLLER_BUTTON_A)
+    PAD_BUTTON("b", SDL_CONTROLLER_BUTTON_B)
+    PAD_BUTTON("x", SDL_CONTROLLER_BUTTON_X)
+    PAD_BUTTON("y", SDL_CONTROLLER_BUTTON_Y)
+    PAD_BUTTON("back", SDL_CONTROLLER_BUTTON_BACK)
+    PAD_BUTTON("select", SDL_CONTROLLER_BUTTON_BACK)
+    PAD_BUTTON("guide", SDL_CONTROLLER_BUTTON_GUIDE)
+    PAD_BUTTON("start", SDL_CONTROLLER_BUTTON_START)
+    PAD_BUTTON("leftstickbutton", SDL_CONTROLLER_BUTTON_LEFTSTICK)
+    PAD_BUTTON("l3", SDL_CONTROLLER_BUTTON_LEFTSTICK)
+    PAD_BUTTON("rightstickbutton", SDL_CONTROLLER_BUTTON_RIGHTSTICK)
+    PAD_BUTTON("r3", SDL_CONTROLLER_BUTTON_RIGHTSTICK)
+    PAD_BUTTON("leftshoulder", SDL_CONTROLLER_BUTTON_LEFTSHOULDER)
+    PAD_BUTTON("lb", SDL_CONTROLLER_BUTTON_LEFTSHOULDER)
+    PAD_BUTTON("rightshoulder", SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)
+    PAD_BUTTON("rb", SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)
+    PAD_BUTTON("dpadup", SDL_CONTROLLER_BUTTON_DPAD_UP)
+    PAD_BUTTON("dpup", SDL_CONTROLLER_BUTTON_DPAD_UP)
+    PAD_BUTTON("dpaddown", SDL_CONTROLLER_BUTTON_DPAD_DOWN)
+    PAD_BUTTON("dpdown", SDL_CONTROLLER_BUTTON_DPAD_DOWN)
+    PAD_BUTTON("dpadleft", SDL_CONTROLLER_BUTTON_DPAD_LEFT)
+    PAD_BUTTON("dpleft", SDL_CONTROLLER_BUTTON_DPAD_LEFT)
+    PAD_BUTTON("dpadright", SDL_CONTROLLER_BUTTON_DPAD_RIGHT)
+    PAD_BUTTON("dpright", SDL_CONTROLLER_BUTTON_DPAD_RIGHT)
+    PAD_BUTTON("misc", SDL_CONTROLLER_BUTTON_MISC1)
+    PAD_BUTTON("misc1", SDL_CONTROLLER_BUTTON_MISC1)
+    PAD_BUTTON("paddle1", SDL_CONTROLLER_BUTTON_PADDLE1)
+    PAD_BUTTON("paddle2", SDL_CONTROLLER_BUTTON_PADDLE2)
+    PAD_BUTTON("paddle3", SDL_CONTROLLER_BUTTON_PADDLE3)
+    PAD_BUTTON("paddle4", SDL_CONTROLLER_BUTTON_PADDLE4)
+    PAD_BUTTON("touchpad", SDL_CONTROLLER_BUTTON_TOUCHPAD)
+    PAD_AXIS("leftstickleft", SDL_CONTROLLER_AXIS_LEFTX, -1)
+    PAD_AXIS("leftstickright", SDL_CONTROLLER_AXIS_LEFTX, +1)
+    PAD_AXIS("leftstickup", SDL_CONTROLLER_AXIS_LEFTY, -1)
+    PAD_AXIS("leftstickdown", SDL_CONTROLLER_AXIS_LEFTY, +1)
+    PAD_AXIS("rightstickleft", SDL_CONTROLLER_AXIS_RIGHTX, -1)
+    PAD_AXIS("rightstickright", SDL_CONTROLLER_AXIS_RIGHTX, +1)
+    PAD_AXIS("rightstickup", SDL_CONTROLLER_AXIS_RIGHTY, -1)
+    PAD_AXIS("rightstickdown", SDL_CONTROLLER_AXIS_RIGHTY, +1)
+    PAD_AXIS("lefttrigger", SDL_CONTROLLER_AXIS_TRIGGERLEFT, +1)
+    PAD_AXIS("lt", SDL_CONTROLLER_AXIS_TRIGGERLEFT, +1)
+    PAD_AXIS("righttrigger", SDL_CONTROLLER_AXIS_TRIGGERRIGHT, +1)
+    PAD_AXIS("rt", SDL_CONTROLLER_AXIS_TRIGGERRIGHT, +1)
+#undef PAD_BUTTON
+#undef PAD_AXIS
+    return 0;
+}
+static uint32_t controls_fingerprint(void) {
+    uint32_t h = 2166136261u;
+#define CONTROL_HASH(v) do { uint32_t _v = (uint32_t)(v); for (int _i=0; _i<4; _i++) { h ^= (_v >> (_i*8)) & 0xffu; h *= 16777619u; } } while (0)
+    for (int a = 0; a < CONTROL_COUNT; a++) {
+        CONTROL_HASH(a); CONTROL_HASH(g_controls[a].key_count);
+        for (int i = 0; i < g_controls[a].key_count; i++) CONTROL_HASH(g_controls[a].keys[i]);
+        CONTROL_HASH(g_controls[a].pad_count);
+        for (int i = 0; i < g_controls[a].pad_count; i++) {
+            CONTROL_HASH(g_controls[a].pads[i].kind);
+            CONTROL_HASH(g_controls[a].pads[i].id);
+            CONTROL_HASH(g_controls[a].pads[i].direction);
+        }
+    }
+#undef CONTROL_HASH
+    return h;
+}
+static void controls_load(void) {
+    controls_set_defaults();
+    char path[1200];
+    int pn = snprintf(path, sizeof(path), "%s/controls.ini", g_exedir[0] ? g_exedir : ".");
+    if (pn < 0 || (size_t)pn >= sizeof(path)) {
+        if (g_log) fprintf(g_log, "CONTROLS defaults reason=path-too-long fingerprint=%08x\n", controls_fingerprint());
+        return;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        if (g_log) fprintf(g_log, "CONTROLS defaults path=%s fingerprint=%08x\n", path, controls_fingerprint());
+        return;
+    }
+    enum { CONTROL_SECTION_NONE = 0, CONTROL_SECTION_KEYBOARD, CONTROL_SECTION_CONTROLLER } section = CONTROL_SECTION_NONE;
+    char line[512];
+    int line_no = 0, overrides = 0, warnings = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line_no++;
+        size_t line_len = strlen(line);
+        if (line_no == 1 && line_len >= 3 && (unsigned char)line[0] == 0xef &&
+            (unsigned char)line[1] == 0xbb && (unsigned char)line[2] == 0xbf) {
+            memmove(line, line + 3, line_len - 2);
+            line_len -= 3;
+        }
+        if (line_len == sizeof(line)-1 && line[line_len-1] != '\n' && !feof(f)) {
+            int ch; while ((ch = fgetc(f)) != '\n' && ch != EOF) {}
+            if (g_log) fprintf(g_log, "CONTROLS-WARN line=%d reason=line-too-long\n", line_no);
+            warnings++; continue;
+        }
+        char *comment = strpbrk(line, "#;");
+        if (comment) *comment = 0;
+        char *s = control_trim(line);
+        if (!*s) continue;
+        if (*s == '[') {
+            char *end = strchr(s, ']');
+            if (!end || *control_trim(end + 1)) {
+                if (g_log) fprintf(g_log, "CONTROLS-WARN line=%d reason=bad-section\n", line_no);
+                warnings++; section = CONTROL_SECTION_NONE; continue;
+            }
+            *end = 0;
+            char n[32]; control_normalize(s + 1, n, sizeof(n));
+            if (!strcmp(n, "keyboard")) section = CONTROL_SECTION_KEYBOARD;
+            else if (!strcmp(n, "controller") || !strcmp(n, "gamepad")) section = CONTROL_SECTION_CONTROLLER;
+            else {
+                if (g_log) fprintf(g_log, "CONTROLS-WARN line=%d reason=unknown-section name=%s\n", line_no, s + 1);
+                warnings++; section = CONTROL_SECTION_NONE;
+            }
+            continue;
+        }
+        char *equals = strchr(s, '=');
+        if (!equals || section == CONTROL_SECTION_NONE) {
+            if (g_log) fprintf(g_log, "CONTROLS-WARN line=%d reason=expected-binding\n", line_no);
+            warnings++; continue;
+        }
+        *equals = 0;
+        char *action_name = control_trim(s);
+        char *value = control_trim(equals + 1);
+        int action = control_action_from_name(action_name);
+        if (action < 0) {
+            if (g_log) fprintf(g_log, "CONTROLS-WARN line=%d reason=unknown-action name=%s\n", line_no, action_name);
+            warnings++; continue;
+        }
+        char value_norm[64]; control_normalize(value, value_norm, sizeof(value_norm));
+        int explicit_none = !strcmp(value_norm, "none");
+        int valid = 1, count = 0;
+        SDL_Scancode keys[CONTROL_MAX_BINDINGS];
+        ControlPadInput pads[CONTROL_MAX_BINDINGS];
+        if (!explicit_none) {
+            char *part = value;
+            for (;;) {
+                char *comma = strchr(part, ',');
+                if (comma) *comma = 0;
+                char *token = control_trim(part);
+                if (!*token || count >= CONTROL_MAX_BINDINGS) { valid = 0; break; }
+                if (section == CONTROL_SECTION_KEYBOARD) {
+                    SDL_Scancode sc = control_key_from_name(token);
+                    if (sc == SDL_SCANCODE_UNKNOWN || sc == SDL_SCANCODE_F10 || sc == SDL_SCANCODE_F12) { valid = 0; break; }
+                    int duplicate = 0; for (int i=0;i<count;i++) if (keys[i] == sc) duplicate = 1;
+                    if (!duplicate) keys[count++] = sc;
+                } else {
+                    ControlPadInput in;
+                    if (!control_pad_from_name(token, &in)) { valid = 0; break; }
+                    int duplicate = 0;
+                    for (int i=0;i<count;i++) if (pads[i].kind==in.kind && pads[i].id==in.id && pads[i].direction==in.direction) duplicate=1;
+                    if (!duplicate) pads[count++] = in;
+                }
+                if (!comma) break;
+                part = comma + 1;
+            }
+            if (count == 0) valid = 0;
+        }
+        if (!valid) {
+            if (g_log) fprintf(g_log, "CONTROLS-WARN line=%d reason=invalid-value action=%s (previous binding kept)\n", line_no, g_control_names[action]);
+            warnings++; continue;
+        }
+        if (section == CONTROL_SECTION_KEYBOARD) {
+            g_controls[action].key_count = explicit_none ? 0 : count;
+            if (!explicit_none) memcpy(g_controls[action].keys, keys, (size_t)count * sizeof(keys[0]));
+        } else {
+            g_controls[action].pad_count = explicit_none ? 0 : count;
+            if (!explicit_none) memcpy(g_controls[action].pads, pads, (size_t)count * sizeof(pads[0]));
+        }
+        overrides++;
+    }
+    fclose(f);
+    if (g_log) {
+        fprintf(g_log, "CONTROLS loaded path=%s overrides=%d warnings=%d fingerprint=%08x\n",
+                path, overrides, warnings, controls_fingerprint());
+        fflush(g_log);
+    }
+}
+static int control_key_matches(ControlAction action, SDL_Scancode sc) {
+    const ControlBinding *b = &g_controls[action];
+    for (int i = 0; i < b->key_count; i++) if (b->keys[i] == sc) return 1;
+    return 0;
+}
+static int control_keyboard_down(ControlAction action, const Uint8 *state) {
+    const ControlBinding *b = &g_controls[action];
+    for (int i = 0; i < b->key_count; i++)
+        if (b->keys[i] > SDL_SCANCODE_UNKNOWN && b->keys[i] < SDL_NUM_SCANCODES && state[b->keys[i]]) return 1;
+    return 0;
+}
+static int control_keyboard_down_without_name_text(ControlAction action, const Uint8 *state) {
+    const ControlBinding *b = &g_controls[action];
+    for (int i = 0; i < b->key_count; i++) {
+        SDL_Scancode sc = b->keys[i];
+        int types_name = (sc >= SDL_SCANCODE_A && sc <= SDL_SCANCODE_Z) ||
+                         (sc >= SDL_SCANCODE_1 && sc <= SDL_SCANCODE_0) ||
+                         sc == SDL_SCANCODE_SPACE || sc == SDL_SCANCODE_BACKSPACE;
+        if (!types_name && sc > SDL_SCANCODE_UNKNOWN && sc < SDL_NUM_SCANCODES && state[sc]) return 1;
+    }
+    return 0;
+}
+static int control_pad_strength(SDL_GameController *pad, ControlAction action) {
+    if (!pad) return 0;
+    const ControlBinding *b = &g_controls[action];
+    int strongest = 0;
+    for (int i = 0; i < b->pad_count; i++) {
+        const ControlPadInput *in = &b->pads[i];
+        int strength = 0;
+        if (in->kind == CONTROL_PAD_BUTTON) {
+            if (SDL_GameControllerGetButton(pad, (SDL_GameControllerButton)in->id)) strength = 19200; /* pointer speed 6 */
+        } else {
+            int v = SDL_GameControllerGetAxis(pad, (SDL_GameControllerAxis)in->id) * in->direction;
+            int threshold = (in->id == SDL_CONTROLLER_AXIS_TRIGGERLEFT || in->id == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) ? 8000 : 12000;
+            if (v > threshold) strength = v;
+        }
+        if (strength > strongest) strongest = strength;
+    }
+    return strongest;
 }
 
 static long data_file_size(const char *dir, const char *name) {
@@ -4565,12 +4932,15 @@ void moon_instr_hook(unsigned int pc) {
      * digit-menu (separate PCs above), arrows/fire (separate JOY globals), or play. */
     if (g_os && (pc == 0x22b90u || pc == 0x1c8660u))   /* name field just opened: drop stale keys */
         g_keyq_head = g_keyq_tail = 0;
-    if (g_os && (pc == 0x22be8u || pc == 0x1c86b8u) && !keyq_empty() && r16(0x3bf74u) == 0)
-        w16(0x3bf74u, (uint16_t)keyq_pop());
+    if (g_os && (pc == 0x22be8u || pc == 0x1c86b8u)) {
+        g_name_entry_live = g_cur_frame;
+        if (!keyq_empty() && r16(0x3bf74u) == 0)
+            w16(0x3bf74u, (uint16_t)keyq_pop());
+    }
 
     /* OPEN INVENTORY on the overland map: the map turn-loop polls [0x3bf74] at 0x4024c,
      * translates it (jsr 0x3ff42), and on ASCII space (0x20) opens the inventory (jsr
-     * 0x405b4).  When the operator presses the inventory input (Space / I / pad Y ->
+     * 0x405b4).  When the operator presses the configured inventory input (by default Space / I / pad Y ->
      * g_inv_request), inject the Space 0xc1b3-index (0x39, which 0x3ff42 maps to
      * ASCII 0x20) so the poll opens it.  The open-map inventory was otherwise unreachable
      * (Space was wired to fire; no pad button was bound).  Gated to that one poll PC, so
@@ -4581,8 +4951,8 @@ void moon_instr_hook(unsigned int pc) {
      * busy-waits for the NEXT key.  On hardware the CIA keyboard ISR feeds the buffer;
      * the port never did, so the original pause feature was unreachable dead code (and
      * would have hung forever if entered -- nothing could release the wait).  Feed it:
-     * a host Space edge (captured only while the gate is polling, g_combat_pause_live)
-     * injects scancode 0x39 at the gate read; the next Space edge is injected at the
+     * a configured host pause edge (captured only while the gate is polling, g_combat_pause_live)
+     * injects scancode 0x39 at the gate read; the next pause edge is injected at the
      * busy-wait to release it (the loop's own follow-up clears the buffer).  Both PCs
      * opcode-guarded: gate reads 0x21a8c/0x1c755c (`move.w $3bf74,D0` = 0x3039), waits
      * 0x21aa4/0x1c7574 (`tst.w $3bf74` = 0x4a79). */
@@ -6158,6 +6528,7 @@ static int run_sdl(int scale) {
     g_sdl_mode = 1;   /* live play: crash reporter may show a dialog box */
     SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
+    controls_load();
     /* open Paula host audio: 44100 Hz, signed-16 stereo, push ~882 frames/frame */
     SDL_AudioSpec want, have;
     SDL_zero(want);
@@ -6242,6 +6613,7 @@ static int run_sdl(int scale) {
      * frame, so neither input source clobbers the other. */
     int kb_u=0, kb_d=0, kb_l=0, kb_r=0, kb_fire=0;
     int m_fire=0, m_rmb=0;
+    int prev_pad_action[CONTROL_COUNT] = {0};
     int running = 1;
     int status_frames = 0;   /* >0: a SAVED/LOADED title flash is up; restore g_wintitle at 0 */
     char savepath[1100];
@@ -6296,6 +6668,7 @@ static int run_sdl(int scale) {
             else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
                 int d = (e.type == SDL_KEYDOWN);
                 int sym = e.key.keysym.sym;
+                SDL_Scancode sc = e.key.keysym.scancode;
                 /* TYPED-TEXT: on keydown queue the 0xc1b3-index for any text key
                  * (A-Z, 0-9, space, Backspace, Return) so the Select-Knight name
                  * field can be typed into.  The queue is only drained at the name-
@@ -6304,9 +6677,6 @@ static int run_sdl(int scale) {
                  * same keys still drive fire/menu where those screens are active. */
                 if (d) { uint8_t ix = keysym_to_idx(sym); if (ix) keyq_push(ix); }
                 switch (sym) {
-                    case SDLK_ESCAPE: if (d) running = 0; break;
-                    case SDLK_F5: if (d) do_save = 1; break;          /* quicksave (acts at frame end) */
-                    case SDLK_F9: if (d) do_load = 1; break;          /* quickload (acts at frame end) */
                     case SDLK_F10: if (d) { g_livedump = !g_livedump;  /* toggle live frame recorder (diagnostics) */
                         if (win) SDL_SetWindowTitle(win, g_livedump ? "Moonstone - RECORDING FRAMES (F10 to stop)" : g_wintitle); } break;
                     case SDLK_F12: if (d) toggle_record(win); break;  /* toggle audio->WAV capture (capture-N.wav next to exe + reg-log into moonstone.log); re-bound 2026-06-25 for the combat-screech hunt */
@@ -6314,53 +6684,31 @@ static int run_sdl(int scale) {
                      * dump_derail() still auto-fires on a derail/wild-PC/A7-smash; the task-list
                      * fix (g_tasklist_fix, default ON, --notaskfix to A/B headless) remains -- just
                      * no longer bound to F-keys.  (F12 re-bound to audio capture, above.) */
-                    case SDLK_UP:    kb_u = d; break;
-                    case SDLK_DOWN:  kb_d = d; break;
-                    case SDLK_LEFT:  kb_l = d; break;
-                    case SDLK_RIGHT: kb_r = d; break;
-                    case SDLK_LCTRL: case SDLK_RCTRL:
-                    case SDLK_RETURN: case SDLK_KP_ENTER: kb_fire = d; break;
-                    /* Space = open INVENTORY on the map (the faithful Amiga control);
-                     * fire stays on Ctrl/Enter/mouse/pad.  I is a backup.  Gated to
-                     * in-game so Space still SKIPS the attract intro. */
-                    case SDLK_SPACE: case SDLK_i:
-                        if (d && !g_blt_busy_scope && !g_in_inventory
-                            && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
-                        /* Space during COMBAT = the original PAUSE key (gate polling
-                         * stamps g_combat_pause_live; mutually exclusive with the
-                         * map poll, so one key serves both faithfully). */
-                        if (d && sym == SDLK_SPACE && !g_blt_busy_scope
-                            && g_combat_pause_live && (g_cur_frame - g_combat_pause_live) < 3) g_pause_request = 1;
-                        break;
-                    /* E = REST / skip to the next turn on the overland map (the faithful Amiga
-                     * key).  Edge-only (keydown), in-game; inert during the attract/inventory. */
-                    case SDLK_e:
-                        if (d && !g_blt_busy_scope && !g_in_inventory
-                            && g_map_live && (g_cur_frame - g_map_live) < 3) g_rest_request = 1; break;
-                    /* Q = the original map command for abandoning the current quest and
-                     * returning through the game's own setup/restart flow. */
-                    case SDLK_q:
-                        if (d && !g_blt_busy_scope && !g_in_inventory
-                            && g_map_live && (g_cur_frame - g_map_live) < 3) g_quest_quit_request = 1; break;
-                    /* V = version display on the overland map (retail-parity B17: retail's own
-                     * map key; the handler is re-added by the g_retail_parity hook at 0x40296). */
-                    case SDLK_v:
-                        if (d && g_retail_parity && !g_blt_busy_scope && !g_in_inventory
-                            && g_map_live && (g_cur_frame - g_map_live) < 3) g_ver_request = 1; break;
                     case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5:
                     case SDLK_6: case SDLK_7: case SDLK_8: case SDLK_9:
                         g_kdigit = d ? (e.key.keysym.sym - SDLK_1 + 1) : 0; break;  /* overlap-popup select */
                     default: break;
                 }
-                /* Any key during the attract intro = skip it (fast-forward to the
-                 * game start).  WHITELIST the deliberate FIRE/confirm keys only --
-                 * Space, Enter (main or numpad) and Ctrl -- so a stray key such as a
-                 * media/VOLUME key (or the F5/F8/F9 save/capture keys) no longer skips
-                 * the intro by accident. */
-                if (d && g_blt_busy_scope &&
-                    (sym == SDLK_SPACE || sym == SDLK_RETURN || sym == SDLK_KP_ENTER ||
-                     sym == SDLK_LCTRL || sym == SDLK_RCTRL))
-                    skip_intro = 1;
+                /* Configurable actions are edge-triggered here.  Keep the original
+                 * screen/context gates: remapping changes the host input, not when the
+                 * Amiga game is allowed to honor it.  Key repeats do not create extra
+                 * saves, day passes, or pause toggles. */
+                if (d && !e.key.repeat) {
+                    if (control_key_matches(CONTROL_QUIT, sc)) running = 0;
+                    if (control_key_matches(CONTROL_QUICKSAVE, sc)) do_save = 1;
+                    if (control_key_matches(CONTROL_QUICKLOAD, sc)) do_load = 1;
+                    if (control_key_matches(CONTROL_INVENTORY, sc) && !g_blt_busy_scope && !g_in_inventory
+                        && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
+                    if (control_key_matches(CONTROL_PAUSE, sc) && !g_blt_busy_scope
+                        && g_combat_pause_live && (g_cur_frame - g_combat_pause_live) < 3) g_pause_request = 1;
+                    if (control_key_matches(CONTROL_END_TURN, sc) && !g_blt_busy_scope && !g_in_inventory
+                        && g_map_live && (g_cur_frame - g_map_live) < 3) g_rest_request = 1;
+                    if (control_key_matches(CONTROL_ABANDON_QUEST, sc) && !g_blt_busy_scope && !g_in_inventory
+                        && g_map_live && (g_cur_frame - g_map_live) < 3) g_quest_quit_request = 1;
+                    if (control_key_matches(CONTROL_SHOW_VERSION, sc) && g_retail_parity && !g_blt_busy_scope && !g_in_inventory
+                        && g_map_live && (g_cur_frame - g_map_live) < 3) g_ver_request = 1;
+                    if (g_blt_busy_scope && control_key_matches(CONTROL_SKIP_INTRO, sc)) skip_intro = 1;
+                }
             } else if (e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEBUTTONUP) {
                 int d = (e.type == SDL_MOUSEBUTTONDOWN);
                 if (e.button.button == SDL_BUTTON_LEFT)   m_fire = d;
@@ -6386,62 +6734,44 @@ static int run_sdl(int scale) {
             }
         }
 
-        /* poll the game controller: D-pad / left stick drive BOTH the digital
-         * joystick (JOY1DAT: combat + overland + main menu) AND the mouse cursor
-         * (JOY0DAT: equip/altar + cursor menus), so one pad works everywhere. */
-        int pad_u=0, pad_d=0, pad_l=0, pad_r=0, pad_fire=0, pad_rmb=0, pad_mx=0, pad_my=0;
-        if (pad) {
-            const int DZ = 12000;
-            int lx = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX);
-            int ly = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
-            int dl = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
-            int dr = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
-            int du = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_UP);
-            int dd = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
-            pad_l = dl || lx < -DZ;  pad_r = dr || lx > DZ;
-            pad_u = du || ly < -DZ;  pad_d = dd || ly > DZ;
-            pad_fire = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_A)
-                     || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)
-                     || SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)
-                     || SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 8000;
-            pad_rmb = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_B);
-            /* Y = open INVENTORY on the map (edge-detected, in-game only).  Start was
-             * moved off inventory to PAUSE (below) per operator 2026-07-03. */
-            {
-                int inv_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_Y);
-                static int prev_inv_btn = 0;
-                if (inv_btn && !prev_inv_btn && !g_blt_busy_scope && !g_in_inventory
-                    && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
-                prev_inv_btn = inv_btn;
-            }
-            /* Start = PAUSE combat (the faithful Space-pause, on a pad button):
-             * edge-detected, armed only while the pause gate is polling --
-             * press to freeze, press again to resume. */
-            {
-                int pause_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_START);
-                static int prev_pause_btn = 0;
-                if (pause_btn && !prev_pause_btn && !g_blt_busy_scope
-                    && g_combat_pause_live && (g_cur_frame - g_combat_pause_live) < 3) g_pause_request = 1;
-                prev_pause_btn = pause_btn;
-            }
-            /* Back = REST / skip to the next turn on the overland map (edge-detected, in-game
-             * only) — mirrors keyboard 'E'.  Quit stays on Esc / the window close box only. */
-            {
-                int rest_btn = SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK);
-                static int prev_rest_btn = 0;
-                if (rest_btn && !prev_rest_btn && !g_blt_busy_scope && !g_in_inventory
-                    && g_map_live && (g_cur_frame - g_map_live) < 3) g_rest_request = 1;
-                prev_rest_btn = rest_btn;
-            }
-            /* analog cursor speed for mouse-driven menus (clamped ±8/frame) */
-            if (lx > DZ || lx < -DZ) { pad_mx = lx / 3200; if (pad_mx>8) pad_mx=8; if (pad_mx<-8) pad_mx=-8; }
-            else pad_mx = (dr?6:0) - (dl?6:0);
-            if (ly > DZ || ly < -DZ) { pad_my = ly / 3200; if (pad_my>8) pad_my=8; if (pad_my<-8) pad_my=-8; }
-            else pad_my = (dd?6:0) - (du?6:0);
+        /* Poll configured controller actions.  A binding can be a logical SDL
+         * button or a signed stick/trigger direction; the strongest direction
+         * drives pointer speed, while the same action also feeds the digital
+         * Amiga joystick. */
+        int pad_strength[CONTROL_COUNT] = {0};
+        int pad_now[CONTROL_COUNT] = {0};
+        if (pad) for (int a = 0; a < CONTROL_COUNT; a++) {
+            pad_strength[a] = control_pad_strength(pad, (ControlAction)a);
+            pad_now[a] = pad_strength[a] > 0;
         }
-        if (g_blt_busy_scope && (pad_fire|pad_rmb))
-            skip_intro = 1;   /* a controller BUTTON (A/B/LB/RB/RT) skips the intro
-                               * (not stick/d-pad nudges, so drift can't skip it) */
+        int pad_u = pad_now[CONTROL_UP], pad_d = pad_now[CONTROL_DOWN];
+        int pad_l = pad_now[CONTROL_LEFT], pad_r = pad_now[CONTROL_RIGHT];
+        int pad_fire = pad_now[CONTROL_FIRE];
+        int pad_mx = (pad_strength[CONTROL_RIGHT] - pad_strength[CONTROL_LEFT]) / 3200;
+        int pad_my = (pad_strength[CONTROL_DOWN] - pad_strength[CONTROL_UP]) / 3200;
+        if (pad_mx > 8) pad_mx = 8; else if (pad_mx < -8) pad_mx = -8;
+        if (pad_my > 8) pad_my = 8; else if (pad_my < -8) pad_my = -8;
+
+        /* Edge-triggered controller actions use the same guest-side scope gates
+         * as keyboard actions.  Independent per-action edge state lets one pad
+         * input intentionally serve context-exclusive actions. */
+        if (pad_now[CONTROL_QUIT] && !prev_pad_action[CONTROL_QUIT]) running = 0;
+        if (pad_now[CONTROL_QUICKSAVE] && !prev_pad_action[CONTROL_QUICKSAVE]) do_save = 1;
+        if (pad_now[CONTROL_QUICKLOAD] && !prev_pad_action[CONTROL_QUICKLOAD]) do_load = 1;
+        if (pad_now[CONTROL_INVENTORY] && !prev_pad_action[CONTROL_INVENTORY]
+            && !g_blt_busy_scope && !g_in_inventory && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
+        if (pad_now[CONTROL_PAUSE] && !prev_pad_action[CONTROL_PAUSE]
+            && !g_blt_busy_scope && g_combat_pause_live && (g_cur_frame - g_combat_pause_live) < 3) g_pause_request = 1;
+        if (pad_now[CONTROL_END_TURN] && !prev_pad_action[CONTROL_END_TURN]
+            && !g_blt_busy_scope && !g_in_inventory && g_map_live && (g_cur_frame - g_map_live) < 3) g_rest_request = 1;
+        if (pad_now[CONTROL_ABANDON_QUEST] && !prev_pad_action[CONTROL_ABANDON_QUEST]
+            && !g_blt_busy_scope && !g_in_inventory && g_map_live && (g_cur_frame - g_map_live) < 3) g_quest_quit_request = 1;
+        if (pad_now[CONTROL_SHOW_VERSION] && !prev_pad_action[CONTROL_SHOW_VERSION]
+            && g_retail_parity && !g_blt_busy_scope && !g_in_inventory
+            && g_map_live && (g_cur_frame - g_map_live) < 3) g_ver_request = 1;
+        if (g_blt_busy_scope && pad_now[CONTROL_SKIP_INTRO]) skip_intro = 1;
+        memcpy(prev_pad_action, pad_now, sizeof(prev_pad_action));
+
         /* --skipat N (diag, cushion-loss repro 2026-07-02): trigger the intro-skip
          * automatically at host frame N, so the post-skip audio-queue state can be
          * reproduced/verified headlessly (no manual keypress).  ONE-SHOT (audit
@@ -6452,13 +6782,29 @@ static int run_sdl(int scale) {
             g_skipat = 0;
         }
 
+        /* Poll held keyboard actions rather than assigning one boolean on each
+         * key-up/down event.  With multiple bindings, releasing one key must not
+         * cancel another key that is still held. */
+        const Uint8 *keyboard = SDL_GetKeyboardState(NULL);
+        kb_u = control_keyboard_down(CONTROL_UP, keyboard);
+        kb_d = control_keyboard_down(CONTROL_DOWN, keyboard);
+        kb_l = control_keyboard_down(CONTROL_LEFT, keyboard);
+        kb_r = control_keyboard_down(CONTROL_RIGHT, keyboard);
+        kb_fire = control_keyboard_down(CONTROL_FIRE, keyboard);
+        /* Printable remapped attack keys must not instantly confirm the knight's
+         * name while the fixed text-entry queue is consuming that same press.
+         * Non-text bindings (including the default Ctrl and Enter) still act as
+         * the original joystick-fire confirmation. */
+        if (g_name_entry_live && (g_cur_frame - g_name_entry_live) < 3)
+            kb_fire = control_keyboard_down_without_name_text(CONTROL_FIRE, keyboard);
+
         /* combine keyboard + mouse-button + pad into the chipset input globals */
         g_ji_up = kb_u | pad_u;  g_ji_dn = kb_d | pad_d;
         g_ji_lf = kb_l | pad_l;  g_ji_rt = kb_r | pad_r;
         g_fire  = g_fire2 = kb_fire | m_fire | pad_fire;
-        g_rmb   = m_rmb | pad_rmb;
+        g_rmb   = m_rmb;
         /* A keyboard must cover the original joystick-driven pointer screens too.
-         * Mirror arrows into JOY0 cursor motion exactly as controller directions do. */
+         * Mirror configured directions into JOY0 exactly as controller directions do. */
         g_mouse_dx += pad_mx + (kb_r ? 6 : 0) - (kb_l ? 6 : 0);
         g_mouse_dy += pad_my + (kb_d ? 6 : 0) - (kb_u ? 6 : 0);
 
@@ -6523,7 +6869,7 @@ static int run_sdl(int scale) {
             continue;          /* next iteration renders the live post-intro frame */
         }
 
-        /* QUICKSAVE (F5) / QUICKLOAD (F9): act at this clean between-frames boundary,
+        /* QUICKSAVE / QUICKLOAD: act at this clean between-frames boundary,
          * in-game only (saving/loading during the scripted attract is meaningless and
          * would fight the video-delay ring).  Whole-machine snapshot to/from
          * <exedir>/moonstone.sav; a 2.4s title flash gives feedback. */
@@ -6531,10 +6877,10 @@ static int run_sdl(int scale) {
             const char *msg;
             if (do_save) {
                 msg = load_in_progress() ? "BUSY LOADING - SAVE IN A SEC"
-                    : save_state(savepath) ? "GAME SAVED (F5)" : "SAVE FAILED";
+                    : save_state(savepath) ? "GAME SAVED" : "SAVE FAILED";
             } else {
                 if (load_state(savepath)) {
-                    msg = "GAME LOADED (F9)";
+                    msg = "GAME LOADED";
                     if (g_audio_dev) SDL_ClearQueuedAudio(g_audio_dev);   /* drop now-stale queued audio */
                     audio_reprime(4);   /* rebuild the anti-underrun cushion the clear just destroyed */
                     next_deadline = (double)SDL_GetPerformanceCounter() + frame_ticks;  /* resync pacing */

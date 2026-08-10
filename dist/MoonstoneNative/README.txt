@@ -32,6 +32,11 @@ together. The folder is portable.
  CONTROLS
 ---------------------------------------------------------------
 
+  To change keyboard or controller bindings, edit controls.ini beside
+  moonstone.exe and restart the game. Separate multiple bindings with commas.
+  Use "none" by itself to unbind that device's action. Deleting the file
+  restores built-in defaults. The bindings listed below are the defaults.
+
   SKIP THE INTRO
     Press Space, Enter, or Ctrl on the keyboard, or A, B, LB, RB, or RT
     on a controller.
@@ -81,6 +86,7 @@ together. The folder is portable.
 
   moonstone.exe          the native game
   SDL2.dll               window, input, and audio support
+  controls.ini           editable keyboard and controller bindings
   README.txt             this guide
   LICENSE.txt            native runtime license
   THIRD-PARTY-NOTICES.txt  third-party licenses and credits
