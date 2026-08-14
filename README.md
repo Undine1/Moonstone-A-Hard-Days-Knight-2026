@@ -7,8 +7,7 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 ## Download and setup
 
 1. Open the [Releases page](https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026/releases).
-2. Download **`Moonstone-2026-Windows-x64.zip`**. Do not download GitHub's
-   automatically generated "Source code" archives.
+2. Download **`Moonstone-2026-Windows-x64.zip`**.
 3. Extract the complete ZIP.
 4. Supply your own ADF files into the included `data` folder. The ADF files
    should come in a batch of three disk files and should be named specifically:
@@ -65,14 +64,14 @@ warns that Ratmen carry a deadly disease and recommends treatment, but there is
 no mention of the specifics, nor is there any in-game feedback about this. I
 personally had no idea what was happening and thought it was a bug, and from the
 videos I watched, other people had the same experience. So I've decided to
-remove this feature from the game.
+remove this feature from the game to spare everyone from similar confusion.
 
 ## Final notes
 
 Multiplayer has not been tested.
 
-Moonstone 2026 took considerable time, effort, and expense to complete. If you
-enjoyed a bug-free playthrough and would like to buy me a coffee:
+If you enjoyed Moonstone 2026 and completed a playthrough without encountering
+any bugs, you are welcome to buy me a coffee:
 
 - **EVM:** `0x759500A80C17978df1B92d2497A80786290115c2`
 - **BTC:** `3FF42zRE1qAdwmcoLvuRGa3FEZeYW1LyYi`
