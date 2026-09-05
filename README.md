@@ -33,6 +33,8 @@ the executable; changes take effect after restarting the game.
   A, B, LB, RB, or RT on a controller.
 - Complete and configurable keyboard and game-controller support, with optional
   mouse control.
+- Opens directly into the game window, with brief on-screen controller connection
+  and disconnection messages.
 - Quicksave and quickload anywhere, including during combat.
 - Faithful graphics and Paula audio through the custom OCS runtime.
 

@@ -2,7 +2,7 @@
   MOONSTONE - A Hard Days Knight         native Windows port
 ================================================================
 
-This is a prebuilt Windows package. ADF files are not included.
+Moonstone 2026 v1.1.0 - prebuilt Windows package. ADF files are not included.
 
 
 ---------------------------------------------------------------
@@ -25,6 +25,15 @@ On first launch, the game extracts its required boot modules from
 Disk1.adf automatically. Each ADF must be 901,120 bytes. Requires
 64-bit Windows. Keep moonstone.exe, SDL2.dll, and the data folder
 together. The folder is portable.
+
+The game opens without a separate command window. A brief on-screen message
+shows when a controller connects or disconnects, including one already
+connected at startup. Diagnostic details are saved in moonstone.log.
+
+UPDATING FROM v1.0.0
+Replace moonstone.exe and SDL2.dll in your existing game folder with the new
+copies. Keep your data folder, moonstone.sav, and customized controls.ini.
+The included controls.ini supplies defaults for a new installation.
 
 
 ---------------------------------------------------------------
@@ -81,6 +90,10 @@ together. The folder is portable.
 If the game does not open, check that all three files are directly in
 the data folder and named Disk1.adf, Disk2.adf, and Disk3.adf. Also
 make sure SDL2.dll is still next to moonstone.exe.
+
+If startup data or a requested save cannot be loaded, an error dialog names
+the file. Details are written to moonstone.log (or the path given by --log).
+Warnings also appear if sound, audio recording, or the log file is unavailable.
 
 Project page and native runtime source:
 https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026

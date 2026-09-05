@@ -10,7 +10,7 @@ ROOT=".."
 OUT="$ROOT/dist/release-staging/Moonstone-2026-Windows-x64"
 
 echo "[1/3] building moonstone.exe ..."
-bash build.sh moonstone
+"${BASH:-bash}" build.sh moonstone
 
 echo "[2/3] assembling clean runtime-only folder ..."
 if [ -e "$OUT" ]; then

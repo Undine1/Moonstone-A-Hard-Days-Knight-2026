@@ -3,6 +3,7 @@
 #ifndef MOON_LOADER_H
 #define MOON_LOADER_H
 #include <stdint.h>
+#include <stddef.h>
 
 #define HUNK_CODE        1001
 #define HUNK_DATA        1002
@@ -26,8 +27,10 @@ typedef struct {
 } Module;
 
 /* Load an AmigaDOS Hunk (LoadSeg) executable into ram[] starting at `base`,
- * applying 32-bit relocations. Returns 0 on success, negative on error. */
+ * applying 32-bit relocations. Returns 0 on success, negative on error.
+ * Optional error buffer receives the failure reason (empty on success).
+ * The caller handles logging/UI; the loader does not require a console. */
 int load_hunk(uint8_t *ram, uint32_t ram_size, const char *path,
-              uint32_t base, uint32_t align, Module *out);
+              uint32_t base, uint32_t align, Module *out, char *error, size_t error_size);
 
 #endif

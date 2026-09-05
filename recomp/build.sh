@@ -23,7 +23,9 @@ if [ -f icon/app.rc ] && [ -f icon/moonstone.ico ]; then
   RES="icon/app.res"
 fi
 
-"$ZIG" cc -O2 -g -std=c11 \
+# A GUI subsystem executable opens only the game window when double-clicked.
+# Redirected stdout/stderr still work for the headless regression harness.
+"$ZIG" cc -O2 -g -std=c11 -Wl,--subsystem,windows \
   -I"$MUS" -I"$MUS/softfloat" -Isrc -I"$SDL/include" \
   -Wno-unused-parameter -Wno-unused-but-set-variable -Wno-unused-function \
   -Wno-date-time \

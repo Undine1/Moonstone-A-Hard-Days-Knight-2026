@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <errno.h>
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
@@ -32,6 +33,9 @@
 #include "loader.h"
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
+#ifdef _WIN32
+#include <SDL2/SDL_syswm.h>
+#endif
 #include "moon_icon.h"   /* embedded credit-scene moon, set as the SDL window/taskbar icon */
 #include "splash_image.h" /* embedded boot splash, shown during the black disk-load */
 #include "qoi_dec.h"      /* ~60-line QOI decoder for the splash (no external image lib) */
@@ -39,7 +43,7 @@
 
 /* Project identity / attribution.  Printed at startup (to the log) and via
  * --version; also serves as the binary's attribution string. */
-#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.0.0 - " \
+#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.1.0 - " \
     "no-emulator port of the Amiga 1991 original - (C) 2026 Undine1, " \
     "github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026 - GPL-3.0"
 /* Compile timestamp, shown in the window title + log so it's unambiguous WHICH
@@ -336,6 +340,51 @@ static int      g_stop = 0;
 static const char *g_stop_reason = "?";
 static uint32_t g_unmapped = 0;
 static FILE    *g_log;
+static const char *g_log_path;
+
+static void host_log_hint(char *out, size_t size) {
+    if (g_log && g_log != stderr && !ferror(g_log))
+        snprintf(out, size, "Details were written to:\n%s", g_log_path ? g_log_path : "moonstone.log");
+    else
+        snprintf(out, size, "No diagnostic log could be written.");
+}
+
+/* Startup can fail before SDL has a window. Match the missing-disk check:
+ * persist the exact reason, keep redirected CLI errors, and show a native
+ * dialog for live play, owned by the game window once it exists. Technical
+ * details belong in the log. */
+static void host_report_issue(int show_gui, SDL_Window *parent, Uint32 flags, const char *summary,
+                              const char *path, const char *detail) {
+    const char *tag = flags == SDL_MESSAGEBOX_WARNING ? "WARNING" : "ERROR";
+    FILE *dest = g_log ? g_log : stderr;
+    fprintf(dest, "%s: %s\n", tag, summary);
+    if (path) fprintf(dest, "File: %s\n", path);
+    if (detail && *detail) fprintf(dest, "Reason: %s\n", detail);
+    fflush(dest);
+    if (dest != stderr) {
+        fprintf(stderr, "%s: %s\n", tag, summary);
+        if (path) fprintf(stderr, "File: %s\n", path);
+        if (detail && *detail) fprintf(stderr, "Reason: %s\n", detail);
+    }
+    if (show_gui) {
+        char hint[1400], message[4096];
+        host_log_hint(hint, sizeof(hint));
+        snprintf(message, sizeof(message), "%s%s%s\n\n%s", summary,
+                 path ? "\n\nFile:\n" : "", path ? path : "", hint);
+#ifdef _WIN32
+        HWND owner = NULL;
+        SDL_SysWMinfo info;
+        SDL_zero(info);
+        SDL_VERSION(&info.version);
+        if (parent && SDL_GetWindowWMInfo(parent, &info) && info.subsystem == SDL_SYSWM_WINDOWS)
+            owner = info.info.win.window;
+        MessageBoxA(owner, message, "Moonstone",
+                    MB_OK | (flags == SDL_MESSAGEBOX_WARNING ? MB_ICONWARNING : MB_ICONERROR));
+#else
+        SDL_ShowSimpleMessageBox(flags, "Moonstone", message, parent);
+#endif
+    }
+}
 
 /* bus-access logging counters to keep noise bounded */
 static uint32_t g_custw_log = 0, g_custr_log = 0, g_ciaw_log = 0, g_ciar_log = 0;
@@ -2242,7 +2291,7 @@ static void wav_write_header(FILE *f, uint32_t data_bytes) {
 /* Base window title (set in run_sdl); used to restore the title after a [REC] tag. */
 static char g_wintitle[160] = "Moonstone (native)";
 
-/* F9 in the live window toggles audio capture: writes capture-N.wav next to the
+/* F12 in the live window toggles audio capture: writes capture-N.wav next to the
  * exe so the operator can record an exact glitch and hand back the real waveform
  * (closes the "I can't hear it" gap for audio debugging).  Reuses the g_wav sink
  * that audio_flush() already writes each frame. */
@@ -2272,7 +2321,13 @@ static void toggle_record(SDL_Window *win) {
             if (win) SDL_SetWindowTitle(win, t);
             if (g_log) { fprintf(g_log, "=== audio capture %d START ic=%llu -> %s (reg-log on) ===\n",
                                  n, (unsigned long long)g_icount, p); fflush(g_log); }
-        } else { n--; if (g_log) { fprintf(g_log, "audio capture FAILED to open %s\n", p); fflush(g_log); } }
+        } else {
+            int open_error = errno;
+            n--;
+            host_report_issue(g_sdl_mode, win, SDL_MESSAGEBOX_WARNING,
+                              "Moonstone couldn't create the audio recording. The game will continue without recording.",
+                              p, strerror(open_error));
+        }
     }
 }
 
@@ -3377,6 +3432,9 @@ static int      g_choke_stab_fix = 1;  /* PATH FIX 2026-08-09 (verified in both 
                                        * choke handler; HP<=0 + the canopy-state bit is the save-safe pending
                                        * marker, so no host sidecar or save-format change is needed.
                                        * --nochokestabfix A/B. */
+static int      g_choke_death_fix = 1; /* Canopy handler must keep a dead victim in its death script,
+                                       * rather than accepting another escape stab after HP reaches zero.
+                                       * --nochokedeathfix A/B. */
 static int      g_taskdedup_n = 0;
 /* (Removed 2026-06-25: g_lifeguard / the @0x260a4 +0x82 clear.  It was REDUNDANT -- the new-game
  * per-record init already clears +0x82 at 0x260d8 -- so it did nothing for the random life loss,
@@ -4321,6 +4379,29 @@ void moon_instr_hook(unsigned int pc) {
                     (unsigned long)m68k_get_reg(NULL, M68K_REG_A1),
                     (unsigned long long)g_icount);
             fflush(g_log); en++;
+        }
+    }
+    /* CANOPY VICTIM DEATH (2026-09-05): 0x2720e selects the authored death
+     * display, but its terminator dispatches this same handler again. The
+     * original checks HP only AFTER deciding whether to stab, so a dead
+     * knight can overwrite that display and keep attacking during round-end.
+     * Make the terminal HP state take priority over input (and a pending
+     * monkey release). Reuse the existing death script and round-end timing. */
+    if (g_choke_death_fix && g_os && pc == 0x27180u
+        && r16(pc) == 0x4eb9u && r32(pc + 2u) == 0x00022fe6u) {
+        uint32_t monkey = (uint32_t)m68k_get_reg(NULL, M68K_REG_A1);
+        uint32_t victim = r32(0x2ebd4u);
+        if (monkey < RAM_SIZE - 0x6au && r8(monkey + 0x4du) == 0x24u
+            && (r8(monkey + 0x69u) & 0x04u) && victim < RAM_SIZE - 0x52u
+            && (int16_t)r16(victim + 0x50u) <= 0) {
+            m68k_set_reg(M68K_REG_PC, 0x2720eu);
+            if (g_log) { static int cd = 0; if (cd < 12) {
+                fprintf(g_log, "CHOKE-DEATH victim=%06x hp=%d monkey=%06x fr=%d ic=%llu\n",
+                        victim, (int)(int16_t)r16(victim + 0x50u), monkey, g_cur_frame,
+                        (unsigned long long)g_icount);
+                fflush(g_log); cd++;
+            } }
+            return;
         }
     }
     /* LETHAL CANOPY-ESCAPE STAB (2026-08-09): both extracted cracked and boxed-
@@ -6489,13 +6570,14 @@ static LONG WINAPI moon_crash_filter(EXCEPTION_POINTERS *ep) {
                 fault_rw==1?"write":fault_rw==0?"read":"?", fault_addr);
         fflush(g_log);
     }
-    char msg[512];
+    char hint[1400], msg[2048];
+    host_log_hint(hint, sizeof(hint));
     snprintf(msg, sizeof(msg),
              "Moonstone hit a fatal internal error.\n\n"
              "code=0x%08lx  68k-pc=%06x  icount=%llu\n\n"
-             "A log was written next to the game:\n%s\\moonstone.log\n\n"
-             "Please send that file so this can be fixed.",
-             code, pc, (unsigned long long)g_icount, g_exedir[0] ? g_exedir : ".");
+             "%s\n\n"
+             "Please report these details so this can be investigated.",
+             code, pc, (unsigned long long)g_icount, hint);
     if (g_sdl_mode)   /* only pop a dialog in live play; headless tests just log */
         MessageBoxA(NULL, msg, "Moonstone \xe2\x80\x94 crash", MB_OK | MB_ICONERROR);
     return EXCEPTION_EXECUTE_HANDLER;  /* terminate */
@@ -6524,10 +6606,117 @@ static int b64decode(const char *s, uint8_t *out, int cap) {
 }
 
 /* ----------------------------------------------------------- SDL host loop */
+/* Host-only notification, drawn after the game/splash texture. It never enters
+ * the emulated framebuffer, frame dumps, or savestates. */
+typedef struct {
+    int visible, connected;
+    Uint32 started;
+} ControllerNotice;
+
+static SDL_GameController *controller_open_first(void) {
+    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+        if (!SDL_IsGameController(i)) continue;
+        SDL_GameController *pad = SDL_GameControllerOpen(i);
+        if (pad) return pad;
+    }
+    return NULL;
+}
+
+static void controller_notice_show(ControllerNotice *notice, SDL_GameController *pad) {
+    notice->visible = 1;
+    notice->connected = pad != NULL;
+    notice->started = SDL_GetTicks();
+    const char *name = pad ? SDL_GameControllerName(pad) : NULL;
+    if (g_log) {
+        fprintf(g_log, "gamepad %s: %s\n", pad ? "connected" : "disconnected",
+                pad ? (name ? name : "unknown controller") : "keyboard/mouse available");
+        fflush(g_log);
+    }
+}
+
+static void controller_device_event(SDL_GameController **pad, ControllerNotice *notice,
+                                    const SDL_ControllerDeviceEvent *event) {
+    if (event->type == SDL_CONTROLLERDEVICEADDED && !*pad) {
+        *pad = controller_open_first();
+        if (*pad) controller_notice_show(notice, *pad);
+    } else if (event->type == SDL_CONTROLLERDEVICEREMOVED && *pad &&
+               event->which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(*pad))) {
+        /* Removal events use an instance ID, not a device index. Unplugging an
+         * unused second pad must not close the active one. Prefer a remaining
+         * controller when the active pad is unplugged. */
+        SDL_GameControllerClose(*pad);
+        *pad = controller_open_first();
+        controller_notice_show(notice, *pad);
+    }
+}
+
+static void controller_notice_draw(SDL_Renderer *ren, ControllerNotice *notice, Uint32 now) {
+    if (!notice->visible) return;
+    Uint32 elapsed = now - notice->started; /* unsigned subtraction handles tick wrap */
+    if (elapsed >= 4000) { notice->visible = 0; return; }
+    Uint8 alpha = elapsed < 3500 ? 255 : (Uint8)((4000 - elapsed) * 255 / 500);
+    const char *label = notice->connected ? "CONTROLLER CONNECTED" : "CONTROLLER DISCONNECTED";
+    /* Small, original 5x7 uppercase bitmap alphabet: no font dependency. */
+    static const uint8_t letters[26][7] = {
+        {14,17,17,31,17,17,17}, {30,17,17,30,17,17,30}, {14,17,16,16,16,17,14},
+        {30,17,17,17,17,17,30}, {31,16,16,30,16,16,31}, {31,16,16,30,16,16,16},
+        {14,17,16,23,17,17,15}, {17,17,17,31,17,17,17}, {14,4,4,4,4,4,14},
+        {7,2,2,2,18,18,12}, {17,18,20,24,20,18,17}, {16,16,16,16,16,16,31},
+        {17,27,21,21,17,17,17}, {17,25,21,19,17,17,17}, {14,17,17,17,17,17,14},
+        {30,17,17,30,16,16,16}, {14,17,17,17,21,18,13}, {30,17,17,30,20,18,17},
+        {15,16,16,14,1,1,30}, {31,4,4,4,4,4,4}, {17,17,17,17,17,17,14},
+        {17,17,17,17,17,10,4}, {17,17,17,21,21,21,10}, {17,17,10,4,10,17,17},
+        {17,17,10,4,4,4,4}, {31,1,2,4,8,16,31}
+    };
+    int width = (int)strlen(label) * 6 + 23;
+    SDL_Rect box = {(320 - width) / 2, 8, width, 23};
+    Uint8 old_r, old_g, old_b, old_a;
+    SDL_BlendMode old_blend;
+    SDL_GetRenderDrawColor(ren, &old_r, &old_g, &old_b, &old_a);
+    SDL_GetRenderDrawBlendMode(ren, &old_blend);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, 12, 16, 22, (Uint8)(alpha * 220 / 255));
+    SDL_RenderFillRect(ren, &box);
+    SDL_SetRenderDrawColor(ren, 99, 109, 120, alpha);
+    SDL_RenderDrawRect(ren, &box);
+    SDL_SetRenderDrawColor(ren, notice->connected ? 115 : 244,
+                          notice->connected ? 214 : 181, notice->connected ? 142 : 91, alpha);
+    SDL_Rect indicator = {box.x + 7, box.y + 9, 5, 5};
+    SDL_RenderFillRect(ren, &indicator);
+    SDL_SetRenderDrawColor(ren, 240, 242, 245, alpha);
+    for (int i = 0; label[i]; i++) {
+        if (label[i] < 'A' || label[i] > 'Z') continue;
+        for (int y = 0; y < 7; y++) for (int x = 0; x < 5; x++)
+            if (letters[label[i] - 'A'][y] & (1 << (4 - x)))
+                SDL_RenderDrawPoint(ren, box.x + 17 + i * 6 + x, box.y + 8 + y);
+    }
+    SDL_SetRenderDrawColor(ren, old_r, old_g, old_b, old_a);
+    SDL_SetRenderDrawBlendMode(ren, old_blend);
+}
+
+static void sdl_startup_error(SDL_Window *parent, const char *operation) {
+    char message[512];
+    snprintf(message, sizeof(message), "%s: %s", operation, SDL_GetError());
+    host_report_issue(1, parent, SDL_MESSAGEBOX_ERROR,
+                      "Moonstone couldn't start. Please check your display and audio devices.",
+                      NULL, message);
+}
+
+static void sdl_log_output(void *userdata, int category, SDL_LogPriority priority, const char *message) {
+    (void)userdata;
+    if (g_log) {
+        fprintf(g_log, "SDL category=%d priority=%d: %s\n", category, (int)priority, message);
+        if (priority >= SDL_LOG_PRIORITY_WARN) fflush(g_log);
+    }
+}
+
 static int run_sdl(int scale) {
     g_sdl_mode = 1;   /* live play: crash reporter may show a dialog box */
     SDL_SetMainReady();
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) { fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
+    SDL_LogSetOutputFunction(sdl_log_output, NULL);
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER | SDL_INIT_GAMECONTROLLER) != 0) {
+        sdl_startup_error(NULL, "SDL_Init"); SDL_Quit(); return 1;
+    }
     controls_load();
     /* open Paula host audio: 44100 Hz, signed-16 stereo, push ~882 frames/frame */
     SDL_AudioSpec want, have;
@@ -6572,10 +6761,13 @@ static int run_sdl(int scale) {
          * cushion survives the disk-load instead of draining to empty (the intro tick). */
         g_audio_paused = 1;
     }
-    else fprintf(stderr, "SDL_OpenAudioDevice: %s (continuing silent)\n", SDL_GetError());
+    else host_report_issue(1, NULL, SDL_MESSAGEBOX_WARNING,
+                           "Moonstone couldn't open an audio device. The game will continue without sound.",
+                           NULL, SDL_GetError());
     snprintf(g_wintitle, sizeof(g_wintitle), "Moonstone (native) - build %s", MOON_BUILD);
     SDL_Window  *win = SDL_CreateWindow(g_wintitle, SDL_WINDOWPOS_CENTERED,
                        SDL_WINDOWPOS_CENTERED, 320*scale, 256*scale, SDL_WINDOW_RESIZABLE);
+    if (!win) { sdl_startup_error(NULL, "SDL_CreateWindow"); SDL_Quit(); return 1; }
     /* Window/taskbar/alt-tab icon = the credit-scene moon (the embedded .ico only
      * covers the Explorer FILE icon; the running window needs SDL_SetWindowIcon). */
     if (win) {
@@ -6584,7 +6776,14 @@ static int run_sdl(int scale) {
         if (ic) { SDL_SetWindowIcon(win, ic); SDL_FreeSurface(ic); }
     }
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+    if (!ren) {
+        sdl_startup_error(win, "SDL_CreateRenderer"); SDL_DestroyWindow(win); SDL_Quit(); return 1;
+    }
     SDL_Texture *tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STREAMING, FB_W, FB_H);
+    if (!tex) {
+        sdl_startup_error(win, "SDL_CreateTexture");
+        SDL_DestroyRenderer(ren); SDL_DestroyWindow(win); SDL_Quit(); return 1;
+    }
     SDL_RenderSetLogicalSize(ren, 320, 256);
     /* Boot splash: decode the embedded RLE image once into a static texture.  Shown
      * during the (black) disk-load until the intro composes its first frame -- see the
@@ -6604,10 +6803,10 @@ static int run_sdl(int scale) {
     }
     int boot_splash_done = 0;
     /* open the first attached game controller (hot-plug handled in the loop) */
-    SDL_GameController *pad = NULL;
-    for (int i = 0; i < SDL_NumJoysticks(); i++)
-        if (SDL_IsGameController(i)) { pad = SDL_GameControllerOpen(i); if (pad) break; }
-    fprintf(stderr, "gamepad: %s\n", pad ? SDL_GameControllerName(pad) : "none (keyboard/mouse only)");
+    SDL_GameController *pad = controller_open_first();
+    ControllerNotice controller_notice = {0};
+    if (pad) controller_notice_show(&controller_notice, pad);
+    else if (g_log) fprintf(g_log, "gamepad: none (keyboard/mouse only)\n");
 
     /* keyboard + mouse-button state is held here and OR'd with the pad each
      * frame, so neither input source clobbers the other. */
@@ -6724,13 +6923,8 @@ static int run_sdl(int scale) {
                 if (dx >  8) dx =  8; else if (dx < -8) dx = -8;
                 if (dy >  8) dy =  8; else if (dy < -8) dy = -8;
                 g_mouse_dx += dx; g_mouse_dy += dy;
-            } else if (e.type == SDL_CONTROLLERDEVICEADDED) {
-                if (!pad && SDL_IsGameController(e.cdevice.which)) {
-                    pad = SDL_GameControllerOpen(e.cdevice.which);
-                    fprintf(stderr, "gamepad connected: %s\n", pad ? SDL_GameControllerName(pad) : "?");
-                }
-            } else if (e.type == SDL_CONTROLLERDEVICEREMOVED) {
-                if (pad) { SDL_GameControllerClose(pad); pad = NULL; }
+            } else if (e.type == SDL_CONTROLLERDEVICEADDED || e.type == SDL_CONTROLLERDEVICEREMOVED) {
+                controller_device_event(&pad, &controller_notice, &e.cdevice);
             }
         }
 
@@ -6975,14 +7169,14 @@ static int run_sdl(int scale) {
         if (!boot_splash_done && splash_tex) {
             SDL_RenderClear(ren);
             SDL_RenderCopy(ren, splash_tex, NULL, NULL);
-            SDL_RenderPresent(ren);
         } else {
             SDL_UpdateTexture(tex, NULL, disp, FB_W*3);
             SDL_Rect srcr = {0, 0, w, h};
             SDL_RenderClear(ren);
             SDL_RenderCopy(ren, tex, &srcr, NULL);
-            SDL_RenderPresent(ren);
         }
+        controller_notice_draw(ren, &controller_notice, SDL_GetTicks());
+        SDL_RenderPresent(ren);
         if (g_avlog && g_log) {   /* A/V-sync probe: when was WHICH emu frame actually presented */
             double tms = (double)SDL_GetPerformanceCounter() * 1000.0
                        / (double)SDL_GetPerformanceFrequency();
@@ -7088,12 +7282,13 @@ static int run_sdl(int scale) {
                     g_stop_reason, pc, (unsigned long long)g_icount, g_unmapped);
             fflush(g_log);
         }
-        char msg[512];
+        char hint[1400], msg[2048];
+        host_log_hint(hint, sizeof(hint));
         snprintf(msg, sizeof(msg),
                  "Moonstone stopped unexpectedly.\n\nReason: %s\npc=%06x  frame-ic=%llu\n\n"
-                 "A log was written next to the game:\n%s/moonstone.log\n\n"
-                 "Please send that file so this can be fixed.",
-                 g_stop_reason, pc, (unsigned long long)g_icount, g_exedir[0] ? g_exedir : ".");
+                 "%s\n\n"
+                 "Please report these details so this can be investigated.",
+                 g_stop_reason, pc, (unsigned long long)g_icount, hint);
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Moonstone", msg, win);
     }
     if (pad) SDL_GameControllerClose(pad);
@@ -7910,6 +8105,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--noaud1fix")) g_aud1_dmafix=0;            /* A/B: disable the AUD1 stray-DMACON-disable fix (0x4371c) */
         else if (!strcmp(argv[i],"--nochokefix")) g_choke_haul_fix=0;
         else if (!strcmp(argv[i],"--nochokestabfix")) g_choke_stab_fix=0;
+        else if (!strcmp(argv[i],"--nochokedeathfix")) g_choke_death_fix=0;
         else if (!strcmp(argv[i],"--noedgewalkfix")) g_edgewalk_fix=0;   /* A/B: disable the overland AI fallback-goal arrival fix */
         else if (!strcmp(argv[i],"--nochaseengagefix")) g_chase_engage_fix=0;   /* A/B: disable the chase-arrival engage fix */
         else if (!strcmp(argv[i],"--nodayendfix")) g_dayend_fix=0;   /* A/B: disable the town-exit day-end fix */
@@ -7987,8 +8183,16 @@ int main(int argc, char **argv) {
      * crash leaves 'moonstone.log' beside the game instead of vanishing silently. */
     char logbuf[1200];
     if (!logpath) { snprintf(logbuf, sizeof(logbuf), "%s/moonstone.log", g_exedir[0] ? g_exedir : "."); logpath = logbuf; }
+    g_log_path = logpath;
+    g_sdl_mode = sdl;  /* startup failures can precede run_sdl */
     g_log = fopen(logpath, "w");
-    if (!g_log) g_log = stderr;
+    if (!g_log) {
+        int open_error = errno;
+        g_log = stderr;
+        host_report_issue(sdl, NULL, SDL_MESSAGEBOX_WARNING,
+                          "Moonstone couldn't create its diagnostic log. Check that the folder exists and is writable. "
+                          "The game will continue without a log.", logpath, strerror(open_error));
+    }
 #ifdef _WIN32
     SetUnhandledExceptionFilter(moon_crash_filter);  /* self-report host faults */
 #endif
@@ -8019,12 +8223,18 @@ int main(int argc, char **argv) {
     if (wavpath) {
         g_wav = fopen(wavpath, "wb");
         if (g_wav) { wav_write_header(g_wav, 0); g_audio_on = 1; }
-        else fprintf(stderr, "could not open WAV %s\n", wavpath);
+        else host_report_issue(sdl, NULL, SDL_MESSAGEBOX_WARNING,
+                               "Moonstone couldn't create the audio recording. The game will continue without recording.",
+                               wavpath, strerror(errno));
     }
 
     Module m;
-    if (load_hunk(g_ram, RAM_SIZE, mod, base, 8, &m) != 0) {
-        fprintf(stderr, "failed to load %s\n", mod); return 1;
+    char module_error[512];
+    if (load_hunk(g_ram, RAM_SIZE, mod, base, 8, &m, module_error, sizeof(module_error)) != 0) {
+        host_report_issue(sdl, NULL, SDL_MESSAGEBOX_ERROR,
+                          "Moonstone couldn't load its startup data. The file may be damaged or unreadable.",
+                          mod, module_error);
+        return 1;
     }
     fprintf(g_log, "Loaded %s: %d segments, entry=%06x end=%06x\n", m.name, m.nseg, m.entry, m.end);
     for (int i=0;i<m.nseg;i++)
@@ -8056,7 +8266,12 @@ int main(int argc, char **argv) {
      * a mid-combat repro without hand-navigating the menus.  The warmed variant
      * (--loadstate-at FRAME) stays headless-only. */
     if (loadstate_path && loadstate_at < 0) {
-        if (!load_state(loadstate_path)) { fprintf(stderr, "loadstate failed: %s\n", loadstate_path); return 1; }
+        if (!load_state(loadstate_path)) {
+            host_report_issue(sdl, NULL, SDL_MESSAGEBOX_ERROR,
+                              "Moonstone couldn't load the saved game. The file may be missing, damaged, or incompatible.",
+                              loadstate_path, "load_state rejected the file");
+            return 1;
+        }
         fprintf(g_log, "--- loadstate %s -> ic=%llu pc=%06x ---\n",
                 loadstate_path, (unsigned long long)g_icount, (unsigned)m68k_get_reg(NULL,M68K_REG_PC));
     }
@@ -8071,7 +8286,12 @@ int main(int argc, char **argv) {
             else save_state(savestate_path);
         }
         if (loadstate_path && fr == loadstate_at) {   /* WARMED-UP load: mirrors the live F9 path */
-            if (!load_state(loadstate_path)) { fprintf(stderr, "loadstate failed\n"); return 1; }
+            if (!load_state(loadstate_path)) {
+                host_report_issue(0, NULL, SDL_MESSAGEBOX_ERROR,
+                                  "Moonstone couldn't load the saved game. The file may be missing, damaged, or incompatible.",
+                                  loadstate_path, "load_state rejected the file");
+                return 1;
+            }
             fprintf(g_log, "--- loadstate-at fr %d: %s -> ic=%llu pc=%06x ---\n",
                     fr, loadstate_path, (unsigned long long)g_icount, (unsigned)m68k_get_reg(NULL,M68K_REG_PC));
         }

@@ -1,6 +1,27 @@
 # Moonstone 2026 — Changes from the 1991 Amiga game
 
-_Last updated: 2026-08-10._
+_Last updated: 2026-09-05._
+
+## v1.1.0
+
+This release adds controller status overlays and native error dialogs, removes
+the separate command window, and corrects the fatal canopy-choke death display.
+
+## Window and controller status
+
+- The game opens without a separate command window.
+- A four-second overlay reports controller connections and disconnections,
+  including controllers already connected at startup. Details remain in the log.
+- Disconnecting an unused controller leaves the active controller connected;
+  disconnecting the active one switches to another available controller.
+- Startup-data and save-loading failures show an error dialog and write details
+  to the log. Audio-device, recording, and log-file failures show a warning.
+- Recording warnings stay above the game window until dismissed.
+
+## Combat feedback
+
+- A fatal canopy choke now keeps the knight's death pose visible until the
+  inventory opens. The dead knight can no longer resume stabbing upward.
 
 ## Confirmed historical Amiga bug fixes
 

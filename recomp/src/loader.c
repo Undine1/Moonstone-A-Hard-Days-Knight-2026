@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 typedef struct { uint32_t src, tgt; } Rel;
 
@@ -60,16 +61,16 @@ static int append_rel(Rel **rels, size_t *nrel, size_t *caprel,
 }
 
 int load_hunk(uint8_t *ram, uint32_t ram_size, const char *path,
-              uint32_t base, uint32_t align, Module *out) {
+              uint32_t base, uint32_t align, Module *out, char *error, size_t error_size) {
     FILE *f = NULL;
     uint8_t *d = NULL;
     Rel *rels = NULL;
     size_t nrel = 0, caprel = 0;
     int rc = -2;
+    if (error && error_size) error[0] = '\0';
 
 #define HUNK_FAIL(code, ...) do { \
-    fprintf(stderr, "%s: ", path ? path : "load_hunk"); \
-    fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); \
+    if (error && error_size) snprintf(error, error_size, __VA_ARGS__); \
     rc = (code); goto done; \
 } while (0)
 
@@ -78,7 +79,7 @@ int load_hunk(uint8_t *ram, uint32_t ram_size, const char *path,
     if (base > ram_size) HUNK_FAIL(-4, "base 0x%x exceeds RAM size 0x%x", base, ram_size);
 
     f = fopen(path, "rb");
-    if (!f) HUNK_FAIL(-1, "cannot open");
+    if (!f) HUNK_FAIL(-1, "cannot open: %s", strerror(errno));
     if (fseek(f, 0, SEEK_END) != 0) HUNK_FAIL(-2, "cannot seek to end");
     long fsz_long = ftell(f);
     if (fsz_long < 0) HUNK_FAIL(-2, "cannot determine file size");

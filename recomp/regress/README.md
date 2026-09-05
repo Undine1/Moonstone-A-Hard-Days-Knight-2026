@@ -9,6 +9,14 @@ python recomp/regress/check.py       # run all goldens -> PASS / FAIL
 
 Exit code is non-zero if anything regressed (usable in CI / a pre-push hook).
 
+Console-free startup/dialog checks and the audit of former console users are
+documented in [console-audit.md](console-audit.md).
+
+`python recomp/regress/check_choke_death.py` replays the frozen canopy choke
+through player death, attempts to stab after death, and save/reload. It also
+checks that living escape behavior and death-to-inventory timing are unchanged.
+Pass `--output recomp/build/choke-review` to retain frame dumps for visual review.
+
 ## What it checks
 
 - **`ramfnv`** — cold-boots the engine to a fixed frame and FNV-1a hashes all of RAM.
