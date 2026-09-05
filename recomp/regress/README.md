@@ -17,6 +17,10 @@ through player death, attempts to stab after death, and save/reload. It also
 checks that living escape behavior and death-to-inventory timing are unchanged.
 Pass `--output recomp/build/choke-review` to retain frame dumps for visual review.
 
+`python recomp/regress/check_practice_input.py` boots into Practice and checks
+movement, attack, released controls, damage, and save/reload for the second human
+knight. Disabled-fix comparisons must reproduce the former input leakage.
+
 ## What it checks
 
 - **`ramfnv`** — cold-boots the engine to a fixed frame and FNV-1a hashes all of RAM.

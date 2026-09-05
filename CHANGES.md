@@ -1,6 +1,15 @@
 # Moonstone 2026 — Changes from the 1991 Amiga game
 
-_Last updated: 2026-09-05._
+_Last updated: 2026-09-06._
+
+## v1.2.0
+
+- Practice's second knight stays idle without player-two input. Mouse movement,
+  menu controls, and player-one attacks no longer make it wander or attack.
+  The same input isolation applies to player-two knights in campaign duels.
+- Added regression checks for practice movement, attacks, damage, and save/load.
+  The port still supports one player's controls; separate second-player controls
+  are not included in this release.
 
 ## v1.1.0
 

@@ -43,7 +43,7 @@
 
 /* Project identity / attribution.  Printed at startup (to the log) and via
  * --version; also serves as the binary's attribution string. */
-#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.1.0 - " \
+#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.2.0 - " \
     "no-emulator port of the Amiga 1991 original - (C) 2026 Undine1, " \
     "github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026 - GPL-3.0"
 /* Compile timestamp, shown in the window title + log so it's unambiguous WHICH
@@ -3263,6 +3263,7 @@ static int      g_hide_parity_fix = 1; /* ROOT FIX 2026-07-03 (vanish-in-combat,
 #define LIN_RETAIL  1
 #define LIN_UNKNOWN 2
 static int g_lineage = LIN_CRACKED;
+static int g_port0_input_fix = 1; /* keep menu-mouse input out of player-two combat controls */
 /* fingerprint: the AI knife-restock loop's two size-suffix bytes -- the known
  * discriminator between the builds (cracked: cmpi.w/subi.b; retail: cmpi.b/subi.w) */
 static void detect_lineage(const char *datadir) {
@@ -3670,6 +3671,25 @@ static const struct { uint32_t pc; uint16_t op16; uint32_t op32; } g_sfx_sites[]
 };
 
 void moon_instr_hook(unsigned int pc) {
+    /* The human fighter's input selector uses JOY0 for player two (selector 1).
+     * Practice explicitly assigns the green knight to that port in both disk
+     * lineages. Our host binds one player and mirrors directions/fire into the
+     * menu mouse; decoding those counters as a joystick leaves arbitrary held
+     * directions and makes that knight attack along with player one.
+     * Supply a released second joystick at the ACTOR input boundary, before
+     * the original selector runs. Pointer menus still need the real JOY0 mouse
+     * counters and click, so leave the shared hardware reader untouched. This
+     * also covers player-two knights in campaign duels, without changing AI.
+     * No host latch: old saves and quickloads take effect on the next input poll.
+     * --noport0fix restores the old input for regression comparisons. */
+    if (g_os && g_port0_input_fix && PC2(0x22fc4, 0x22f70)
+        && r16(pc) == 0x0c28u && r32(pc + 2) == 0x0001000bu
+        && r16(pc + 6) == 0x6702u && r16(pc + 8) == 0x3001u
+        && r16(pc + 10) == 0x4e75u) {
+        uint32_t actor = m68k_get_reg(NULL, M68K_REG_A0);
+        if (actor < RAM_SIZE - 0x0bu && r8(actor + 0x0bu) == 1)
+            m68k_set_reg(M68K_REG_D0, m68k_get_reg(NULL, M68K_REG_D0) & 0xffff0000u);
+    }
     /* Retail-parity data/same-size-code patches: re-assert periodically so a fresh
      * mog overlay (scene transition) gets re-patched within a few k instructions.
      * Guarded per-entry, so this is idempotent and inert off the cracked build. */
@@ -8060,6 +8080,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--diskdir")&&i+1<argc) { g_diskdir=argv[++i]; diskdir_set=1; }
         else if (!strcmp(argv[i],"--noautoswap")) g_autoswap=0;   /* disable seamless disk-swap */
         else if (!strcmp(argv[i],"--noswapskip")) g_swapskip=0;   /* show the (auto-confirmed) insert-disk prompt again */
+        else if (!strcmp(argv[i],"--noport0fix")) g_port0_input_fix=0; /* A/B: mouse counters leak into player-two combat input */
         else if (!strcmp(argv[i],"--noskipmenu")) g_skipmenu=0;   /* intro-skip lands at Mog launch again (loader black + title card shown) */
         else if (!strcmp(argv[i],"--nointrocut")) g_introcut=0;   /* watched intro waits through the loader black + title card again */
         else if (!strcmp(argv[i],"--avlog")) g_avlog=1;           /* diag: A/V-sync timestamps (presented frame vs audio push+queue) */

@@ -2,7 +2,7 @@
   MOONSTONE - A Hard Days Knight         native Windows port
 ================================================================
 
-Moonstone 2026 v1.1.0 - prebuilt Windows package. ADF files are not included.
+Moonstone 2026 v1.2.0 - prebuilt Windows package. ADF files are not included.
 
 
 ---------------------------------------------------------------
@@ -30,7 +30,7 @@ The game opens without a separate command window. A brief on-screen message
 shows when a controller connects or disconnects, including one already
 connected at startup. Diagnostic details are saved in moonstone.log.
 
-UPDATING FROM v1.0.0
+UPDATING FROM AN EARLIER VERSION
 Replace moonstone.exe and SDL2.dll in your existing game folder with the new
 copies. Keep your data folder, moonstone.sav, and customized controls.ini.
 The included controls.ini supplies defaults for a new installation.
@@ -42,6 +42,10 @@ The included controls.ini supplies defaults for a new installation.
 
   Edit controls.ini beside moonstone.exe and restart the game.
   Deleting it restores the defaults shown below.
+
+  PRACTICE
+    Control the blue knight. The green knight stays idle and reacts when hit.
+    Separate controls for a second player are not currently supported.
 
   SKIP THE INTRO
     Press Space, Enter, or Ctrl on the keyboard, or A, B, LB, RB, or RT

@@ -26,6 +26,9 @@ The included `README.txt` contains the controls and a short troubleshooting
 note. Keyboard and controller bindings can be changed in `controls.ini` beside
 the executable; changes take effect after restarting the game.
 
+Practice currently controls the blue knight. The green knight stays idle and
+reacts when hit, matching the original two-player mode with no second player.
+
 ## Highlights
 
 - Automatic disk swapping with no interruption.
