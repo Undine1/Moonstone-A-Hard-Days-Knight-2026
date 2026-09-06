@@ -16,7 +16,7 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
    - `Disk3.adf`
 5. Double-click **`moonstone.exe`**.
 
-Each ADF must be the standard 901,120-byte size. (top result on google)
+Each ADF must be the standard 901,120-byte size. (top result on google).
 This build requires 64-bit Windows.
 
 The included `README.txt` contains the controls and a short troubleshooting
