@@ -16,28 +16,20 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
    - `Disk3.adf`
 5. Double-click **`moonstone.exe`**.
 
-Each ADF must be the standard 901,120-byte size. The ADF files are not included.
-On first launch, the runtime extracts the required boot modules from Disk 1
-automatically. There is no installer or build process. The package
-is portable and requires 64-bit Windows; keep `moonstone.exe`, `SDL2.dll`, and
-the `data` folder together.
+Each ADF must be the standard 901,120-byte size. (top result on google)
+This build requires 64-bit Windows.
 
 The included `README.txt` contains the controls and a short troubleshooting
 note. Keyboard and controller bindings can be changed in `controls.ini` beside
 the executable; changes take effect after restarting the game.
 
-Practice currently controls the blue knight. The green knight stays idle and
-reacts when hit, matching the original two-player mode with no second player.
-
 ## Highlights
 
 - Automatic disk swapping with no interruption.
-- Skippable intro — by default, press Space, Enter, or Ctrl on the keyboard, or
+- Skippable intro; Press Space, Enter, or Ctrl on the keyboard, or
   A, B, LB, RB, or RT on a controller.
 - Complete and configurable keyboard and game-controller support, with optional
   mouse control.
-- Opens directly into the game window, with brief on-screen controller connection
-  and disconnection messages.
 - Quicksave and quickload anywhere, including during combat.
 - Faithful graphics and Paula audio through the custom OCS runtime.
 
@@ -66,14 +58,14 @@ go beyond retail v1.4 where its code remains fragile.
 The original game contains a disease mechanic. The disease drains hit points
 and removes one life at every day-end until the healer clears it. The manual
 warns that Ratmen carry a deadly disease and recommends treatment, but there is
-no mention of the specifics, nor is there any in-game feedback about this. I
+no mention of the specifics, nor is there any in-game feedback about this curse. I
 personally had no idea what was happening and thought it was a bug, and from the
 videos I watched, other people had the same experience. So I've decided to
 remove this feature from the game to spare everyone from similar confusion.
 
 ## Final notes
 
-Multiplayer has not been tested.
+Multiplayer is currently not functional, since this release only supports 1 active controller/keyboard. I could add this if there is demand for it. 
 
 If you enjoyed Moonstone 2026 and completed a playthrough without encountering
 any bugs, you are welcome to buy me a coffee:
