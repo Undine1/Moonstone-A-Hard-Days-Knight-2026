@@ -103,7 +103,7 @@ def main():
 
         passed = 0
 
-        def run_case(name, extra, expected, reason=None, live=True, env=None, missing_log=False, exit_code=1, log_hint=True, alternate_exe=None, owner_title=None):
+        def run_case(name, extra, expected, reason=None, live=True, env=None, missing_log=False, exit_code=1, log_hint=True, alternate_exe=None, owner_title=None, dialog_text=()):
             nonlocal passed
             log = no_dir / "unwritable.log" if missing_log else tmp / (name + ".log")
             cmd = base + ["--log", str(log)] + (["--sdl"] if live else []) + extra
@@ -128,6 +128,8 @@ def main():
                             i = len(seen)
                             assert i < len(expected), f"{name}: unexpected dialog: {body}"
                             assert expected[i] in body, f"{name}: wrong dialog: {body}"
+                            for marker in dialog_text:
+                                assert marker in body, f"{name}: missing dialog detail {marker}: {body}"
                             if missing_log:
                                 assert "No diagnostic log could be written" in body
                             else:
@@ -164,7 +166,16 @@ def main():
         startup = "couldn't load its startup data"
         saved = "couldn't load the saved game"
         recording = "couldn't create the audio recording"
-        run_case("missing-disk-dialog", ["--diskdir", str(no_dir)], ["Moonstone needs your three original"], "ADF disk images", log_hint=False)
+        run_case("missing-disk-dialog", ["--diskdir", str(no_dir)], ["Cannot open Disk 1 for reading"], "Cannot open Disk 1 for reading")
+        write_blocked = tmp / "write-blocked"
+        write_blocked.mkdir()
+        subprocess.run(["icacls", str(write_blocked), "/deny", "*S-1-1-0:(WD)"], check=True, capture_output=True)
+        try:
+            run_case("data-write-permission-dialog", ["--dataset", str(write_blocked)],
+                     ["Cannot create startup file"], "Cannot create startup file",
+                     dialog_text=(str(write_blocked) + "/nb", "Permission denied", "Check write access"))
+        finally:
+            subprocess.run(["icacls", str(write_blocked), "/remove:d", "*S-1-1-0"], check=True, capture_output=True)
         run_case("corrupt-module-dialog", ["--mod", str(bad)], [startup], "not HUNK_HEADER")
         run_case("missing-module-dialog", ["--mod", str(absent)], [startup], "cannot open")
         run_case("corrupt-save-dialog", ["--loadstate", str(bad)], [saved], "load_state rejected")

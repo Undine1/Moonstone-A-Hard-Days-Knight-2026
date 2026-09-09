@@ -23,11 +23,13 @@
 #include <string.h>
 #include <math.h>
 #include <errno.h>
+#include <stdarg.h>
 #ifdef _WIN32
 #include <windows.h>
 #include <io.h>
 #else
 #include <unistd.h>
+#include <sys/utsname.h>
 #endif
 #include "m68k.h"
 #include "loader.h"
@@ -43,7 +45,7 @@
 
 /* Project identity / attribution.  Printed at startup (to the log) and via
  * --version; also serves as the binary's attribution string. */
-#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.2.0 - " \
+#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.3.0 - " \
     "no-emulator port of the Amiga 1991 original - (C) 2026 Undine1, " \
     "github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026 - GPL-3.0"
 /* Compile timestamp, shown in the window title + log so it's unambiguous WHICH
@@ -341,6 +343,105 @@ static const char *g_stop_reason = "?";
 static uint32_t g_unmapped = 0;
 static FILE    *g_log;
 static const char *g_log_path;
+
+/* Run before dataset validation and SDL initialization so failed launches carry
+ * the same host information as successful ones. OS and process bitness differ
+ * for a 32-bit build on 64-bit Windows (or x64 code on ARM64). */
+static void host_log_system_info(void) {
+    FILE *dest = g_log ? g_log : stderr;
+#if defined(__aarch64__) || defined(_M_ARM64)
+    const char *process_arch = "ARM64";
+#elif defined(__x86_64__) || defined(_M_X64)
+    const char *process_arch = "x64";
+#elif defined(__i386__) || defined(_M_IX86)
+    const char *process_arch = "x86";
+#elif defined(__arm__) || defined(_M_ARM)
+    const char *process_arch = "ARM";
+#else
+    const char *process_arch = "unknown architecture";
+#endif
+    fprintf(dest, "PROCESS: %s, %u-bit; platform=%s\n", process_arch,
+            (unsigned)(sizeof(void *) * 8), SDL_GetPlatform());
+#ifdef _WIN32
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    HMODULE kernel = GetModuleHandleA("kernel32.dll");
+    typedef LONG (WINAPI *RtlGetVersionFn)(OSVERSIONINFOEXW *);
+    typedef BOOL (WINAPI *IsWow64Process2Fn)(HANDLE, USHORT *, USHORT *);
+    typedef const char * (__cdecl *WineVersionFn)(void);
+    typedef void (__cdecl *WineHostFn)(const char **, const char **);
+    RtlGetVersionFn get_version = ntdll ? (RtlGetVersionFn)GetProcAddress(ntdll, "RtlGetVersion") : NULL;
+    WineVersionFn wine_version = ntdll ? (WineVersionFn)GetProcAddress(ntdll, "wine_get_version") : NULL;
+    WineHostFn wine_host = ntdll ? (WineHostFn)GetProcAddress(ntdll, "wine_get_host_version") : NULL;
+    OSVERSIONINFOEXW version = {0};
+    version.dwOSVersionInfoSize = sizeof(version);
+    /* GetVersionEx can report a manifest-dependent compatibility version.
+     * RtlGetVersion provides the OS build; Windows 11 still uses NT 10.0. */
+    if (get_version && get_version(&version) == 0) {
+        const char *name = "Windows";
+        if (version.wProductType != VER_NT_WORKSTATION) name = "Windows Server";
+        else if (version.dwMajorVersion == 10 && version.dwMinorVersion == 0)
+            name = version.dwBuildNumber >= 22000 ? "Windows 11" : "Windows 10";
+        else if (version.dwMajorVersion == 6) {
+            switch (version.dwMinorVersion) {
+                case 0: name = "Windows Vista"; break;
+                case 1: name = "Windows 7"; break;
+                case 2: name = "Windows 8"; break;
+                case 3: name = "Windows 8.1"; break;
+            }
+        }
+        fprintf(dest, "OS: %s; version=%lu.%lu; build=%lu%s\n", name,
+                version.dwMajorVersion, version.dwMinorVersion, version.dwBuildNumber,
+                wine_version ? " (Windows version reported by Wine)" : "");
+    } else fprintf(dest, "OS: Windows; version/build unavailable\n");
+
+    USHORT process_machine = 0, native_machine = 0;
+    IsWow64Process2Fn get_machine = kernel ? (IsWow64Process2Fn)GetProcAddress(kernel, "IsWow64Process2") : NULL;
+    const char *arch_source = "IsWow64Process2";
+    if (!get_machine || !get_machine(GetCurrentProcess(), &process_machine, &native_machine)) {
+        SYSTEM_INFO info = {0};
+        GetNativeSystemInfo(&info);
+        arch_source = "GetNativeSystemInfo fallback";
+        switch (info.wProcessorArchitecture) {
+            case PROCESSOR_ARCHITECTURE_AMD64: native_machine = IMAGE_FILE_MACHINE_AMD64; break;
+            case PROCESSOR_ARCHITECTURE_INTEL: native_machine = IMAGE_FILE_MACHINE_I386; break;
+            case PROCESSOR_ARCHITECTURE_ARM64: native_machine = IMAGE_FILE_MACHINE_ARM64; break;
+            case PROCESSOR_ARCHITECTURE_ARM: native_machine = IMAGE_FILE_MACHINE_ARMNT; break;
+            case PROCESSOR_ARCHITECTURE_IA64: native_machine = IMAGE_FILE_MACHINE_IA64; break;
+        }
+    }
+    const char *os_arch = "unknown architecture/bitness";
+    switch (native_machine) {
+        case IMAGE_FILE_MACHINE_AMD64: os_arch = "x64, 64-bit"; break;
+        case IMAGE_FILE_MACHINE_I386: os_arch = "x86, 32-bit"; break;
+        case IMAGE_FILE_MACHINE_ARM64: os_arch = "ARM64, 64-bit"; break;
+        case IMAGE_FILE_MACHINE_ARMNT: os_arch = "ARM, 32-bit"; break;
+        case IMAGE_FILE_MACHINE_IA64: os_arch = "IA64, 64-bit"; break;
+    }
+    fprintf(dest, "OS ARCH: %s; source=%s%s\n", os_arch, arch_source,
+            wine_version ? " (Windows environment; host architecture may differ)" : "");
+    if (wine_version) {
+        const char *sysname = NULL, *release = NULL;
+        if (wine_host) wine_host(&sysname, &release);
+        const char *name = sysname && !strcmp(sysname, "Darwin") ? "macOS (Darwin)" : sysname;
+        const char *wine = wine_version();
+        fprintf(dest, "COMPATIBILITY: Wine %s; host=%s; host_kernel=%s\n",
+                wine ? wine : "unknown", name ? name : "unavailable", release ? release : "unavailable");
+    }
+#else
+    struct utsname info;
+    if (uname(&info) == 0) {
+        const char *bits = "bitness unknown";
+        if (!strcmp(info.machine, "x86_64") || !strcmp(info.machine, "amd64") ||
+            !strcmp(info.machine, "aarch64") || !strcmp(info.machine, "arm64")) bits = "64-bit";
+        else if (!strcmp(info.machine, "i386") || !strcmp(info.machine, "i686") ||
+                 !strcmp(info.machine, "armv7l")) bits = "32-bit";
+        fprintf(dest, "OS: %s; kernel=%s %s\nOS ARCH: %s, %s\n",
+                !strcmp(info.sysname, "Darwin") ? "macOS" : info.sysname,
+                info.sysname, info.release, info.machine, bits);
+    } else fprintf(dest, "OS: %s; kernel/architecture unavailable\n", SDL_GetPlatform());
+#endif
+    fflush(dest);
+}
 
 static void host_log_hint(char *out, size_t size) {
     if (g_log && g_log != stderr && !ferror(g_log))
@@ -1030,17 +1131,46 @@ static void disk_load_adfs(void) {
 static uint32_t ofs_be32(const uint8_t *p) {
     return ((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3];
 }
-static uint8_t *adf_ofs_extract(const uint8_t *adf, long sz, const char *name, long *outlen) {
+static char g_setup_reason[768], g_setup_path[1300];
+static int g_setup_priority;
+
+/* Keep the most actionable failure for the dialog; retain every finding in
+ * the log. Missing modules should not hide a disk or write-access failure. */
+static void setup_problem(int priority, const char *path, const char *fmt, ...) {
+    char reason[768];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(reason, sizeof(reason), fmt, ap);
+    va_end(ap);
+    if (g_log) fprintf(g_log, "SETUP CHECK: %s\n  File: %s\n", reason, path);
+    if (priority > g_setup_priority) {
+        g_setup_priority = priority;
+        snprintf(g_setup_reason, sizeof(g_setup_reason), "%s", reason);
+        snprintf(g_setup_path, sizeof(g_setup_path), "%s", path);
+    }
+}
+
+static uint8_t *adf_ofs_extract(const uint8_t *adf, long sz, const char *name, long *outlen,
+                               char *reason, size_t reason_size) {
     const long BS = 512;
-    if (sz < 882*BS || memcmp(adf, "DOS", 3) != 0 || (adf[3] & 1)) return NULL;
+    *outlen = 0;
+#define OFS_FAIL(...) do { snprintf(reason, reason_size, __VA_ARGS__); return NULL; } while (0)
+    if (sz != ADF_BYTES) OFS_FAIL("incorrect disk size: %ld bytes", sz);
+    if (memcmp(adf, "DOS", 3) != 0) OFS_FAIL("unsupported disk format: no AmigaDOS signature");
+    if (adf[3] & 1) OFS_FAIL("unsupported FFS filesystem; this extractor requires OFS");
     long nblk = sz / BS;
     const uint8_t *rb = adf + 880*BS;                 /* DD root block */
+    if (ofs_be32(rb) != 2 || ofs_be32(rb + BS-4) != 1)
+        OFS_FAIL("invalid OFS root directory at block 880");
+    uint8_t visited[ADF_BYTES / 512] = {0};
     long stk[2048]; int sp = 0, namelen = (int)strlen(name);
     for (int i = 0; i < 72; i++) { uint32_t e = ofs_be32(rb+24+i*4); if (e && sp < 2048) stk[sp++] = e; }
     long found = -1;
     while (sp > 0 && found < 0) {
         long b = stk[--sp];
-        if (b < 2 || b >= nblk) continue;
+        if (b < 2 || b >= nblk) OFS_FAIL("directory block %ld is outside the disk", b);
+        if (visited[b]) OFS_FAIL("cyclic or repeated directory block %ld", b);
+        visited[b] = 1;
         const uint8_t *hb = adf + b*BS;
         uint32_t nxt = ofs_be32(hb + BS-16);          /* hash chain */
         if (nxt && sp < 2046) stk[sp++] = nxt;
@@ -1055,69 +1185,161 @@ static uint8_t *adf_ofs_extract(const uint8_t *adf, long sz, const char *name, l
         }
         if (eq) found = b;
     }
-    if (found < 0) return NULL;
+    if (found < 0) OFS_FAIL("file '%s' is absent from the disk's root directory", name);
     const uint8_t *hb = adf + found*BS;
     long fsize = (long)ofs_be32(hb + BS-188);          /* byte_size @ 0x144 */
-    if (fsize < 0 || fsize > sz) return NULL;
+    if (fsize <= 0 || fsize > sz) OFS_FAIL("invalid declared file size: %ld bytes", fsize);
     uint8_t *out = (uint8_t*)malloc(fsize > 0 ? fsize : 1);
-    if (!out) return NULL;
-    long got = 0; uint32_t nd = ofs_be32(hb + 16); int guard = 0;   /* first_data block */
-    while (nd && nd < (uint32_t)nblk && got < fsize && guard < 200000) {
+    if (!out) OFS_FAIL("not enough memory for %ld bytes", fsize);
+    memset(visited, 0, sizeof(visited));
+    long got = 0; uint32_t nd = ofs_be32(hb + 16);   /* first_data block */
+    while (got < fsize) {
+        if (nd < 2 || nd >= (uint32_t)nblk || visited[nd]) {
+            free(out);
+            OFS_FAIL("incomplete or cyclic file chain: recovered %ld of %ld bytes (block %u)", got, fsize, nd);
+        }
+        visited[nd] = 1;
         const uint8_t *db = adf + (long)nd*BS;
         long dlen = (long)ofs_be32(db + 12);           /* data_size in this block */
         uint32_t next = ofs_be32(db + 16);             /* next_data block */
-        if (dlen < 0 || dlen > 488) dlen = 488;
-        if (got + dlen > fsize) dlen = fsize - got;
+        if (ofs_be32(db) != 8 || dlen <= 0 || dlen > 488 || dlen > fsize - got) {
+            free(out);
+            OFS_FAIL("invalid OFS data block %u: payload %ld bytes", nd, dlen);
+        }
         memcpy(out + got, db + 24, dlen);
-        got += dlen; nd = next; guard++;
+        got += dlen; nd = next;
     }
     *outlen = got;
     return out;
+#undef OFS_FAIL
 }
 
 /* If the four boot modules aren't present as files in `datadir`, extract them
  * from the .adf images in `adfdir` (Disk 1 holds all four) and write them there.
  * One-time, on first launch; afterwards the files exist and this is a no-op.  So
  * a player only has to drop in the three .adf disk images. */
-static void ensure_boot_modules(const char *datadir, const char *adfdir) {
+static int ensure_boot_modules(const char *datadir, const char *adfdir) {
     static const char *mods[4] = { "nb", "program", "mog", "crystal" };
     static const char *full[3] = {
         "Moonstone - A Hard Days Knight_Disk1.adf",
         "Moonstone - A Hard Days Knight_Disk2.adf",
         "Moonstone - A Hard Days Knight_Disk3.adf" };
     static const char *shrt[3] = { "Disk1.adf", "Disk2.adf", "Disk3.adf" };
-    int need = 0;
+    int missing[4] = {0}, need = 0, ready = 1;
+    g_setup_priority = 0;
+    g_setup_reason[0] = g_setup_path[0] = 0;
     for (int m = 0; m < 4; m++) {
         char p[1300]; snprintf(p, sizeof(p), "%s/%s", datadir, mods[m]);
-        FILE *f = fopen(p, "rb"); if (f) fclose(f); else need = 1;
+        errno = 0;
+        FILE *f = fopen(p, "rb");
+        if (!f) {
+            int err = errno;
+            if (err == ENOENT) {
+                missing[m] = 1; need = 1;
+                if (g_log) fprintf(g_log, "SETUP MODULE: missing '%s'; will try disk extraction\n", p);
+            } else {
+                setup_problem(5, p, "Cannot read startup file: %s (errno=%d).", strerror(err), err);
+                ready = 0;
+            }
+            continue;
+        }
+        long size = -1;
+        errno = 0;
+        if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
+        int err = errno;
+        fclose(f);
+        if (size <= 0) {
+            setup_problem(3, p, "Startup file is empty or unreadable (size=%ld bytes, errno=%d). Existing file was preserved.", size, err);
+            ready = 0;
+        } else if (g_log) fprintf(g_log, "SETUP MODULE: readable '%s' (%ld bytes)\n", p, size);
     }
-    if (!need) return;
     for (int d = 0; d < 3; d++) {
         char ap[1300]; FILE *af = NULL;
+        errno = 0;
         snprintf(ap, sizeof(ap), "%s/%s", adfdir, full[d]); af = fopen(ap, "rb");
+        int full_error = errno;
+        if (!af && full_error != ENOENT && g_log)
+            fprintf(g_log, "SETUP DISK: cannot open '%s': %s (errno=%d); trying short filename\n", ap, strerror(full_error), full_error);
         if (!af) { snprintf(ap, sizeof(ap), "%s/%s", adfdir, shrt[d]); af = fopen(ap, "rb"); }
-        if (!af) continue;
-        fseek(af, 0, SEEK_END); long sz = ftell(af); fseek(af, 0, SEEK_SET);
-        if (sz <= 0) { fclose(af); continue; }
+        if (!af) {
+            int err = errno;
+            setup_problem(4, ap, "Cannot open Disk %d for reading: %s (errno=%d). Also tried '%s'.", d+1, strerror(err), err, full[d]);
+            ready = 0; continue;
+        }
+        long sz = -1;
+        errno = 0;
+        if (fseek(af, 0, SEEK_END) == 0) sz = ftell(af);
+        int err = errno;
+        if (sz != ADF_BYTES) {
+            setup_problem(4, ap, "Disk %d has %ld bytes; expected exactly %d bytes (errno=%d).", d+1, sz, ADF_BYTES, err);
+            fclose(af); ready = 0; continue;
+        }
+        if (g_log) fprintf(g_log, "SETUP DISK: readable '%s' (%ld bytes; expected %d)\n", ap, sz, ADF_BYTES);
+        if (!need) { fclose(af); continue; }
+        errno = 0;
+        if (fseek(af, 0, SEEK_SET) != 0) {
+            err = errno;
+            setup_problem(4, ap, "Cannot seek in Disk %d: %s (errno=%d).", d+1, strerror(err), err);
+            fclose(af); ready = 0; continue;
+        }
         uint8_t *adf = (uint8_t*)malloc(sz);
-        if (!adf) { fclose(af); continue; }
-        sz = (long)fread(adf, 1, sz, af); fclose(af);
+        if (!adf) {
+            setup_problem(4, ap, "Not enough memory to read Disk %d (%ld bytes).", d+1, sz);
+            fclose(af); ready = 0; continue;
+        }
+        errno = 0;
+        long got = (long)fread(adf, 1, sz, af);
+        err = errno;
+        int read_error = ferror(af);
+        fclose(af);
+        if (got != sz || read_error) {
+            setup_problem(4, ap, "Disk %d read failed: %ld of %ld bytes, %s (errno=%d).", d+1, got, sz, strerror(err), err);
+            free(adf); ready = 0; continue;
+        }
+        uint32_t fingerprint = 2166136261u;
+        for (long i = 0; i < sz; i++) { fingerprint ^= adf[i]; fingerprint *= 16777619u; }
+        if (g_log) fprintf(g_log, "SETUP DISK: Disk %d fnv1a32=%08x signature=%02x%02x%02x%02x\n", d+1, fingerprint, adf[0], adf[1], adf[2], adf[3]);
         for (int m = 0; m < 4; m++) {
+            if (!missing[m]) continue;
             char p[1300]; snprintf(p, sizeof(p), "%s/%s", datadir, mods[m]);
-            FILE *chk = fopen(p, "rb"); if (chk) { fclose(chk); continue; }  /* already have it */
-            long olen = 0; uint8_t *bytes = adf_ofs_extract(adf, sz, mods[m], &olen);
-            if (bytes) {
-                if (olen > 0) {
-                    FILE *of = fopen(p, "wb");
-                    if (of) { fwrite(bytes, 1, olen, of); fclose(of);
-                              if (g_log) fprintf(g_log, "extracted boot module '%s' (%ld B) from %s\n", mods[m], olen, ap); }
-                    else if (g_log) fprintf(g_log, "WARN: cannot write '%s' (is the data folder read-only?)\n", p);
-                }
-                free(bytes);
+            char reason[256];
+            long olen = 0; uint8_t *bytes = adf_ofs_extract(adf, sz, mods[m], &olen, reason, sizeof(reason));
+            if (!bytes) {
+                if (g_log) fprintf(g_log, "SETUP EXTRACT: '%s' from '%s': %s\n", mods[m], ap, reason);
+                continue;
             }
+            /* Exclusive creation never truncates an existing user's file. Check
+             * both buffered writes and close; failed outputs must not be cached. */
+            errno = 0;
+            FILE *of = fopen(p, "wbx");
+            if (!of) {
+                err = errno;
+                setup_problem(5, p, "Cannot create startup file: %s (errno=%d). Check write access to the data folder.", strerror(err), err);
+                free(bytes); continue;
+            }
+            errno = 0;
+            size_t written = fwrite(bytes, 1, (size_t)olen, of);
+            int write_error = ferror(of);
+            err = errno;
+            if (fclose(of) != 0) { write_error = 1; if (!err) err = errno; }
+            free(bytes);
+            if (written != (size_t)olen || write_error) {
+                setup_problem(5, p, "Cannot finish writing startup file: %lu of %ld bytes, %s (errno=%d). Check free space and write access.", (unsigned long)written, olen, strerror(err), err);
+                if (remove(p) != 0 && g_log) fprintf(g_log, "SETUP CLEANUP: cannot remove incomplete '%s': %s\n", p, strerror(errno));
+                continue;
+            }
+            missing[m] = 0;
+            if (g_log) fprintf(g_log, "SETUP EXTRACT: wrote and closed '%s' (%ld bytes) from '%s'; write access confirmed\n", p, olen, ap);
         }
         free(adf);
     }
+    for (int m = 0; m < 4; m++) if (missing[m]) {
+        char p[1300]; snprintf(p, sizeof(p), "%s/%s", datadir, mods[m]);
+        setup_problem(1, p, "Required startup file '%s' could not be extracted from the supplied disks. See the extraction results in the log.", mods[m]);
+        ready = 0;
+    }
+    if (g_log) { fprintf(g_log, "SETUP RESULT: %s\n", ready ? "ready" : "failed"); fflush(g_log); }
+    return ready;
 }
 
 /* ---- user-editable live controls ------------------------------------------
@@ -1486,52 +1708,13 @@ static int control_pad_strength(SDL_GameController *pad, ControlAction action) {
     return strongest;
 }
 
-static long data_file_size(const char *dir, const char *name) {
-    if (!dir || !*dir || !name || !*name) return -1;
-    char p[1300];
-    int n = snprintf(p, sizeof(p), "%s/%s", dir, name);
-    if (n < 0 || (size_t)n >= sizeof(p)) return -1;
-    FILE *f = fopen(p, "rb");
-    if (!f) return -1;
-    long size = -1;
-    if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
-    fclose(f);
-    return size;
-}
-
-/* A normal double-click starts before SDL has opened a window.  Validate the
- * complete player-supplied dataset here so missing/misnamed disks produce an
- * actionable setup message instead of a silent loader exit or a later stall. */
-static int game_data_ready(const char *datadir, const char *adfdir) {
-    static const char *mods[4] = { "nb", "program", "mog", "crystal" };
-    static const char *full[3] = {
-        "Moonstone - A Hard Days Knight_Disk1.adf",
-        "Moonstone - A Hard Days Knight_Disk2.adf",
-        "Moonstone - A Hard Days Knight_Disk3.adf" };
-    static const char *shrt[3] = { "Disk1.adf", "Disk2.adf", "Disk3.adf" };
-    for (int m = 0; m < 4; m++)
-        if (data_file_size(datadir, mods[m]) <= 0) return 0;
-    for (int d = 0; d < 3; d++) {
-        long size = data_file_size(adfdir, full[d]);
-        if (size < 0) size = data_file_size(adfdir, shrt[d]);
-        if (size != ADF_BYTES) return 0;
-    }
-    return 1;
-}
-
 static void report_game_data_error(int show_gui) {
-    static const char msg[] =
-        "Moonstone needs your three original, uncompressed ADF disk images.\n\n"
-        "Place them directly in the data folder next to moonstone.exe and name them:\n\n"
-        "Disk1.adf\nDisk2.adf\nDisk3.adf\n\n"
-        "Each file must be 901,120 bytes. The data folder must be writable on first launch.";
-    if (g_log) { fprintf(g_log, "SETUP ERROR: %s\n", msg); fflush(g_log); }
-    fprintf(stderr, "%s\n", msg);
-#ifdef _WIN32
-    if (show_gui) MessageBoxA(NULL, msg, "Moonstone - setup required", MB_OK | MB_ICONERROR);
-#else
-    (void)show_gui;
-#endif
+    char msg[1200];
+    snprintf(msg, sizeof(msg), "Moonstone couldn't prepare its game data.\n\n%s",
+             g_setup_reason[0] ? g_setup_reason : "The startup data check failed.");
+    if (g_log) fprintf(g_log, "SETUP ERROR: %s\n", g_setup_reason);
+    host_report_issue(show_gui, NULL, SDL_MESSAGEBOX_ERROR, msg,
+                      g_setup_path[0] ? g_setup_path : NULL, NULL);
 }
 
 /* ======================================================= Paula 4-ch audio */
@@ -8186,7 +8369,7 @@ int main(int argc, char **argv) {
             if (dir_has_data(cand))                       dd = cand;
             else if (dir_has_data("../portable/moonstone_hdd")) dd = "../portable/moonstone_hdd";
             else if (dir_has_data("data"))                dd = "data";
-            else                                          dd = "../portable/moonstone_hdd";
+            else                                          dd = cand;
             snprintf(g_dataset_buf, sizeof(g_dataset_buf), "%s", dd);
         }
         snprintf(datadir, sizeof(datadir), "%s", g_dataset_buf);
@@ -8219,13 +8402,14 @@ int main(int argc, char **argv) {
 #endif
     fprintf(g_log, "%s\n", MOON_ATTRIB);
     fprintf(g_log, "build: %s\n", MOON_BUILD);
+    host_log_system_info();
     fprintf(g_log, "exedir=%s dataset=%s diskdir=%s mod=%s\n", g_exedir, g_dataset, g_diskdir, mod);
 
     /* Convenience: if the player supplied only the three .adf disk images, pull
      * the four boot modules (nb/program/mog/crystal) out of Disk 1's filesystem
      * so they don't have to extract them by hand.  No-op once they exist. */
-    ensure_boot_modules(g_dataset, g_diskdir);
-    if (g_os && !game_data_ready(g_dataset, g_diskdir)) {
+    int boot_data_ready = ensure_boot_modules(g_dataset, g_diskdir);
+    if (g_os && !boot_data_ready) {
         report_game_data_error(sdl);
         return 1;
     }

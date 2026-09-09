@@ -2,6 +2,32 @@
  * Includes the actual runtime so warning paths and log routing stay identical. */
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+
+static int probe_data_failure;
+static FILE *probe_data_output;
+static FILE *probe_fopen(const char *path, const char *mode) {
+    FILE *file = fopen(path, mode);
+    if (probe_data_failure && !strcmp(mode, "wbx")) probe_data_output = file;
+    return file;
+}
+static size_t probe_fwrite(const void *data, size_t size, size_t count, FILE *file) {
+    if (probe_data_failure == 1 && file == probe_data_output) {
+        size_t written = fwrite(data, size, count / 2, file);
+        errno = ENOSPC;
+        return written;
+    }
+    return fwrite(data, size, count, file);
+}
+static int probe_fclose(FILE *file) {
+    int target = file == probe_data_output;
+    int result = fclose(file);
+    if (target) probe_data_output = NULL;
+    if (target && probe_data_failure == 2) { errno = ENOSPC; return EOF; }
+    return result;
+}
 
 static SDL_AudioDeviceID probe_audio_open(const char *device, int capture,
                                          const SDL_AudioSpec *want, SDL_AudioSpec *have, int changes) {
@@ -14,15 +40,23 @@ static SDL_AudioDeviceID probe_audio_open(const char *device, int capture,
 }
 
 #define SDL_OpenAudioDevice probe_audio_open
+#define fopen probe_fopen
+#define fwrite probe_fwrite
+#define fclose probe_fclose
 #define main moonstone_main
 #include "../src/moon.c"
 #undef main
+#undef fopen
+#undef fwrite
+#undef fclose
 
 int main(int argc, char **argv) {
     const char *log = NULL, *record_dir = NULL;
     for (int i = 1; i + 1 < argc; i++) {
         if (!strcmp(argv[i], "--log")) log = argv[i + 1];
         if (!strcmp(argv[i], "--probe-record-dir")) record_dir = argv[i + 1];
+        if (!strcmp(argv[i], "--probe-data-failure"))
+            probe_data_failure = !strcmp(argv[i + 1], "write") ? 1 : 2;
     }
     if (!log) return 2; /* every probe must use an explicit scratch log */
     if (!record_dir) return moonstone_main(argc, argv);

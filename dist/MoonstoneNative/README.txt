@@ -2,7 +2,7 @@
   MOONSTONE - A Hard Days Knight         native Windows port
 ================================================================
 
-Moonstone 2026 v1.2.0 - prebuilt Windows package. ADF files are not included.
+Moonstone 2026 v1.3.0 - prebuilt Windows package. ADF files are not included.
 
 
 ---------------------------------------------------------------
@@ -98,6 +98,11 @@ make sure SDL2.dll is still next to moonstone.exe.
 If startup data or a requested save cannot be loaded, an error dialog names
 the file. Details are written to moonstone.log (or the path given by --log).
 Warnings also appear if sound, audio recording, or the log file is unavailable.
+
+For setup errors, the log lists the operating system and 32/64-bit architecture,
+disk paths and exact sizes, missing startup files, extraction failures, and
+operating-system read/write errors. Send the
+log immediately after the failed launch when reporting a problem.
 
 Project page and native runtime source:
 https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026

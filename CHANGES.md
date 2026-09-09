@@ -1,6 +1,17 @@
 # Moonstone 2026 — Changes from the 1991 Amiga game
 
-_Last updated: 2026-09-06._
+_Last updated: 2026-09-10._
+
+## v1.3.0
+
+- Startup logs include the OS name/version/build and separate OS/process
+  architecture and bitness. Wine is identified with its host OS when available.
+- Startup errors now name the failing file and explain read/write-access
+  failures, incorrect disk sizes, and missing startup files. The log records
+  disk paths, sizes, fingerprints during extraction, and detailed extraction
+  results, including unsupported formats and damaged file chains.
+- Incomplete module extraction and failed writes are detected. Existing startup
+  files are preserved, and newly created incomplete outputs are removed when possible.
 
 ## v1.2.0
 

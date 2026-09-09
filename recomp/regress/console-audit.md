@@ -9,7 +9,7 @@ are unchanged.
 | --- | --- |
 | Controller startup, connection, removal | File log plus four-second overlay. Virtual-pad checks cover initial connection, unused-pad removal, failover, held-input release, and 32 rapid reconnect cycles. |
 | Hunk loader failure | Caller receives the exact parser/I/O reason; native startup dialog names the file. Reason is flushed to the selected log before dismissal; redirected stderr remains available. Missing and corrupt modules tested. |
-| Missing disks | Existing native setup dialog and log retained and tested. |
+| Missing disks / setup failures | Native dialog names the failing file and reason, plus the actual log path. Logs distinguish missing/read-denied files, incorrect byte counts, unsupported filesystems, missing modules, damaged file chains, and create/write/close failures. An actual denied folder write is checked in both headless and native-dialog tests. |
 | Failed `--loadstate` / `--loadstate-at` | Logged error and redirected stderr. Live startup also shows a native dialog and exits with failure. Missing/corrupt cold saves and corrupt warm saves tested. |
 | Failed `--wav` output | Warning dialog during live startup, detailed log, and stderr. Existing continue-without-recording behavior retained. |
 | Log-open failure / stderr fallback | Visible live-startup warning; explains that no diagnostic log is available. Continues without a log. Does not claim that a file was written. |
@@ -41,7 +41,7 @@ python recomp/regress/check.py --exe C:/Users/Ins/Desktop/vscode/moonstone/recom
 python recomp/regress/check_startup_errors.py
 ```
 
-The startup suite has 16 checks against the actual executable, including native
+The startup suite has 17 checks against the actual executable, including native
 dialogs. It creates temporary bad inputs/logs, dismisses only dialogs belonging
 to its own child processes, checks logs before dismissal, and verifies exit
 codes. It never writes to the operator's log or saves.
@@ -66,8 +66,15 @@ $probeSources = @(
 python recomp/regress/check_startup_errors.py --host-probe-exe recomp/build/host_error_probe.exe
 ```
 
-This runs 18 checks. Never package the probe executable; the normal build and
+This runs 19 checks. Never package the probe executable; the normal build and
 release scripts compile only the production source.
+
+`python recomp/regress/check_data_setup.py --host-probe-exe recomp/build/host_error_probe.exe`
+runs 19 additional data/extraction checks. Disk-write permission tests apply an
+ACL only to private temporary directories and restore it in a finally block.
+The probe's write/close failures simulate full-disk errors through the real
+extraction path and check that partial outputs are removed. No fault injection
+is compiled into the production executable.
 
 C compilation/typechecking and the 13-row game harness are required alongside
 these checks. ESLint was attempted, but this C repository has no ESLint config.

@@ -12,6 +12,13 @@ Exit code is non-zero if anything regressed (usable in CI / a pre-push hook).
 Console-free startup/dialog checks and the audit of former console users are
 documented in [console-audit.md](console-audit.md).
 
+`python recomp/regress/check_data_setup.py` checks first-run disk extraction,
+missing and invalid disks/modules, filesystem and file-chain diagnostics, read
+denials, and actual folder write denials in isolated scratch directories.
+Pass `--host-probe-exe recomp/build/host_error_probe.exe` to also verify partial
+writes and close failures. The Windows permission tests restore their temporary
+directory ACLs before cleanup; source disks and installed files are read only.
+
 `python recomp/regress/check_choke_death.py` replays the frozen canopy choke
 through player death, attempts to stab after death, and save/reload. It also
 checks that living escape behavior and death-to-inventory timing are unchanged.
