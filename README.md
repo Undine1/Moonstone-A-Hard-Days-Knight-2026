@@ -9,11 +9,7 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 1. Open the [Releases page](https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026/releases).
 2. Download **`Moonstone-2026-Windows-x64.zip`**.
 3. Extract the complete ZIP.
-4. Supply your own ADF files into the included `data` folder. The ADF files
-   should come in a batch of three disk files and should be named specifically:
-   - `Disk1.adf`
-   - `Disk2.adf`
-   - `Disk3.adf`
+4. Supply your own ADF files into the included `data` folder. You can find all 3 disk files on wowroms. **note**: other releases can be different and may not work.
 5. Double-click **`moonstone.exe`**.
 
 Each ADF must be the standard 901,120-byte size. (wowroms has the right ones).
