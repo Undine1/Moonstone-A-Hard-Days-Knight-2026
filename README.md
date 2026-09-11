@@ -9,7 +9,7 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 1. Open the [Releases page](https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026/releases).
 2. Download **`Moonstone-2026-Windows-x64.zip`**.
 3. Extract the complete ZIP.
-4. Grab Moonstone Disk1, Disk2, Disk3 on **`wowroms`** and extract them into the **`Data`** folder
+4. Grab Moonstone Disk1, Disk2, Disk3 ADF files on **`wowroms`** and extract them into the **`Data`** folder
 5. Double-click **`moonstone.exe`**.
 
 - This build requires 64-bit Windows. 
