@@ -14,7 +14,7 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 
 - This build requires 64-bit Windows. 
 - Disk files should be sourced from wowroms or they may not work.
-- Keyboard and controller bindings can be changed in `controls.ini`
+- Keyboard and controller bindings can be changed in `controls.ini` (optional)
 - The included `README.txt` contains the controls and a troubleshooting
 note. 
 
