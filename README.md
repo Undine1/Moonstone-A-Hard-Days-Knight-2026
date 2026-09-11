@@ -15,18 +15,16 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 - This build requires 64-bit Windows. 
 - Disk files should be sourced from wowroms or they may not work.
 - Keyboard and controller bindings can be changed in `controls.ini` (optional)
-- The included `README.txt` contains the controls and a troubleshooting
-note. 
+- Quicksave and Quickload anywhere, including during combat. (F5/F9)
+- Skip intro: Press Space / Enter / Ctrl or
+  A / B / LB / RB / RT on controller.
+- `README.txt` contains the default controls and troubleshooting notes.
 
 ## Highlights
 
 - Automatic disk swapping with no interruption.
-- Skippable intro; Press Space, Enter, or Ctrl on the keyboard, or
-  A, B, LB, RB, or RT on a controller.
-- Configurable keyboard and controller support, with optional
-  mouse control.
-- Quicksave and Quickload anywhere, including during combat. (F5/F9)
-- Faithful graphics and Paula audio through the custom OCS runtime.
+- Faithful graphics and Paula audio through the custom OCS runtime. 
+- Bug fixes
 
 ## Confirmed original Amiga bugs fixed
 
@@ -34,7 +32,7 @@ note.
   the game.**
 - **Fixed: A bugged Moonstone appearing in an enemy inventory crashed the
   game.**
-- **Various other bug fixes.**
+- **Various other fixes.**
 
 See [CHANGES.md](CHANGES.md) for the historical sources.
 
