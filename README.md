@@ -12,6 +12,8 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 4. Grab Moonstone Disk1, Disk2, Disk3 ADF files on **`wowroms`** and extract them into the **`Data`** folder
 5. Double-click **`moonstone.exe`**.
 
+## Notes
+
 - This build requires 64-bit Windows. 
 - Disk files should be sourced from wowroms or they may not work.
 - Keyboard and controller bindings can be changed in `controls.ini` (optional)
