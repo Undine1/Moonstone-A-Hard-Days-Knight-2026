@@ -18,7 +18,6 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 - Quicksave and Quickload anywhere, including during combat. (F5/F9)
 - Skip intro: Press Space / Enter / Ctrl or
   A / B / LB / RB / RT on controller.
-- `README.txt` contains the default controls and troubleshooting notes.
 
 ## Highlights
 
