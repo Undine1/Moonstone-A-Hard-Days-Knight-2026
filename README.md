@@ -12,21 +12,20 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 4. Grab Moonstone Disk1, Disk2, Disk3 on **`wowroms`** and extract them into the **`Data`** folder
 5. Double-click **`moonstone.exe`**.
 
-This build requires 64-bit Windows. 
-ADF disk files not sourced from wowroms may not work.
-
-The included `README.txt` contains the controls and a short troubleshooting
-note. Keyboard and controller bindings can be changed in `controls.ini` beside
-the executable; changes take effect after restarting the game.
+- This build requires 64-bit Windows. 
+- Disk files should be sourced from wowroms or they may not work.
+- Keyboard and controller bindings can be changed in `controls.ini`
+- The included `README.txt` contains the controls and a troubleshooting
+note. 
 
 ## Highlights
 
 - Automatic disk swapping with no interruption.
 - Skippable intro; Press Space, Enter, or Ctrl on the keyboard, or
   A, B, LB, RB, or RT on a controller.
-- Complete and configurable keyboard and game-controller support, with optional
+- Configurable keyboard and controller support, with optional
   mouse control.
-- Quicksave and quickload anywhere, including during combat.
+- Quicksave and Quickload anywhere, including during combat. (F5/F9)
 - Faithful graphics and Paula audio through the custom OCS runtime.
 
 ## Confirmed original Amiga bugs fixed
