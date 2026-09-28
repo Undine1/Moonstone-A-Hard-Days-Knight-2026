@@ -46,17 +46,8 @@ a second input device to fight for them.
 
 - Automatic disk swapping with no interruption.
 - Faithful graphics and Paula audio through the custom OCS runtime.
-- Bug fixes.
-
-## Confirmed original Amiga bugs fixed
-
-- **Fixed: Two trolls performing overhead club swings simultaneously crashed
-  the game.**
-- **Fixed: A bugged Moonstone appearing in an enemy inventory crashed the
-  game.**
-- **Various other fixes.**
-
-See [CHANGES.md](CHANGES.md) for the historical sources.
+- Extensive bug fixes (including all known crashes).
+- Gameplay was brought in line with the latest official release of the game.
 
 ## Game revisions
 
@@ -67,11 +58,6 @@ differs structurally and has **no numeric version tag**.
 This port (*Moonstone 2026*) brings fixes, rules, balance, and behaviour into
 line with the retail v1.4 reference where practical. Some additional safeguards
 go beyond retail v1.4 where its code remains fragile.
-
-This release also restores rival knights' retail XP:
-one point every four in-game daybreaks while alive, plus their normal point
-for a combat victory. XP pays for stat upgrades and is separate from actual
-Moonstone tokens. Existing campaigns receive these future rewards normally.
 
 ## The removed disease/curse
 
