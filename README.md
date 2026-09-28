@@ -45,7 +45,7 @@ a second input device to fight for them.
 ## Highlights
 
 - Automatic disk swapping with no interruption.
-- Faithful graphics and Paula audio through the custom OCS runtime.
+- Faithful to the original Amiga version.
 - Modernized input handling.
 - Save / Load functionality.
 - Improved selection menus when multiple map encounters overlap.
