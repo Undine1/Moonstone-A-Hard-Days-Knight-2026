@@ -7,22 +7,25 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ROOT=".."
-OUT="$ROOT/dist/release-staging/Moonstone-2026-Windows-x64"
+OUT="${1:-$ROOT/dist/release-staging/Moonstone-2026-Windows-x64}"
 
-echo "[1/3] building moonstone.exe ..."
-"${BASH:-bash}" build.sh moonstone
-
-echo "[2/3] assembling clean runtime-only folder ..."
 if [ -e "$OUT" ]; then
   echo "refusing to reuse existing staging folder: $OUT" >&2
   echo "move or remove that generated folder, then run this script again" >&2
   exit 1
 fi
 
-mkdir -p "$OUT/data"
+echo "[1/3] building moonstone.exe ..."
+"${BASH:-bash}" build.sh moonstone
+
+echo "[2/3] assembling clean runtime-only folder ..."
+
+mkdir -p "$OUT/data" "$OUT/saves/Singleplayer" "$OUT/saves/Multiplayer"
 cp build/moonstone.exe "$OUT/"
+cp "build/Moonstone Singleplayer.exe" "build/Moonstone Multiplayer.exe" "$OUT/"
 cp build/SDL2.dll "$OUT/"
 cp dist_README.txt "$OUT/README.txt"
+cp "$ROOT/RELEASE-NOTES.md" "$OUT/"
 cp controls.ini "$OUT/"
 cp "$ROOT/LICENSE" "$OUT/LICENSE.txt"
 cp "$ROOT/THIRD-PARTY-NOTICES.txt" "$OUT/"

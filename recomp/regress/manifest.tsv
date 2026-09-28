@@ -20,7 +20,24 @@ combat	framesha	moonstone_goodcombat.sav	0	9e5057c52ed11aed
 overland	framesha	moonstone_prebug_backup.sav	0	66646f883aac4567
 # Retail-parity goldens (the SHIPPING default: g_retail_parity ON).  Same fixtures
 # as the cracked-baseline rows above; kind prefix "p+" runs without --noretailparity.
-combatrunP	p+savefnv	moonstone_combatrun.sav	600	0824c9a9
+# B3 rat-kill correction, 2026-09-21: seven intentional RAM-byte changes only:
+# the retail no-new-animation sentinel and an untouched inactive display workspace.
+# All 600 rendered frames, one-life loss and frame-363 round exit match the old
+# build. Original retail transition/reaction comparisons: check_knockout.py.
+# Sep24 B15 cursor RNG: original native RNG runs once per active cursor tick.
+# combatrun changes only the seed and five inactive stack bytes after death.
+# townday changes the seed, AI selection pointer and cached mouse/JOY0 bytes.
+# townarmor's later AI fight changes with the new stream. Supplying that stream
+# to the frozen old EXE reproduces its complete pictures/audio and gameplay RAM;
+# --nocursorrng restores all three previous hashes exactly. See check_cursor_rng.py
+# and notes-handoff/moonstone-rng.md. Parity-off goldens remain unchanged.
+combatrunP	p+savefnv	moonstone_combatrun.sav	600	737fa07f
 vanishrunP	p+savefnv	moonstone_bug.sav	600	81b317c7
-towndayP	p+scriptfnv	moonstone_townmap.sav|10:f,16:.,450:d,494:.,504:f,510:.	800	dafe1934
-townarmorP	p+scriptfnv	moonstone_townarmor.sav|10:u,36:.,40:r,46:.,60:f,66:.,800:d,844:.,850:l,853:.,860:f,866:.|700:2e83b:1e	2600	384dc55d
+# Sep23 restored city Exit click: only native audio state changes (channel
+# selector at 3aa7a and channel record at 43068). 340 paired town captures match;
+# --noretailsfx restores the complete previous RAM. See moonstone-menu-sounds.md.
+towndayP	p+scriptfnv	moonstone_townmap.sav|10:f,16:.,450:d,494:.,504:f,510:.	800	0865d99a
+# Sep21 AI XP: only RAM byte 0x2e8af changes 0->1 after native AI victory;
+# --noaixpfix exactly reproduces 384dc55d. See moonstone-ai-xp.md.
+# Sep23 city Exit click leaves only 3aa7b changed 0->1 versus the XP-fixed build.
+townarmorP	p+scriptfnv	moonstone_townarmor.sav|10:u,36:.,40:r,46:.,60:f,66:.,800:d,844:.,850:l,853:.,860:f,866:.|700:2e83b:1e	2600	b0c3cd5a

@@ -29,10 +29,12 @@
 #include <io.h>
 #else
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/utsname.h>
 #endif
 #include "m68k.h"
 #include "loader.h"
+#include "multiplayer.h"
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
 #ifdef _WIN32
@@ -45,17 +47,31 @@
 
 /* Project identity / attribution.  Printed at startup (to the log) and via
  * --version; also serves as the binary's attribution string. */
-#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.3.0 - " \
+#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.4.0 (+ Local Multiplayer) - " \
     "no-emulator port of the Amiga 1991 original - (C) 2026 Undine1, " \
     "github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026 - GPL-3.0"
 /* Compile timestamp, shown in the window title + log so it's unambiguous WHICH
  * build is actually running (no more "did my change take effect?" guesswork). */
 #define MOON_BUILD (__DATE__ " " __TIME__)
+#define MOON_REVISION "v1.4 - 2026 revision - Undine"
 
 /* Directory containing the executable (filled in main() from the OS), used to
  * resolve the player-supplied `data/` folder so the game runs by double-click
  * from any location -- not only from the dev `recomp/` working dir. */
 static char g_exedir[1024] = "";
+/* Host-only launch choice: loading a save or changing Players/Practice must
+ * never redirect the session's F5/F9 slot. Not part of the saved game state. */
+static int g_multiplayer_save = 0;
+static const char *save_profile_name(void) {
+    return g_multiplayer_save ? "multiplayer" : "singleplayer";
+}
+static const char *save_profile_folder(void) {
+    return g_multiplayer_save ? "Multiplayer" : "Singleplayer";
+}
+static void quicksave_path(char *path, size_t size) {
+    snprintf(path, size, "%s/saves/%s/%s.sav", g_exedir[0] ? g_exedir : ".",
+             save_profile_folder(), save_profile_name());
+}
 static void compute_exedir(const char *argv0) {
 #ifdef _WIN32
     char buf[1024];
@@ -95,12 +111,21 @@ static int dir_has_data(const char *dir) {
 /* digital joystick + fire state (set by host input) */
 static int g_ji_up, g_ji_dn, g_ji_lf, g_ji_rt;   /* directions */
 static int g_fire2;                               /* port-1 fire (/FIR1) */
+static MpSession g_mp = {MP_OFF, 0, {MP_NONE, MP_NONE}, 0};
+static int g_mp_practice;        /* original Practice entry, cleared at original menu */
+static int g_mp_script;          /* opt-in second-player headless replay */
+static uint16_t g_mp_input[MP_MAX_PLAYERS]; /* original action words per logical player */
+static void mp_clear_host_input(void); /* host-only transient input, never guest RAM */
+static void mp_begin_practice(void);
+static int mp_practice_snapshot(void);
+static int mp_pad_count(void);
 static int g_kdigit = 0;        /* SDL number key 1-9 held (1..9), else 0 (menu selection) */
 static int g_inv_request = 0;   /* host pressed the configured inventory action; injected at the map poll */
 static int g_in_inventory = 0;  /* 1 while the inventory screen is open (so the open-key can't re-open it in a loop) */
 static int g_rest_request = 0;  /* host pressed configured REST/skip-turn; injects scancode 0x12 ('E') at the map poll */
 static int g_rest_pending = 0;  /* 1 for the one poll AFTER injecting 'E', to re-clear [0x3bf74] so one press = exactly one skipped turn */
-static int g_ver_request = 0;   /* B17: configured version action -> inject the game's 'V' index (0x2f) at the map poll */
+static int g_ver_request = 0;   /* Show the host revision notice; never inject a modal guest key. */
+static int g_version_visible = 0; /* Host-only toggle; not part of saved gameplay. */
 static int g_quest_quit_request = 0; /* configured abandon action -> inject the game's original map quit index (0x10) */
 static int g_quest_quit_pending = 0; /* raw Q injected; clear it after translation before the guest restart jump */
 static int g_firewait_hot = 0;  /* set when the "wait for fire" routine (0x22fd0) ran this frame; cleared each frame in capture_frame */
@@ -146,7 +171,6 @@ static double   g_dbg_coh = 0.0;        /* diag: last scene-9 delivery-window bi
 static int g_guardian_return_fade = 0;  /* 0=idle, 1=reward dismissed, 2=map tween started */
 static int g_guardian_fade_seen = 0;    /* [0x417b4] has gone nonzero since the map tween started */
 static int g_guardian_fade_deadline = -1; /* bounded failsafe in displayed frames */
-static int g_menusel_prev = 0;  /* edge-state for the overlap-popup selection */
 
 /* ---- typed-text entry (Select-Knight name field + any [0x3bf74] text poll) ----
  * The name-entry FSM (front-end 0x22b84, byte-identical Mog copy 0x1c86d6) busy-polls
@@ -492,6 +516,26 @@ static uint32_t g_custw_log = 0, g_custr_log = 0, g_ciaw_log = 0, g_ciar_log = 0
 static uint32_t g_streamlog = 0;   /* HLE stream-read log budget */
 
 static void halt(const char *why) { g_stop = 1; g_stop_reason = why; m68k_end_timeslice(); }
+/* Terminal host I/O diagnostics, not saved emulation state. Report after the
+ * CPU stops so the dialog belongs to the existing game window, if any. */
+static int g_data_read_failed;
+static char g_data_read_path[1300], g_data_read_reason[768];
+static void data_read_failure(const char *path, const char *fmt, ...) {
+    if (g_data_read_failed) return;
+    g_data_read_failed = 1;
+    snprintf(g_data_read_path, sizeof(g_data_read_path), "%s", path);
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_data_read_reason, sizeof(g_data_read_reason), fmt, ap);
+    va_end(ap);
+    if (g_log) { fprintf(g_log, "DATA READ ERROR: %s\n  File: %s\n", g_data_read_reason, path); fflush(g_log); }
+    halt("game data read failed");
+}
+static void report_data_read_error(int show_gui, SDL_Window *parent) {
+    char summary[1024];
+    snprintf(summary, sizeof(summary), "Moonstone couldn't read its game data.\n\n%s", g_data_read_reason);
+    host_report_issue(show_gui, parent, SDL_MESSAGEBOX_ERROR, summary, g_data_read_path, NULL);
+}
 static int  vertb_gate(void);   /* fwd: gates VBlank IRQ injection (see below) */
 
 /* --inlog: record input-register polls (which reg, value, PC, icount). Used to
@@ -1086,42 +1130,6 @@ static void trackdisk_dma(uint32_t dest, int words) {
  * `data/` folder by default; overridable with --diskdir). */
 static const char *g_diskdir = "";
 
-/* Load the three decoded-sector ADF images.  Search order per disk:
- *   1. <g_diskdir>/<full name>   (the player-supplied `data/` folder)
- *   2. <g_diskdir>/Disk<N>.adf   (short name, if the bundle was renamed)
- *   3. dev fallbacks ../, ../../, ./, ""  (running from recomp/ or repo root)
- * so the same binary works both from the dev tree and from the distributable. */
-static void disk_load_adfs(void) {
-    static const char *names[3] = {
-        "Moonstone - A Hard Days Knight_Disk1.adf",
-        "Moonstone - A Hard Days Knight_Disk2.adf",
-        "Moonstone - A Hard Days Knight_Disk3.adf",
-    };
-    static const char *shortn[3] = { "Disk1.adf", "Disk2.adf", "Disk3.adf" };
-    static const char *prefixes[] = { "../", "../../", "./", "" };
-    for (int i = 0; i < 3; i++) {
-        char cands[8][1200]; int nc = 0;
-        if (g_diskdir && *g_diskdir) {
-            snprintf(cands[nc++], 1200, "%s/%s", g_diskdir, names[i]);
-            snprintf(cands[nc++], 1200, "%s/%s", g_diskdir, shortn[i]);
-        }
-        for (int p = 0; p < (int)(sizeof(prefixes)/sizeof(prefixes[0])); p++)
-            snprintf(cands[nc++], 1200, "%s%s", prefixes[p], names[i]);
-        for (int c = 0; c < nc; c++) {
-            FILE *f = fopen(cands[c], "rb");
-            if (!f) continue;
-            fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-            g_adf[i] = (uint8_t*)malloc(sz);
-            g_adfsz[i] = (long)fread(g_adf[i], 1, sz, f);
-            fclose(f);
-            if (g_log) fprintf(g_log, "DISK%d loaded %s (%ld B)\n", i+1, cands[c], g_adfsz[i]);
-            break;
-        }
-        if (!g_adf[i] && g_log) fprintf(g_log, "DISK%d NOT FOUND (%s)\n", i+1, names[i]);
-    }
-    g_disk_inserted = 0;   /* Disk1 in drive 0 by default */
-}
-
 /* ===== AmigaDOS OFS reader: extract boot modules from a player-supplied ADF =====
  * The Moonstone floppies are standard OFS ("DOS\0") disks, so the four boot
  * modules (nb, program, mog, crystal) are ordinary files on Disk 1.  Rather than
@@ -1131,8 +1139,31 @@ static void disk_load_adfs(void) {
 static uint32_t ofs_be32(const uint8_t *p) {
     return ((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3];
 }
+#include "adf_validate.h"
 static char g_setup_reason[768], g_setup_path[1300];
 static int g_setup_priority;
+static const char *g_boot_names[4] = { "nb", "program", "mog", "crystal" };
+/* Immutable source bytes from the validated disks. Like g_adf, these are host
+ * resources reconstructed at startup, not mutable emulated/save state. */
+static uint8_t *g_boot_data[4];
+static long g_boot_size[4];
+
+static int boot_data_matches(const char *name, const uint8_t *data, long size) {
+    const char *base = name;
+    for (const char *p = name; *p; p++) if (*p == ':' || *p == '/' || *p == '\\') base = p + 1;
+    for (int i = 0; i < 4; i++) {
+        const char *a = base, *b = g_boot_names[i];
+        while (*a && *b) {
+            int c = (unsigned char)*a;
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+            if (c != *b) break;
+            a++; b++;
+        }
+        if (!*a && !*b && g_boot_data[i])
+            return size == g_boot_size[i] && data && !memcmp(data, g_boot_data[i], (size_t)size);
+    }
+    return 1; /* Other assets use their existing loading path. */
+}
 
 /* Keep the most actionable failure for the dialog; retain every finding in
  * the log. Missing modules should not hide a disk or write-access failure. */
@@ -1148,6 +1179,32 @@ static void setup_problem(int priority, const char *path, const char *fmt, ...) 
         snprintf(g_setup_reason, sizeof(g_setup_reason), "%s", reason);
         snprintf(g_setup_path, sizeof(g_setup_path), "%s", path);
     }
+}
+
+/* 1 = readable cache, 0 = absent (may extract), -1 = preserve/report failure. */
+static int startup_file_probe(const char *path) {
+    errno = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        int err = errno;
+        if (err == ENOENT) {
+            if (g_log) fprintf(g_log, "SETUP MODULE: missing '%s'; will try disk extraction\n", path);
+            return 0;
+        }
+        setup_problem(5, path, "Cannot read startup file: %s (errno=%d).", strerror(err), err);
+        return -1;
+    }
+    long size = -1;
+    errno = 0;
+    if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
+    int err = errno;
+    if (fclose(f) != 0) { size = -1; if (!err) err = errno; }
+    if (size <= 0) {
+        setup_problem(3, path, "Startup file is empty or unreadable (size=%ld bytes, errno=%d). Existing file was preserved.", size, err);
+        return -1;
+    }
+    if (g_log) fprintf(g_log, "SETUP MODULE: readable '%s' (%ld bytes)\n", path, size);
+    return 1;
 }
 
 static uint8_t *adf_ofs_extract(const uint8_t *adf, long sz, const char *name, long *outlen,
@@ -1214,44 +1271,30 @@ static uint8_t *adf_ofs_extract(const uint8_t *adf, long sz, const char *name, l
 #undef OFS_FAIL
 }
 
-/* If the four boot modules aren't present as files in `datadir`, extract them
- * from the .adf images in `adfdir` (Disk 1 holds all four) and write them there.
- * One-time, on first launch; afterwards the files exist and this is a no-op.  So
- * a player only has to drop in the three .adf disk images. */
+/* Validate every disk and cached startup file on each launch. Missing startup
+ * files are extracted without replacing existing files. The validated disk
+ * buffers themselves serve trackdisk DMA; never reopen unchecked copies. */
 static int ensure_boot_modules(const char *datadir, const char *adfdir) {
-    static const char *mods[4] = { "nb", "program", "mog", "crystal" };
+    const char **mods = g_boot_names;
     static const char *full[3] = {
         "Moonstone - A Hard Days Knight_Disk1.adf",
         "Moonstone - A Hard Days Knight_Disk2.adf",
         "Moonstone - A Hard Days Knight_Disk3.adf" };
     static const char *shrt[3] = { "Disk1.adf", "Disk2.adf", "Disk3.adf" };
-    int missing[4] = {0}, need = 0, ready = 1;
+    int missing[4] = {0}, readable[4] = {0}, ready = 1, disks_ready = 1;
+    char diskpaths[3][1300];
+    for (int i = 0; i < 3; i++) { free(g_adf[i]); g_adf[i] = NULL; g_adfsz[i] = 0; }
+    for (int i = 0; i < 4; i++) { free(g_boot_data[i]); g_boot_data[i] = NULL; g_boot_size[i] = 0; }
     g_setup_priority = 0;
     g_setup_reason[0] = g_setup_path[0] = 0;
     for (int m = 0; m < 4; m++) {
+        /* Retail has no Crystal crack intro. During normal --os play, probe
+         * that optional cache only if the supplied disks actually contain it. */
+        if (g_os && m == 3) continue;
         char p[1300]; snprintf(p, sizeof(p), "%s/%s", datadir, mods[m]);
-        errno = 0;
-        FILE *f = fopen(p, "rb");
-        if (!f) {
-            int err = errno;
-            if (err == ENOENT) {
-                missing[m] = 1; need = 1;
-                if (g_log) fprintf(g_log, "SETUP MODULE: missing '%s'; will try disk extraction\n", p);
-            } else {
-                setup_problem(5, p, "Cannot read startup file: %s (errno=%d).", strerror(err), err);
-                ready = 0;
-            }
-            continue;
-        }
-        long size = -1;
-        errno = 0;
-        if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
-        int err = errno;
-        fclose(f);
-        if (size <= 0) {
-            setup_problem(3, p, "Startup file is empty or unreadable (size=%ld bytes, errno=%d). Existing file was preserved.", size, err);
-            ready = 0;
-        } else if (g_log) fprintf(g_log, "SETUP MODULE: readable '%s' (%ld bytes)\n", p, size);
+        int state = startup_file_probe(p);
+        missing[m] = state == 0; readable[m] = state == 1;
+        if (state < 0) ready = 0;
     }
     for (int d = 0; d < 3; d++) {
         char ap[1300]; FILE *af = NULL;
@@ -1264,7 +1307,7 @@ static int ensure_boot_modules(const char *datadir, const char *adfdir) {
         if (!af) {
             int err = errno;
             setup_problem(4, ap, "Cannot open Disk %d for reading: %s (errno=%d). Also tried '%s'.", d+1, strerror(err), err, full[d]);
-            ready = 0; continue;
+            ready = disks_ready = 0; continue;
         }
         long sz = -1;
         errno = 0;
@@ -1272,72 +1315,120 @@ static int ensure_boot_modules(const char *datadir, const char *adfdir) {
         int err = errno;
         if (sz != ADF_BYTES) {
             setup_problem(4, ap, "Disk %d has %ld bytes; expected exactly %d bytes (errno=%d).", d+1, sz, ADF_BYTES, err);
-            fclose(af); ready = 0; continue;
+            fclose(af); ready = disks_ready = 0; continue;
         }
         if (g_log) fprintf(g_log, "SETUP DISK: readable '%s' (%ld bytes; expected %d)\n", ap, sz, ADF_BYTES);
-        if (!need) { fclose(af); continue; }
         errno = 0;
         if (fseek(af, 0, SEEK_SET) != 0) {
             err = errno;
             setup_problem(4, ap, "Cannot seek in Disk %d: %s (errno=%d).", d+1, strerror(err), err);
-            fclose(af); ready = 0; continue;
+            fclose(af); ready = disks_ready = 0; continue;
         }
         uint8_t *adf = (uint8_t*)malloc(sz);
         if (!adf) {
             setup_problem(4, ap, "Not enough memory to read Disk %d (%ld bytes).", d+1, sz);
-            fclose(af); ready = 0; continue;
+            fclose(af); ready = disks_ready = 0; continue;
         }
         errno = 0;
         long got = (long)fread(adf, 1, sz, af);
         err = errno;
         int read_error = ferror(af);
-        fclose(af);
+        if (fclose(af) != 0) { read_error = 1; if (!err) err = errno; }
         if (got != sz || read_error) {
             setup_problem(4, ap, "Disk %d read failed: %ld of %ld bytes, %s (errno=%d).", d+1, got, sz, strerror(err), err);
-            free(adf); ready = 0; continue;
+            free(adf); ready = disks_ready = 0; continue;
         }
         uint32_t fingerprint = 2166136261u;
         for (long i = 0; i < sz; i++) { fingerprint ^= adf[i]; fingerprint *= 16777619u; }
         if (g_log) fprintf(g_log, "SETUP DISK: Disk %d fnv1a32=%08x signature=%02x%02x%02x%02x\n", d+1, fingerprint, adf[0], adf[1], adf[2], adf[3]);
-        for (int m = 0; m < 4; m++) {
-            if (!missing[m]) continue;
-            char p[1300]; snprintf(p, sizeof(p), "%s/%s", datadir, mods[m]);
+        char reason[512];
+        if (!adf_ofs_validate(adf, sz, reason, sizeof(reason))) {
+            setup_problem(4, ap, "Disk %d is damaged or unsupported: %s. Replace it with a complete, valid ADF.", d+1, reason);
+            free(adf); ready = disks_ready = 0; continue;
+        }
+        g_adf[d] = adf; g_adfsz[d] = sz;
+        snprintf(diskpaths[d], sizeof(diskpaths[d]), "%s", ap);
+        if (g_log) fprintf(g_log, "DISK%d loaded %s (%ld B; OFS structure and checksums verified)\n", d+1, ap, sz);
+    }
+    for (int m = 0; m < 4; m++) {
+        char p[1300]; snprintf(p, sizeof(p), "%s/%s", datadir, mods[m]);
+        int source_disk = -1;
+        for (int d = 0; d < 3 && !g_boot_data[m]; d++) {
+            if (!g_adf[d]) continue;
             char reason[256];
-            long olen = 0; uint8_t *bytes = adf_ofs_extract(adf, sz, mods[m], &olen, reason, sizeof(reason));
-            if (!bytes) {
-                if (g_log) fprintf(g_log, "SETUP EXTRACT: '%s' from '%s': %s\n", mods[m], ap, reason);
+            g_boot_data[m] = adf_ofs_extract(g_adf[d], g_adfsz[d], mods[m], &g_boot_size[m], reason, sizeof(reason));
+            if (!g_boot_data[m]) {
+                if (g_log) fprintf(g_log, "SETUP EXTRACT: '%s' from '%s': %s\n", mods[m], diskpaths[d], reason);
                 continue;
             }
+            source_disk = d;
+        }
+        if (!g_boot_data[m]) {
+            if (g_os && m == 3) {
+                if (g_log) fprintf(g_log, "SETUP MODULE: optional 'crystal' intro is absent from the disks; not needed for game startup\n");
+                continue;
+            }
+            setup_problem(1, p, "Required startup file '%s' could not be extracted from the supplied disks. See the extraction results in the log.", mods[m]);
+            ready = 0; continue;
+        }
+        if (g_os && m == 3) {
+            int state = startup_file_probe(p);
+            missing[m] = state == 0; readable[m] = state == 1;
+            if (state < 0) ready = 0;
+        }
+        const uint8_t *bytes = g_boot_data[m];
+        long olen = g_boot_size[m];
+        if (readable[m]) {
+            errno = 0;
+            FILE *f = fopen(p, "rb");
+            if (!f) {
+                int err = errno;
+                setup_problem(5, p, "Cannot read startup file: %s (errno=%d).", strerror(err), err);
+                ready = 0; continue;
+            }
+            uint8_t chunk[4096]; long pos = 0; int matches = 1;
+            while (pos < olen) {
+                size_t want = (size_t)(olen - pos);
+                if (want > sizeof(chunk)) want = sizeof(chunk);
+                size_t got = fread(chunk, 1, want, f);
+                if (got != want || memcmp(chunk, bytes + pos, got)) { matches = 0; break; }
+                pos += (long)got;
+            }
+            if (fgetc(f) != EOF) matches = 0;
+            int err = errno, failed = ferror(f);
+            if (fclose(f) != 0) { failed = 1; if (!err) err = errno; }
+            if (failed) {
+                setup_problem(5, p, "Cannot finish reading startup file: %s (errno=%d). Existing file was preserved.", strerror(err), err);
+                ready = 0;
+            } else if (!matches) {
+                setup_problem(3, p, "Startup file '%s' does not match Disk %d (%ld expected bytes). Existing file was preserved. Move this startup file aside and restart to extract it again from your disks.", mods[m], source_disk+1, olen);
+                ready = 0;
+            } else if (g_log) fprintf(g_log, "SETUP MODULE: verified '%s' against Disk %d (%ld bytes)\n", p, source_disk+1, olen);
+        } else if (missing[m] && disks_ready) {
             /* Exclusive creation never truncates an existing user's file. Check
              * both buffered writes and close; failed outputs must not be cached. */
             errno = 0;
             FILE *of = fopen(p, "wbx");
             if (!of) {
-                err = errno;
+                int err = errno;
                 setup_problem(5, p, "Cannot create startup file: %s (errno=%d). Check write access to the data folder.", strerror(err), err);
-                free(bytes); continue;
+                ready = 0; continue;
             }
             errno = 0;
             size_t written = fwrite(bytes, 1, (size_t)olen, of);
             int write_error = ferror(of);
-            err = errno;
+            int err = errno;
             if (fclose(of) != 0) { write_error = 1; if (!err) err = errno; }
-            free(bytes);
             if (written != (size_t)olen || write_error) {
                 setup_problem(5, p, "Cannot finish writing startup file: %lu of %ld bytes, %s (errno=%d). Check free space and write access.", (unsigned long)written, olen, strerror(err), err);
                 if (remove(p) != 0 && g_log) fprintf(g_log, "SETUP CLEANUP: cannot remove incomplete '%s': %s\n", p, strerror(errno));
-                continue;
+                ready = 0; continue;
             }
             missing[m] = 0;
-            if (g_log) fprintf(g_log, "SETUP EXTRACT: wrote and closed '%s' (%ld bytes) from '%s'; write access confirmed\n", p, olen, ap);
+            if (g_log) fprintf(g_log, "SETUP EXTRACT: wrote and closed '%s' (%ld bytes) from '%s'; write access confirmed\n", p, olen, diskpaths[source_disk]);
         }
-        free(adf);
     }
-    for (int m = 0; m < 4; m++) if (missing[m]) {
-        char p[1300]; snprintf(p, sizeof(p), "%s/%s", datadir, mods[m]);
-        setup_problem(1, p, "Required startup file '%s' could not be extracted from the supplied disks. See the extraction results in the log.", mods[m]);
-        ready = 0;
-    }
+    g_disk_inserted = 0;
     if (g_log) { fprintf(g_log, "SETUP RESULT: %s\n", ready ? "ready" : "failed"); fflush(g_log); }
     return ready;
 }
@@ -2868,7 +2959,7 @@ static int g_snd_loaded = 0;   /* armed once the sound engine is running (see ho
 static int g_sndguard_hits = 0;
 static uint32_t g_curwr_pc = 0;       /* FREEZE diag: PPC of the last writer of the menu cursor 0x392d4 */
 static uint32_t g_curwr_n = 0;        /* FREEZE diag: count of writes to 0x392d4 */
-static int g_msleak_blocked = 0;  /* count of enemy/Guardian Moonstone assignments suppressed (see hook) */
+static int g_msleak_blocked = 0;  /* actual Moonstone-token transfers blocked; never XP awards */
 /* Returns 1 if the write should be DROPPED (a stray store into live sound code). */
 static int sndcode_guard(uint32_t a, uint32_t v, int sz) {
     if (!g_snd_loaded) return 0;
@@ -2936,11 +3027,11 @@ static inline void lives_watch(uint32_t a, uint32_t v, int sz) {
         }
     }
 }
-/* MOONSTONE-LEAK SETTER WATCH (2026-06-25): log any NON-ZERO write that lands the Moonstone in an
- * enemy/Guardian (slot 4/5) -- the COUNT field (rec+0x4e) or the token bitfield ([rec+0x60]+0x16).
- * The operator hit a black knight holding it on a FRESH game, so a live leak path the root-fix guards
- * miss is writing it; this names the writer PC.  v==0 writes (the per-frame scrub's clears) are
- * skipped, and the address early-out keeps it off the hot path.  Read-only (logging). */
+/* Bounded, read-only XP/token setter watch for non-human records in the four-
+ * knight roster. XP at actor+4e is normal progression, never a Moonstone leak.
+ * Actual tokens are bits at [actor+60]+16. A setter alone does not establish
+ * a bug or explain a phantom item label. The fixed special record is outside
+ * this roster watch; LOOT-TOKEN traces its transfers separately. */
 static int g_mswatch_n = 0;
 static inline void moonstone_watch(uint32_t a, uint32_t v, int sz) {
     if (!g_os || !g_gameplay_watches_armed || v == 0u) return;
@@ -2956,8 +3047,9 @@ static inline void moonstone_watch(uint32_t a, uint32_t v, int sz) {
         int hc = (a <= cnt && end > cnt);
         int ht = (tok != 0xffffffffu) && (a <= tok && end > tok);
         if ((hc || ht) && g_log && g_mswatch_n++ < 24)
-            fprintf(g_log, "MS-LEAK-SET rec%d slot=%u %s <= %0*x pc=%06x ppc=%08x ic=%llu\n",
-                    i, slot, hc ? "count(+0x4e)" : "token(+0x16)", sz*2, v,
+            fprintf(g_log, "%s rec%d slot=%u %s <= %0*x pc=%06x ppc=%08x ic=%llu\n",
+                    hc ? "XP-SET" : "MOONSTONE-TOKEN-SET",
+                    i, slot, hc ? "xp(+0x4e)" : "token(+0x16)", sz*2, v,
                     (unsigned)m68k_get_reg(NULL,M68K_REG_PC),
                     (unsigned)m68k_get_reg(NULL,M68K_REG_PPC), (unsigned long long)g_icount), fflush(g_log);
     }
@@ -3308,7 +3400,7 @@ static int      g_program_served = 0; /* set once nb's loader has streamed `prog
 static int      g_pools_relocated = 0;/* one-shot: program's mem pools re-based */
 
 /* ---- DEBUG-ONLY memory poke (--poke), gated on g_os + off by default ----
- * Lets a test set up end-game state quickly (e.g. the player's Moonstone count
+ * Lets a test set up end-game state quickly (e.g. the player's XP
  * at player_rec+0x4e, the Valley-key gate, or a map position) so the win path
  * can be exercised without a long real-time playthrough.  Each poke is applied
  * ONCE, when PC first reaches its gate address (default 0x21206 = program's main
@@ -3332,6 +3424,26 @@ static int      g_tasklist_fix = 1;   /* ROOT FIX 2026-06-21: per-vblank task-li
                                        * (audit): opcode-guarded hooks, value-based cursor removal, bounded
                                        * divergence log.  --notaskfix A/B disables the whole set. */
 static int      g_taskhook_n = 0;     /* bounded TASKFIX divergence-log line count */
+/* Resolve a registration at the STORE, not at the earlier guest tail scan:
+ * vblank can remove/compact an effect between those two instructions. Always
+ * reserve the final slot for the dispatcher's NULL terminator. No host state
+ * is needed, including when resuming a save halfway through installation. */
+static uint32_t tasklist_find(uint32_t handler) {
+    for (uint32_t s = 0x3c096u; s < 0x3c0bau; s += 4u)
+        if (r32(s) == handler) return s;
+    return 0;
+}
+static uint32_t tasklist_free_slot(void) {
+    for (uint32_t s = 0x3c096u; s + 4u < 0x3c0bau; s += 4u)
+        if (!r32(s)) return s;
+    return 0;
+}
+static void tasklist_full(uint32_t handler) {
+    if (g_log && g_taskhook_n < 40) {
+        fprintf(g_log, "TASKFIX-FULL handler=%06x registration refused (no terminator space)\n", handler);
+        g_taskhook_n++;
+    }
+}
 /* Compact-remove one slot from the per-vblank task list [0x3c096,0x3c0ba): shift
  * later entries down one, zero-fill the tail.  The dispatcher (0x3b906) stops at
  * the FIRST NULL slot, so a hole in the middle would silently disable every
@@ -3446,6 +3558,18 @@ static int      g_hide_parity_fix = 1; /* ROOT FIX 2026-07-03 (vanish-in-combat,
 #define LIN_RETAIL  1
 #define LIN_UNKNOWN 2
 static int g_lineage = LIN_CRACKED;
+static int task_effect_code(void) {
+    return g_lineage == LIN_CRACKED && r16(0x2a0b8u) == 0x7002u
+        && r16(0x2a0bau) == 0x41f9u && r32(0x2a0bcu) == 0x0003c096u
+        && r16(0x2a0eau) == 0x20bcu && r32(0x2a0ecu) == 0x0002a10cu
+        && r16(0x2a0f0u) == 0x4e75u;
+}
+static int task_cursor_code(void) {
+    return g_lineage == LIN_CRACKED && r16(0x2d586u) == 0x4a79u
+        && r32(0x2d588u) == 0x000392c8u
+        && r16(0x2d5deu) == 0x217cu && r32(0x2d5e0u) == 0x0002d61cu
+        && r16(0x2d5e4u) == 0xfffcu && r16(0x2d5f2u) == 0x4e75u;
+}
 static int g_port0_input_fix = 1; /* keep menu-mouse input out of player-two combat controls */
 /* fingerprint: the AI knife-restock loop's two size-suffix bytes -- the known
  * discriminator between the builds (cracked: cmpi.w/subi.b; retail: cmpi.b/subi.w) */
@@ -3662,6 +3786,29 @@ static void dump_derail(const char *why, unsigned pc, int force) {
  * is g_retail_parity (--noretailparity), which also preserves the cracked-
  * baseline regression goldens (harness runs with the flag off). */
 static int g_retail_parity = 1;
+static int g_rat_spawn_fix = 1;  /* --noratspawnfix: isolate retail's rat initialization for A/B */
+static int g_manual_armor_fix = 1; /* --nomanualarmorfix: isolate retail's manual loot routine */
+static int g_sword_fix = 1;       /* --noswordfix: A/B retail sword generation and manual weapon loot */
+static int g_dragon_damage_fix = 1; /* --nodragondamagefix: A/B the foot-strike base damage only */
+static int g_dragon_fire_fix = 1; /* --nodragonfirefix: A/B the knight's fire-death pose timing */
+static int g_knight_reaction_fix = 1; /* --noknightreactionfix: A/B retail AI-knight blocking */
+static uint8_t g_sword_created;   /* retail $2e8c6 twin; campaign state, serialized in save v3 */
+static int g_lair_xp_fix = 1;     /* --nolairxpfix: A/B retail's once-per-lair XP reward */
+static int g_lair_setup_fix = 1;  /* --nolairsetupfix: A/B the three retail initial-lair templates */
+static int g_ai_xp_fix = 1;       /* --noaixpfix: A/B periodic AI XP and native victory XP */
+static int g_life_icons_fix = 1;  /* --nolifeiconsfix: A/B negative-lives display only */
+static int g_danu_fix = 1;       /* --nodanufix: A/B Stonehenge offering routing */
+static uint8_t g_lair_xp_awarded[24]; /* retail node+14 words; shared by all players, save v5 */
+
+/* The earlier node records are 20 bytes, retail's are 22. Keep the extra word
+ * outside guest RAM: writing node+14 here would overwrite the NEXT node. */
+static int lair_xp_index(uint32_t node) {
+    uint32_t base = r32(0x2dfdau);
+    if (!base || (base & 1u) || base > RAM_SIZE - sizeof(g_lair_xp_awarded) * 0x14u
+        || node < base || node - base >= sizeof(g_lair_xp_awarded) * 0x14u
+        || (node - base) % 0x14u) return -1;
+    return (int)((node - base) / 0x14u);
+}
 struct parity_patch { uint32_t addr; uint8_t len; uint8_t before[8]; uint8_t after[8]; const char *tag; };
 static const struct parity_patch g_parity_tab[] = {
     /* A2  encounter/queue lives test: retail `ble` excludes dead/retired (0xff = -1)
@@ -3724,9 +3871,9 @@ static const struct parity_patch g_parity_tab[] = {
     { 0x2c3b0u, 2, {0x6f,0x06}, {0x60,0x06}, "loot-weapon-noclamp" },
     /* B11 demon close-range action-state duration timer: 6 -> 9 ticks. */
     { 0x4207cu, 6, {0x11,0x7c,0x00,0x06,0x00,0x6a}, {0x11,0x7c,0x00,0x09,0x00,0x6a}, "demon-timer-9" },
-    /* B11 demon aggression threshold table (8 entries) retuned 70/60/50/40/30/20/15/10
+    /* B11 AI-knight aggression threshold table (8 entries) retuned 70/60/50/40/30/20/15/10
      *     -> 50/40/30/30/20/10/8/6.  Pairs with the andi #7 index-mask hook (A6). */
-    { 0x392b4u, 8, {0x46,0x3c,0x32,0x28,0x1e,0x14,0x0f,0x0a}, {0x32,0x28,0x1e,0x1e,0x14,0x0a,0x08,0x06}, "demon-aggr-table" },
+    { 0x392b4u, 8, {0x46,0x3c,0x32,0x28,0x1e,0x14,0x0f,0x0a}, {0x32,0x28,0x1e,0x1e,0x14,0x0a,0x08,0x06}, "knight-aggr-table" },
     /* B18 knight name: "SIR EDWARD" -> retail's "SIR GUNTHER".  The name lives in
      *     a padded fixed-width slot ("SIR EDWARD\0" + 4 spare NULs before the next
      *     field), so the one-char-longer retail name fits in place. */
@@ -3748,13 +3895,10 @@ static const struct parity_patch g_parity_tab[] = {
      *     parity string pool written by apply_retail_parity below. */
     { 0x2db10u, 4, {0x00,0x03,0x98,0x94}, {0x00,0x03,0x9b,0x66}, "ptr-buy-sword" },
     { 0x2db86u, 4, {0x00,0x03,0x99,0xf9}, {0x00,0x03,0x9b,0x8c}, "ptr-sell-sword" },
-    /* B18 animation-descriptor constants 0xd0 -> 0xcc were REMOVED from the table
-     *     2026-07-08: applied in isolation they are entangled with other retail h4
-     *     animation-pointer-table changes we do NOT carry, so cracked's tables +
-     *     retail's descriptor bytes compute a garbage anim-script pointer (a benign
-     *     unmapped read that terminates the script early -- caught by an A/B of the
-     *     unmapped-access count).  Cosmetic + unidentified; deferred to a whole-h4
-     *     animation-data migration if ever pursued. */
+    /* B18: keep animation commands paired with the earlier interpreter. Retail
+     * removed a handler and renumbered D0->CC and C8->C4; copying those bytes
+     * alone dispatches the wrong handlers. The separate dragon-fire death
+     * repeat is adapted at its count reader below without moving any script. */
 };
 static void apply_retail_parity(void) {
     if (!g_retail_parity || g_lineage != LIN_CRACKED) return;
@@ -3767,8 +3911,8 @@ static void apply_retail_parity(void) {
      * valid text. */
     static const char pool0[] = "Buy Sword of Sharpness for 100 GP";   /* -> [0x39b66] */
     static const char pool1[] = "Sell Sword of Sharpness for 50 GP";   /* -> [0x39b8c] */
-    /* B17: retail's version tag (h4+0x7bea holds {0x0001,"v1.4"}); the flag word +
-     * text layout is mirrored so the alert routine sees exactly retail's bytes. */
+    /* Preserve the legacy version tag for saves already inside the old native
+     * text renderer. New requests use a host notice; the old wait is retired below. */
     static const uint8_t pool2[] = { 0x00, 0x01, 'v', '1', '.', '4', 0x00 };  /* -> [0x39bae], text at [0x39bb0] */
     if (memcmp(g_ram + 0x39b66u, pool0, sizeof(pool0)) != 0)
         memcpy(g_ram + 0x39b66u, pool0, sizeof(pool0));
@@ -3816,26 +3960,55 @@ static uint32_t parity_rng(void) {
     w32(0x391a8u, d0);
     return d0;
 }
-static int g_ko_latch = 0;   /* B3: retail's "fighter is down" latch (host-side twin of retail's h1 var) */
-/* ===== B15: retail's UI feedback sound at loot/trade actions =====
- * Retail wraps its sound trigger in a register-preserving helper (movem around
- * `move.w #$9c,d0; jsr sound`) and calls it at ~27 loot/trade sites; the cracked
- * build plays the same sound at only a few of them.  The 21 mapped retail-only
- * sites are ported with a TRANSPARENT GUEST CALL: save all registers + SR host-
- * side, rts-divert into the game's own trigger (h16+$88 = 0x3aa44 -- the exact
- * routine cracked's inline sites call) with d0=$9c, and restore everything when
- * it returns, so the interrupted code path continues bit-perfectly.  3 retail
- * sites already have a cracked twin (skipped); 3 sit inside the structurally
- * different menu flow (unmappable 1:1, skipped).  --noretailsfx for A/B. */
+static int g_cursor_rng_fix = 1; /* --nocursorrng: A/B the B15 menu cursor tick */
+/* Retail advances the shared RNG after each active menu-cursor update, even
+ * without movement (retail 0x2d4ae). The result is discarded. Tail-call the
+ * original RNG from the old cursor's RTS: its existing dispatcher frame saves
+ * D0, and the RNG preserves D1/D2 itself. This needs no extra return address,
+ * host phase or save field; interrupted calls resume as ordinary native code.
+ * Only this guarded dispatcher call has that register-preservation contract. */
+static void cursor_rng_hook(uint32_t pc) {
+    if (pc != 0x2d6deu || !g_os || !g_retail_parity || !g_cursor_rng_fix
+        || !task_cursor_code()
+        || r32(0x2d61cu) != 0x33fc0001u || r32(0x2d620u) != 0x000392d8u
+        || r16(0x2d6d8u) != 0x4eb9u || r32(0x2d6dau) != 0x00041666u
+        || r16(pc) != 0x4e75u
+        || r32(0x3b916u) != 0x48e7ffbcu || r16(0x3b91au) != 0x4e91u
+        || r32(0x3b91cu) != 0x4cdf3dffu) return;
+    static const uint8_t rng_code[] = {
+        0x48,0xe7,0x60,0x00,0x20,0x39,0x00,0x03,0x91,0xa8,0x74,0x08,
+        0x22,0x00,0xe6,0x99,0xb1,0x81,0xe4,0x91,0xe2,0x90,0x53,0x42,
+        0x66,0xf2,0x23,0xc0,0x00,0x03,0x91,0xa8,0x4c,0xdf,0x00,0x06,0x4e,0x75
+    };
+    uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7);
+    if ((sp & 1u) || sp < 8u || sp > RAM_SIZE - 4u || r32(sp) != 0x3b91cu
+        || memcmp(g_ram + 0x2b2b0u, rng_code, sizeof(rng_code))) return;
+    m68k_set_reg(M68K_REG_PC, 0x2b2b0u);
+}
+static int g_ko_fix = 1;     /* --nokofix restores the former, incomplete B3 port. */
+/* B3: retail 0x2e8c8, cleared at each HUMAN knight handler entry and set when
+ * a rat's lethal hit installs its paired killing animation. The rat handlers
+ * must then leave that animation alone. This is not a general death flag.
+ * A frame/save can interrupt the guest between these handlers: serialize it. */
+static uint8_t g_ko_latch = 0;
+/* B15: retail has 28 UI click calls: 25 missing here and 3 native inline calls.
+ * Reuse the original register-preserving helper at 2cd6a. Its MOVEM frame and
+ * our small return marker/SR frame live on the guest stack, so ordinary saves
+ * retain a pending click without a host-only phase/register sidecar. The old
+ * sidecar was lost on a cold load during sound, corrupting the resumed action.
+ * --noretailsfx suppresses new calls; an already-started call must still unwind. */
 static int g_retail_sfx = 1;
-static struct { int phase; uint32_t site; uint32_t regs[16]; uint32_t sr; } g_sfx_call = { 0 };
 static const struct { uint32_t pc; uint16_t op16; uint32_t op32; } g_sfx_sites[] = {
-    { 0x22384u, 0x4eb9u, 0x0002c5f4u },   /* menu/equip transitions */
-    { 0x223ceu, 0x4eb9u, 0x0002c5f4u },
-    { 0x224d8u, 0x4eb9u, 0x0002a318u },
-    { 0x224e8u, 0x4eb9u, 0x00028b26u },
-    { 0x22504u, 0x4eb9u, 0x00028b26u },
-    { 0x22520u, 0x4eb9u, 0x00028b26u },
+    { 0x22384u, 0x4eb9u, 0x0002d5f4u },   /* Waterdeep Mystic */
+    { 0x2239au, 0x4eb9u, 0x0002d5f4u },   /* Waterdeep Tavern */
+    { 0x223b0u, 0x4eb9u, 0x00029b26u },   /* Waterdeep Merchant */
+    { 0x223c8u, 0x4eb9u, 0x00029b26u },   /* Waterdeep Healer, before fade */
+    { 0x223e4u, 0x4eb9u, 0x0002d5f4u },   /* both city Exits */
+    { 0x224d2u, 0x4eb9u, 0x0002d5f4u },   /* Highwood Tavern, before cursor removal */
+    { 0x224e8u, 0x4eb9u, 0x00029b26u },   /* Highwood Merchant */
+    { 0x22504u, 0x4eb9u, 0x00029b26u },   /* Highwood Temple */
+    { 0x22520u, 0x4eb9u, 0x00029b26u },   /* Highwood Healer */
+    { 0x22cdau, 0x4e75u, 0u          },   /* name accepted (Fire or Enter) */
     { 0x22d60u, 0x3039u, 0u          },   /* select screen */
     { 0x2cd88u, 0x33fcu, 0u          },   /* loot/trade screen actions: */
     { 0x2cd9cu, 0x6100u, 0u          },
@@ -3843,17 +4016,146 @@ static const struct { uint32_t pc; uint16_t op16; uint32_t op32; } g_sfx_sites[]
     { 0x2d1acu, 0x237cu, 0x0000001bu },   /*   armor take (loser to base armor) */
     { 0x2d23cu, 0x6000u, 0u          },   /*   weapon take exit */
     { 0x2d240u, 0x0cb9u, 0u          },
-    { 0x2d2e8u, 0x4eb9u, 0x0002aca4u },   /*   item screen refresh points */
-    { 0x2d31cu, 0x4eb9u, 0x0002aca4u },
-    { 0x2d350u, 0x4eb9u, 0x0002aca4u },
-    { 0x2d384u, 0x4eb9u, 0x0002aca4u },
-    { 0x2d3b8u, 0x4eb9u, 0x0002aca4u },
-    { 0x2d3dcu, 0x4eb9u, 0x0002aca4u },   /*   knife take */
+    { 0x2d2e8u, 0x4eb9u, 0x0002bca4u },   /*   successful armour purchases */
+    { 0x2d31cu, 0x4eb9u, 0x0002bca4u },
+    { 0x2d350u, 0x4eb9u, 0x0002bca4u },
+    { 0x2d384u, 0x4eb9u, 0x0002bca4u },   /*   successful sword purchases */
+    { 0x2d3b8u, 0x4eb9u, 0x0002bca4u },
+    { 0x2d3dcu, 0x4eb9u, 0x0002bca4u },   /*   dagger purchase */
     { 0x2d428u, 0xb27cu, 0u          },   /*   item click eval */
-    { 0x2d47cu, 0x0431u, 0u          },   /*   item transfer */
+    { 0x2d47cu, 0x0430u, 0u          },   /*   ordinary item sale */
 };
 
+static int retail_sfx_site(uint32_t pc) {
+    if (pc < 0x22384u || pc > 0x2d47cu) return 0;
+    if (pc == 0x22cdau && (r32(pc - 8u) != 0x33fc0000u || r32(pc - 4u) != 0x0002e05cu))
+        return 0; /* name-field close, not an unrelated RTS at this address */
+    for (unsigned i = 0; i < sizeof(g_sfx_sites)/sizeof(g_sfx_sites[0]); i++)
+        if (pc == g_sfx_sites[i].pc)
+            return r16(pc) == g_sfx_sites[i].op16
+                && (!g_sfx_sites[i].op32 || r32(pc + 2u) == g_sfx_sites[i].op32);
+    return 0;
+}
+static int retail_sfx_helper(void) {
+    return r32(0x2cd6au) == 0x48e7fffeu && r32(0x2cd6eu) == 0x303c009cu
+        && r16(0x2cd72u) == 0x4eb9u && r32(0x2cd74u) == 0x0003aa44u
+        && r32(0x2cd78u) == 0x4cdf7fffu && r16(0x2cd7cu) == 0x4e75u;
+}
+#define SFX_RETURN_TAG 0x53465831u /* "SFX1": stack frame, already part of saved RAM */
+static int retail_sfx_resume(uint32_t pc) {
+    if (!g_os || g_lineage != LIN_CRACKED || !retail_sfx_site(pc) || !retail_sfx_helper()) return 0;
+    uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7);
+    if ((sp & 1u) || sp > RAM_SIZE - 12u || r32(sp) != SFX_RETURN_TAG || r32(sp + 4u) != pc)
+        return 0;
+    uint32_t sr = r32(sp + 8u);
+    if (sr > 0xffffu) return 0;
+    m68k_set_reg(M68K_REG_A7, sp + 12u);
+    m68k_set_reg(M68K_REG_SR, sr);
+    return 1;
+}
+static void retail_sfx_begin(uint32_t pc) {
+    if (!g_os || !g_retail_parity || !g_retail_sfx || g_lineage != LIN_CRACKED
+        || !retail_sfx_site(pc) || !retail_sfx_helper()) return;
+    uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7);
+    if ((sp & 1u) || sp < 76u || sp > RAM_SIZE) return; /* marker + return + native MOVEM */
+    w32(sp - 4u, m68k_get_reg(NULL, M68K_REG_SR));
+    w32(sp - 8u, pc);
+    w32(sp - 12u, SFX_RETURN_TAG);
+    w32(sp - 16u, pc); /* native helper's RTS returns to the interrupted instruction */
+    m68k_set_reg(M68K_REG_A7, sp - 16u);
+    m68k_set_reg(M68K_REG_PC, 0x2cd6au);
+    if (g_log) { static unsigned n; if (n++ < 12)
+        fprintf(g_log, "SFX-CLICK site=%06x fr=%d ic=%llu\n",
+                pc, g_cur_frame, (unsigned long long)g_icount); }
+}
+
+/* Retail removed the blanket kind12 override in Stonehenge. Actor offsets
+ * (stats, lives, equipment, gold, daggers) are NOT inventory offsets: the old
+ * handler decremented another knight's items before granting a free life.
+ * Keep XP purchases on their ordinary kind3 path. Offer only labelled magic
+ * items, including rings/talismans whose retail "Offer" labels still exist
+ * although retail accidentally sends their kind1 clicks to the Take handler.
+ *
+ * Reuse the original kind12 transaction for valid offerings: its native MOVEM
+ * sound helper preserves the item registers, then consumes exactly one item.
+ * Merely removing the override exposes a SECOND decrement in the old kind5
+ * mode3 branch. Bypass that branch before either decrement. No host transaction
+ * state or new guest return addresses: existing mid-click saves remain usable. */
+static int danu_item(unsigned offset) {
+    return offset == 0 || offset == 2 || offset == 6 || offset == 8
+        || offset == 10 || offset == 12 || offset == 14 || offset == 16 || offset == 18;
+}
+static int danu_can_offer(unsigned offset, unsigned flags) {
+    uint32_t actor = r32(0x2fb08u), items = r32(0x2fb0cu);
+    return danu_item(offset) && (flags & 0x10u)
+        && actor && !(actor & 1u) && actor <= RAM_SIZE - 0x84u
+        && items && !(items & 1u) && items <= RAM_SIZE - 0x18u
+        && r32(actor + 0x60u) == items && r8(items + offset) != 0;
+}
+static void danu_hook(uint32_t pc) {
+    switch (pc) {
+    case 0x2c86au: case 0x2cda6u: case 0x2ce18u: case 0x2cfdeu:
+    case 0x2cfeeu: case 0x2cff4u: case 0x2cffcu: case 0x2d010u:
+    case 0x2d014u: case 0x227deu: break;
+    default: return;
+    }
+    if (!g_os || !g_retail_parity || !g_danu_fix || g_lineage != LIN_CRACKED
+        || r32(0x2fb1cu) != 3
+        || r32(0x2c86au) != 0x33fc000cu || r32(0x2c86eu) != 0x0002faf6u
+        || r32(0x2cfdeu) != 0x20790002u || r32(0x2cfe2u) != 0xfb082279u
+        || r32(0x2cfe6u) != 0x0002fb0cu || r32(0x2cffcu) != 0x04310001u
+        || r32(0x2d010u) != 0x60000082u) return;
+
+    unsigned arg = m68k_get_reg(NULL, M68K_REG_D1) & 0xffffu;
+    unsigned flags = m68k_get_reg(NULL, M68K_REG_D0) & 0xffffu;
+    if (pc == 0x2c86au) {
+        m68k_set_reg(M68K_REG_PC, 0x2c872u); /* retain the builder's real item kind */
+    } else if (pc == 0x2cda6u && r32(pc) == 0x2448266au) {
+        /* Saves can contain an already drawn, old kind12 panel. Normalize its
+         * cached metadata before the native dispatcher reads it. New panels
+         * already have these kinds. Ring/talisman kind1 is handled below. */
+        uint32_t hotspot = m68k_get_reg(NULL, M68K_REG_A0);
+        if (!hotspot || (hotspot & 1u) || hotspot > RAM_SIZE - 0x18u
+            || r16(hotspot + 0x14u) != 12) return;
+        unsigned offset = r16(hotspot + 0x16u), kind = 0;
+        if (danu_item(offset)) kind = (offset == 6 || offset == 8) ? 1 : 5;
+        else if (offset == 4) kind = 1;
+        else if (offset == 0x46 || offset == 0x47 || offset == 0x48
+                 || offset == 0x49 || offset == 0x4c) kind = 3;
+        else if (offset == 0x4a || offset == 0x58 || offset == 0x5c) kind = 2;
+        if (kind) w16(hotspot + 0x14u, kind);
+    } else if (pc == 0x2ce18u || pc == 0x2d014u || pc == 0x2cfdeu) {
+        if (pc == 0x2cfdeu && arg >= 0x46 && arg <= 0x48) {
+            m68k_set_reg(M68K_REG_PC, 0x2d0b6u); /* old pending stat click: XP, not an offering */
+        } else {
+            int valid = danu_can_offer(arg, flags);
+            m68k_set_reg(M68K_REG_PC, valid ? 0x2cfdeu : 0x2cdf4u);
+        }
+    } else if (pc == 0x2cfeeu || pc == 0x2cff4u || pc == 0x2cffcu) {
+        /* Also guard saves paused inside the old native sound call, before its
+         * sword downgrade or inventory write. Never recheck quantity AFTER
+         * the decrement: consuming the last item is a valid transaction. */
+        if (!danu_can_offer(arg, flags)
+            || m68k_get_reg(NULL, M68K_REG_A1) != r32(0x2fb0cu))
+            m68k_set_reg(M68K_REG_PC, 0x2cdf4u);
+    } else if (pc == 0x2d010u) {
+        m68k_set_reg(M68K_REG_PC, 0x2cfd2u); /* retail redraw; no loot-selection count */
+    } else if (pc == 0x227deu && r32(pc) == 0x0c79ffffu
+               && r32(pc + 4u) == 0x0002cfdau) {
+        /* An old save past an invalid consumption must not grant its reward.
+         * Past inventory corruption cannot safely be inferred or repaired. */
+        if (!danu_item(r16(0x2cfdau))) w16(0x2cfdau, 0xffffu);
+    }
+}
+
+#include "numbered_menu.h"
+#include "multiplayer_campaign.h"
+
 void moon_instr_hook(unsigned int pc) {
+    int sfx_resumed = retail_sfx_resume(pc);
+    mp_campaign_hook(pc);
+    danu_hook(pc);
+    cursor_rng_hook(pc);
     /* The human fighter's input selector uses JOY0 for player two (selector 1).
      * Practice explicitly assigns the green knight to that port in both disk
      * lineages. Our host binds one player and mirrors directions/fire into the
@@ -3870,8 +4172,42 @@ void moon_instr_hook(unsigned int pc) {
         && r16(pc + 6) == 0x6702u && r16(pc + 8) == 0x3001u
         && r16(pc + 10) == 0x4e75u) {
         uint32_t actor = m68k_get_reg(NULL, M68K_REG_A0);
-        if (actor < RAM_SIZE - 0x0bu && r8(actor + 0x0bu) == 1)
+        if (g_mp_practice) {
+            /* Keep the original selector/attack machinery. JOY0 belongs to the
+             * second Practice knight; mouse counters remain available to menus. */
+            int active = g_mp_script || g_mp.phase == MP_PLAY;
+            m68k_set_reg(M68K_REG_D0, (m68k_get_reg(NULL, M68K_REG_D0) & 0xffff0000u)
+                         | (active ? g_mp_input[1] : 0));
+            m68k_set_reg(M68K_REG_D1, (m68k_get_reg(NULL, M68K_REG_D1) & 0xffff0000u)
+                         | (active ? g_mp_input[0] : 0));
+        } else if (g_mp_campaign) {
+            int player=mp_roster_player(actor,1);
+            unsigned input=g_mp.phase==MP_PLAY && player>=0
+                && (g_mp_combatants & (1u<<player)) ? g_mp_input[player] : 0;
+            int reg=r8(actor+0x0b)==1 ? M68K_REG_D0 : M68K_REG_D1;
+            m68k_set_reg(reg,(m68k_get_reg(NULL,reg)&0xffff0000u)|input);
+        } else if (actor < RAM_SIZE - 0x0bu && r8(actor + 0x0bu) == 1)
             m68k_set_reg(M68K_REG_D0, m68k_get_reg(NULL, M68K_REG_D0) & 0xffff0000u);
+    }
+    /* Original Practice setup has finished; its next call enters scene 12.
+     * Guards are distinct because both code and data move in the retail image. */
+    if (g_os && (g_sdl_mode || g_mp_script) && !g_mp_practice
+        && ((pc == 0x24d36u && r16(pc) == 0x4eb9u && r32(pc+2) == 0x29b9au)
+         || (g_lineage == LIN_RETAIL && pc == 0x24e12u
+             && r16(pc) == 0x4eb9u && r32(pc+2) == 0x29a4eu))) {
+        /* Original Practice always creates two human fighters. The saved
+         * campaign player count is restored on exit, not a Practice mode choice.
+         * Keyboard-only training needs no device identification. */
+        g_mp_practice = g_mp_script || mp_pad_count() > 0;
+        if (g_sdl_mode) {
+            if (g_mp_practice) mp_begin_practice();
+            else mp_reset(&g_mp); /* Solo uses regular input without host setup. */
+        }
+        g_mp_input[0] = g_mp_input[1] = 0;
+        if (g_log) fprintf(g_log, "MP-PRACTICE original setup complete; %s\n",
+                           g_mp_practice ? (g_mp.phase == MP_PLAY ? "menu controller inherited" :
+                                           "awaiting Player 1 Start") :
+                           "keyboard-only training, no assignment prompt");
     }
     /* Retail-parity data/same-size-code patches: re-assert periodically so a fresh
      * mog overlay (scene transition) gets re-patched within a few k instructions.
@@ -3952,18 +4288,18 @@ void moon_instr_hook(unsigned int pc) {
                         dsc, g_cur_frame, (unsigned long long)g_icount, g_disp_base); }
         }
     }
-    /* --delvlog (TEMP): trace the moonstone-delivery altar handler 0x21ca4 state machine + auto-fire
-     * through every 0x22fd0 wait so the whole delivery (map overview -> disk swap -> map -> cutscene)
+    /* --delvlog (legacy option name): trace the lair handler 0x21ca4 state machine + auto-fire
+     * through every 0x22fd0 wait so lair combat, defeat inventory and treasure
      * plays out headlessly and we can see the branch order + palette timing. */
     if (g_delvlog && g_os && g_log) {
         switch (pc) {
             case 0x21ca4u: fprintf(g_log, "DELV @21ca4 ENTER fr=%d ic=%llu f9f0=%04x e066=%02x scene=%u a1=%06x\n",
                     g_cur_frame, (unsigned long long)g_icount, (unsigned)r16(0x2f9f0u),
                     (unsigned)r8(0x2e066u), (unsigned)r32(0x2fb1cu), (unsigned)m68k_get_reg(NULL,M68K_REG_A1)); break;
-            case 0x21cbau: fprintf(g_log, "DELV @21cba bsr 21d7a (cutscene-asset setup)\n"); break;
-            case 0x21ce2u: fprintf(g_log, "DELV @21ce2 *** scene-9 MAP branch (e066 bit0 SET) -> shows the map overview ***\n"); break;
-            case 0x21cfau: fprintf(g_log, "DELV @21cfa +1 MOONSTONE (e066 bit0 clear)\n"); break;
-            case 0x21d00u: fprintf(g_log, "DELV @21d00 scene-2 CUTSCENE dispatch\n"); break;
+            case 0x21cbau: fprintf(g_log, "DELV @21cba bsr 21d7a (lair combat setup)\n"); break;
+            case 0x21ce2u: fprintf(g_log, "DELV @21ce2 scene-9 defeat inventory (e066 bit0 SET)\n"); break;
+            case 0x21cfau: fprintf(g_log, "DELV @21cfa +1 XP (lair victory, e066 bit0 clear)\n"); break;
+            case 0x21d00u: fprintf(g_log, "DELV @21d00 scene-2 lair treasure dispatch\n"); break;
             case 0x2bbecu: fprintf(g_log, "DELV scene-launch jsr 2bbec d0=%u fr=%d ic=%llu\n",
                     (unsigned)m68k_get_reg(NULL,M68K_REG_D0), g_cur_frame, (unsigned long long)g_icount); break;
             case 0x23feau: fprintf(g_log, "DELV @23fea disk prompt fr=%d ic=%llu namelow=%04x\n",
@@ -4246,15 +4582,80 @@ void moon_instr_hook(unsigned int pc) {
             } }
         }
     }
+    /* B2  dragon foot strike: the dispatcher leaves kind 0x2c (44) in D0.
+     * The earlier `subi.w #10,D0` therefore yields 34; retail uses `move.w
+     * #10,D0`. Install that native instruction at entry, before opcode fetch,
+     * so even a save resumed here cannot beat the periodic parity pass.
+     * Accept only these two instructions followed by the original reduction
+     * call and HP subtraction. Normalize either saved opcode for A/B too.
+     * Musashi executes the MOVE itself, preserving its flags and timing. */
+    if (g_os && g_lineage == LIN_CRACKED && pc == 0x26682u
+        && (r32(pc) == 0x0440000au || r32(pc) == 0x303c000au)
+        && r16(pc + 4u) == 0x612cu && r32(pc + 6u) == 0x91690050u) {
+        uint16_t opcode = g_retail_parity && g_dragon_damage_fix ? 0x303cu : 0x0440u;
+        if (r16(pc) != opcode) w16(pc, opcode);
+    }
+    /* B18 dragon-fire death: retail removes the four-repeat command around
+     * pose 3d. A single repeat gives the same two native updates, retaining
+     * every script address and the earlier interpreter's command numbers.
+     * Normalize only at the native count read, including a save resumed here.
+     * An older save past this read finishes its already-started loop normally;
+     * no live animation workspace, CPU flags or host/save state is rewritten. */
+    if (g_os && g_lineage == LIN_CRACKED && pc == 0x28f66u
+        && m68k_get_reg(NULL, M68K_REG_A6) == 0x3204eu
+        && r32(pc - 4u) == 0x2a690024u && r32(pc) == 0x1b6e0001u
+        && r16(pc + 4u) == 0x0006u && r32(pc + 6u) == 0x1b7c0001u
+        && (r16(0x3204eu) == 0x9404u || r16(0x3204eu) == 0x9401u)
+        && r32(0x3204au) == 0xff00a412u
+        && r32(0x32050u) == 0x8802103du && r32(0x32054u) == 0x0b20ffe6u
+        && r32(0x32058u) == 0xfffe8802u && r32(0x3205cu) == 0x103e0c20u) {
+        g_ram[0x3204fu] = g_retail_parity && g_dragon_fire_fix ? 1 : 4;
+    }
+    /* Initial grassland lairs: retail changes templates 18,20,21 (species and
+     * base encounter budgets). Normalize only the source record immediately
+     * before the original world initializer copies it. Never rewrite live
+     * nodes on load/revisit: their remaining counts are saved campaign state.
+     * A save interrupted after a copy keeps that node; later copies use the
+     * selected templates. No layout, loot/RNG, CPU flags or save-state change.
+     * Accept either known record so saved templates also support isolated A/B. */
+    if (g_os && g_lineage == LIN_CRACKED && pc == 0x25ee0u
+        && r16(0x25ec6u) == 0x43f9u && r32(0x25ec8u) == 0x310ceu
+        && r16(pc - 2u) == 0x7017u && r32(pc) == 0x21590004u
+        && r32(pc + 4u) == 0x315a000au && r32(pc + 20u) == 0xd1fc0000u
+        && r32(pc + 24u) == 0x001451c8u && r32(pc + 28u) == 0xffe44e75u) {
+        int index = lair_xp_index(m68k_get_reg(NULL, M68K_REG_A0));
+        if ((index == 18 || index == 20 || index == 21)
+            && (m68k_get_reg(NULL, M68K_REG_D0) & 0xffffu) == 23u - (unsigned)index
+            && m68k_get_reg(NULL, M68K_REG_A1) == 0x310ceu + 4u * (unsigned)index) {
+            uint32_t source = 0x310ceu + 4u * (unsigned)index;
+            uint32_t before = index == 20 ? 0x00200004u : 0x00000008u;
+            uint32_t after = index == 18 ? 0x00200004u : index == 20 ? 0x00200006u : 0x00000009u;
+            uint32_t record = r32(source);
+            if (record == before || record == after)
+                w32(source, g_retail_parity && g_lair_setup_fix ? after : before);
+        }
+    }
+    /* Negative lives: retail's inventory uses MOVEQ #0,D7, not #5.
+     * Only the signed-negative branch reaches this fallback; the actor's
+     * lives byte and all nonnegative displays remain untouched. Execute the
+     * native instruction for exact flags/timing, including saves resumed here.
+     * Recognize either saved opcode so the isolated A/B switch works too. */
+    if (g_os && g_lineage == LIN_CRACKED && pc == 0x2c292u
+        && r32(pc - 6u) == 0x1e280049u && r16(pc - 2u) == 0x6a02u
+        && (r16(pc) == 0x7e05u || r16(pc) == 0x7e00u)
+        && r32(pc + 2u) == 0x33fc0029u && r32(pc + 6u) == 0x0002faf0u) {
+        uint16_t opcode = g_retail_parity && g_life_icons_fix ? 0x7e00u : 0x7e05u;
+        if (r16(pc) != opcode) w16(pc, opcode);
+    }
     /* ===== RETAIL-PARITY PC HOOKS (size-changing retail edits) =====
      * These carry retail behaviour that INSERTED instructions in the cracked
      * layout (so they cannot be in-place byte patches -- see the g_parity_tab
      * table above for the same-size ones).  All gated on g_retail_parity and
      * byte-guarded so they are inert off the cracked build.  Ledger: A/B items
      * in extracted/LEDGER_DRAFT.md. */
-    /* B2  minimum damage floor: the armor-reduction helper (0x266a?) ends
-     *     `move.b $8(a2),d1; lsr.w d1,d0; rts`, so heavy armor can reduce a hit's
-     *     damage all the way to 0.  Retail clamps the result to >= 5 before the
+    /* B2  minimum dragon damage: the talisman helper (0x266b4) ends
+     *     `move.b $8(a2),d1; lsr.w d1,d0; rts`. Each Talisman of the Wyrm
+     *     halves damage. Retail clamps the result to >= 5 before the
      *     rts (`cmp.w #5,d0; bgt +; move.w #5,d0`).  Apply the same floor. */
     if (g_os && g_retail_parity && pc == 0x266c0u
         && r16(0x266beu) == 0xe268u && r16(0x266c0u) == 0x4e75u) {
@@ -4274,7 +4675,59 @@ void moon_instr_hook(unsigned int pc) {
         && r16(0x25934u) == 0x4eb9u && r32(0x25936u) == 0x00025a30u) {
         if (r16(0x42266u)) w16(0x42266u, 0);
     }
-    /* A6  demon aggression-table index bounds mask: the first threshold lookup
+    /* A5  retail rat initialization also clears the actor's complete state word
+     * (`move.w #0,($68,A1)` at retail 0x25538). A recycled cracked rat can retain
+     * the point-blank jump bit and resume its old arc on its first behavior tick,
+     * overwriting the new off-screen position with the previous rat's endpoint.
+     * Reset at the matching constructor boundary, before any new behavior runs;
+     * existing actors and their saved in-flight/grapple states are untouched. */
+    if (g_os && g_retail_parity && g_rat_spawn_fix && g_lineage == LIN_CRACKED
+        && pc == 0x2545cu && r16(pc) == 0x49f9u && r32(pc + 2u) == 0x0002e3b0u) {
+        uint32_t actor = m68k_get_reg(NULL, M68K_REG_A1);
+        if (actor && !(actor & 1u) && actor < RAM_SIZE - 0x84u
+            && r8(actor + 0x4du) == 0x24u && r16(actor + 0x68u)) {
+            uint16_t previous = r16(actor + 0x68u);
+            w16(actor + 0x68u, 0);
+            if (g_log) { static int rn = 0; if (rn++ < 24) {
+                fprintf(g_log, "RAT-SPAWN-RESET rec=%06x flags=%04x X=%d fr=%d ic=%llu\n",
+                        actor, previous, (int)(int16_t)r16(actor + 4u), g_cur_frame,
+                        (unsigned long long)g_icount);
+                fflush(g_log);
+            } }
+        }
+    }
+    /* B11 AI-knight reactions (kind $10, not the demon). Retail removes the
+     * bit-7 decision gate and clears that bit after a successful block. The
+     * shared block helper sets it for action $1c and rejects another such block
+     * while it remains set. Keep human/other-creature uses of the bit intact.
+     * Both PCs in the deleted gate are handled for old mid-instruction saves;
+     * no new persistent state or guest-code patch is needed. */
+    if (g_os && g_retail_parity && g_knight_reaction_fix && g_lineage == LIN_CRACKED) {
+        if ((pc == 0x4261cu || pc == 0x42622u)
+            && r32(0x4261cu) == 0x08280007u && r32(0x42620u) == 0x00686600u
+            && r16(0x42624u) == 0x0090u && r16(0x42626u) == 0x3f01u) {
+            uint32_t actor = m68k_get_reg(NULL, M68K_REG_A0);
+            if (actor && !(actor & 1u) && actor < RAM_SIZE - 0x84u
+                && r8(actor + 0x4du) == 0x10u) {
+                m68k_set_reg(M68K_REG_PC, 0x42626u);
+                return;
+            }
+        }
+        if (pc == 0x427c4u && r32(0x427bcu) == 0x23f00000u
+            && r32(0x427c0u) == 0x0002eaf8u
+            && r16(pc) == 0x4ef9u && r32(pc + 2u) == 0x00027ec8u) {
+            uint32_t actor = m68k_get_reg(NULL, M68K_REG_A1);
+            if (actor && !(actor & 1u) && actor < RAM_SIZE - 0x84u
+                && r8(actor + 0x4du) == 0x10u) {
+                uint8_t flags = r8(actor + 0x68u);
+                uint32_t sr = m68k_get_reg(NULL, M68K_REG_SR);
+                w8(actor + 0x68u, flags & 0x7fu);
+                /* Native BCLR changes only Z, testing the previous bit. */
+                m68k_set_reg(M68K_REG_SR, (sr & ~4u) | ((flags & 0x80u) ? 0u : 4u));
+            }
+        }
+    }
+    /* A6  AI-knight aggression-table index bounds mask: the first threshold lookup
      *     (0x4263c `cmp.b (a5,d2.w),d0`, table [0x392b4]) indexes with the raw
      *     word from [0x30394]; retail masks `andi.w #$7,d2` first so the index
      *     stays inside the 8-entry table.  Mask d2 just before the read (the
@@ -4336,31 +4789,124 @@ void moon_instr_hook(unsigned int pc) {
         uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0);
         if (a0 && a0 < RAM_SIZE - 0x84u) w32(a0 + 0x64u, 0);
     }
-    /* B14 loot enumerator, retail's best-weapon special case: when the corpse's
-     *     weapon id is 0x19 retail lists it as count=1/kind=4 instead of the
-     *     generic count=2/kind=$58 entry (which cracked always writes just before
-     *     this jsr).  Override the two h1 vars after cracked's writes; d0 still
-     *     holds the (unclamped, see 'loot-weapon-noclamp') weapon id here. */
-    if (g_os && g_retail_parity && pc == 0x2c3fau
-        && r16(0x2c3fau) == 0x4eb9u && r32(0x2c3fcu) == 0x0002c85eu) {
-        if (m68k_get_reg(NULL, M68K_REG_D0) == 0x19u) {
-            w16(0x2faf6u, 1);       /* count */
-            w16(0x2fafcu, 4);       /* kind */
+    /* Retail permits one generated special sword for the ENTIRE campaign.
+     * Test/set before the last-prize comparison, as retail 0x2a978..0x2a992 does;
+     * D3's character/dragon, lair and temple modes share the same latch. The
+     * older per-inventory test cannot enforce this across different recipients.
+     * Keep the flag outside guest RAM (the layouts differ), but in the save. */
+    if (g_os && g_retail_parity && g_sword_fix && g_lineage == LIN_CRACKED) {
+        if (pc == 0x25b4cu && r32(pc) == 0x33fc0000u && r32(pc + 4u) == 0x0002fa02u
+            && r32(pc + 8u) == 0x33fc0000u && r32(pc + 12u) == 0x0002e052u) {
+            g_sword_created = 0;
+            if (g_log) fprintf(g_log, "SWORD-WORLD reset fr=%d\n", g_cur_frame);
+        }
+        if (pc == 0x2aab8u && r16(pc) == 0xb0b9u && r32(pc + 2u) == 0x00037f00u
+            && r16(0x2aa9au) == 0x4eb9u && r32(0x2aa9cu) == 0x0002b2d6u
+            && m68k_get_reg(NULL, M68K_REG_D0) == 4u) {
+            if (g_sword_created) {
+                m68k_set_reg(M68K_REG_PC, 0x2aa9au); /* original RNG/prize selection */
+                if (g_log) { static unsigned n; if (n++ < 24)
+                    fprintf(g_log, "SWORD-REROLL mode=%u fr=%d\n",
+                            m68k_get_reg(NULL, M68K_REG_D3), g_cur_frame); }
+                return;
+            }
+            g_sword_created = 1;
+            if (g_log) fprintf(g_log, "SWORD-GENERATION claimed mode=%u fr=%d\n",
+                               m68k_get_reg(NULL, M68K_REG_D3), g_cur_frame);
+        }
+        if (pc == 0x2aafcu && r32(pc) == 0x4a280004u && r16(pc + 4u) == 0x6600u
+            && r16(0x2ab04u) == 0x4a43u) {
+            m68k_set_reg(M68K_REG_PC, 0x2ab04u); /* replace the obsolete recipient-only guard */
+            return;
         }
     }
-    /* A10 cursor-handler install dedup (0x2d5de): retail guards its handler-list
-     *     appends against double-install (an already-there check + a dedup call
-     *     before the append).  The screen-EFFECT append is already covered by
-     *     g_tasklist_fix (same dedup, 0x2a0ea); this closes the remaining site --
-     *     the menu cursor handler (0x2d61c) append into the same per-vblank list. */
-    if (g_os && g_retail_parity && pc == 0x2d5deu
-        && r16(0x2d5deu) == 0x217cu && r32(0x2d5e0u) == 0x0002d61cu && r16(0x2d5e4u) == 0xfffcu) {
-        for (uint32_t s = 0x3c096u; s < 0x3c0bau; s += 4u) {
-            if (r32(s) == 0x2d61cu) {                  /* cursor already registered */
-                m68k_set_reg(M68K_REG_PC, 0x2d5e6u);   /* skip the duplicate append */
-                break;
+    /* Retail 2173e adds one XP to each living AI knight before its Math gift.
+     * The existing caller 21612 -> 216ce already gates this loop to every FOUR
+     * daybreaks, when the moon phase advances. Insert at the missing ADDQ's
+     * instruction boundary; no host timer or persistent award latch is needed.
+     * Actor+4e is XP (spent by 40eba/2d0f8), NOT a Moonstone count. Actual
+     * Moonstone bits live at [actor+60]+16; see moonstone-ai-xp.md. */
+    if (g_os && g_retail_parity && g_ai_xp_fix && g_lineage == LIN_CRACKED
+        && pc == 0x21708u && r32(pc) == 0x48e7fffeu
+        && r16(pc + 4u) == 0x4eb9u && r32(pc + 6u) == 0x0002a884u
+        && r32(0x216e0u) == 0x0ca80000u && r32(0x216e4u) == 0x00040036u
+        && r32(0x216f6u) == 0x4a280049u && r16(0x216fau) == 0x6f1au) {
+        uint32_t actor = m68k_get_reg(NULL, M68K_REG_A0);
+        if (actor && !(actor & 1u) && actor <= RAM_SIZE - 0x84u
+            && r32(actor + 0x36u) == 4u && (int8_t)r8(actor + 0x49u) > 0) {
+            uint16_t old = r16(actor + 0x4eu), next = (uint16_t)(old + 1u);
+            uint32_t sr = m68k_get_reg(NULL, M68K_REG_SR);
+            /* ADDQ.W: exact 16-bit result and X/N/Z/V/C, including overflow. */
+            uint32_t ccr = (next & 0x8000u ? 8u : 0u) | (!next ? 4u : 0u)
+                         | (old == 0x7fffu ? 2u : 0u) | (old == 0xffffu ? 17u : 0u);
+            w16(actor + 0x4eu, next);
+            m68k_set_reg(M68K_REG_SR, (sr & ~31u) | ccr);
+            if (g_log) fprintf(g_log, "AI-XP periodic actor=%06x xp=%u->%u fr=%d\n",
+                               actor, old, next, g_cur_frame);
+        }
+    }
+    /* B8: retail resets the lair XP words at world creation, then claims each
+     * lair's reward once (retail 21d10..21d2e). Loot/coordinates and encounter
+     * counts still follow the original code. Reset even in A/B mode so a new
+     * campaign cannot inherit the previous world's host-side history. */
+    if (g_os && g_lineage == LIN_CRACKED) {
+        if (pc == 0x25dfeu && r16(pc) == 0x47f9u && r32(pc + 2u) == 0x0002df96u
+            && r32(pc + 6u) == 0x266b0044u && r16(pc + 10u) == 0x203cu
+            && r32(pc + 12u) == 0x000001dfu) {
+            memset(g_lair_xp_awarded, 0, sizeof(g_lair_xp_awarded));
+        }
+        if (g_retail_parity && g_lair_xp_fix && (pc == 0x21cf4u || pc == 0x21cfau)
+            && r16(0x21cf4u) == 0x2279u && r32(0x21cf6u) == 0x0002ebd0u
+            && r32(0x21cfau) == 0x06690001u && r16(0x21cfeu) == 0x004eu
+            && r16(0x21d00u) == 0x7002u) {
+            uint32_t node = r32(0x37178u), actor = r32(0x2ebd0u);
+            int index = lair_xp_index(node);
+            if (index >= 0 && actor && !(actor & 1u) && actor <= RAM_SIZE - 0x84u) {
+                if (pc == 0x21cf4u && g_lair_xp_awarded[index]) {
+                    m68k_set_reg(M68K_REG_A1, node); /* retail skips the actor reload */
+                    m68k_set_reg(M68K_REG_SR, m68k_get_reg(NULL, M68K_REG_SR) & ~15u); /* TST.W #1 */
+                    m68k_set_reg(M68K_REG_PC, 0x21d00u); /* still open the treasure screen */
+                    if (g_log) { static unsigned n; if (n++ < 32)
+                        fprintf(g_log, "LAIR-XP already-awarded lair=%d actor=%06x fr=%d\n",
+                                index, actor, g_cur_frame); }
+                    return;
+                }
+                /* Claim at the ADDI boundary, not at the preceding MOVEA:
+                 * a mid-award save must resume its pending increment once.
+                 * The guest ADDI itself supplies the native word/CCR behavior. */
+                if (pc == 0x21cfau && m68k_get_reg(NULL, M68K_REG_A1) == actor) {
+                    g_lair_xp_awarded[index] = 1;
+                    if (g_log) fprintf(g_log, "LAIR-XP awarded lair=%d actor=%06x xp=%u fr=%d\n",
+                                       index, actor, r16(actor + 0x4eu), g_cur_frame);
+                }
             }
         }
+    }
+    /* B14: a special weapon is an inventory item (kind1, offset4), not an
+     * actor field (kind2, offset58). D0 has ALREADY become action0x34 here;
+     * the original weapon id was saved in $2faee before that transformation. */
+    if (g_os && g_retail_parity && g_sword_fix && g_lineage == LIN_CRACKED && pc == 0x2c3fau
+        && r16(0x2c3fau) == 0x4eb9u && r32(0x2c3fcu) == 0x0002c85eu) {
+        if (r16(0x2faeeu) == 0x19u) {
+            w16(0x2faf6u, 1);       /* item kind */
+            w16(0x2fafcu, 4);       /* inventory offset */
+        }
+    }
+    /* A10: retail's pre-append helper is a raster wait, NOT deduplication.
+     * The native installed flag already handles ordinary repeated cursor starts.
+     * Here, resolve the slot atomically with the original MOVE so a finishing
+     * impact cannot leave a stale-tail hole. Let the native SUBA/save follow;
+     * removal by value below also tolerates compaction after this store. */
+    if (g_os && g_tasklist_fix && (pc == 0x2d586u || pc == 0x2d5deu) && task_cursor_code()) {
+        uint32_t slot = tasklist_find(0x2d61cu);
+        if (!slot) slot = tasklist_free_slot();
+        if (!slot) {
+            tasklist_full(0x2d61cu);
+            if (pc == 0x2d5deu) { w16(0x392c8u, 0); w32(0x392dau, 0); }
+            m68k_set_reg(M68K_REG_PC, 0x2d5f2u);
+            return;
+        }
+        if (pc == 0x2d5deu) m68k_set_reg(M68K_REG_A0, slot + 4u);
     }
     /* B13 loot armor-transfer (retail subroutine at its 0x21584, absent in
      *     cracked): on the victor's loot pass, if the loser wears BETTER armor
@@ -4391,62 +4937,137 @@ void moon_instr_hook(unsigned int pc) {
             }
         }
     }
-    /* B15 transparent guest call (see g_sfx_sites decl): phase 1 = the trigger just
-     * rts'd back to the diverted site -- restore every register + SR and fall
-     * through so the site's original instruction now executes; phase 0 = check the
-     * site table and divert.  The trigger never executes loot-screen PCs, so the
-     * single global slot cannot nest. */
-    if (g_os && g_retail_parity && g_retail_sfx) {
-        if (g_sfx_call.phase == 1 && pc == g_sfx_call.site) {
-            for (int i = 0; i < 8; i++) m68k_set_reg((m68k_register_t)(M68K_REG_D0 + i), g_sfx_call.regs[i]);
-            for (int i = 0; i < 8; i++) m68k_set_reg((m68k_register_t)(M68K_REG_A0 + i), g_sfx_call.regs[8 + i]);
-            m68k_set_reg(M68K_REG_SR, g_sfx_call.sr);
-            g_sfx_call.phase = 0;
-        } else if (g_sfx_call.phase == 0) {
-            for (unsigned s = 0; s < sizeof(g_sfx_sites)/sizeof(g_sfx_sites[0]); s++) {
-                if (pc != g_sfx_sites[s].pc) continue;
-                if (r16(pc) != g_sfx_sites[s].op16) break;                     /* overlay resident -> inert */
-                if (g_sfx_sites[s].op32 && r32(pc + 2u) != g_sfx_sites[s].op32) break;
-                for (int i = 0; i < 8; i++) g_sfx_call.regs[i]     = m68k_get_reg(NULL, (m68k_register_t)(M68K_REG_D0 + i));
-                for (int i = 0; i < 8; i++) g_sfx_call.regs[8 + i] = m68k_get_reg(NULL, (m68k_register_t)(M68K_REG_A0 + i));
-                g_sfx_call.sr = m68k_get_reg(NULL, M68K_REG_SR);
-                g_sfx_call.site = pc; g_sfx_call.phase = 1;
-                uint32_t sp = g_sfx_call.regs[15] - 4u;
-                w32(sp, pc);                                   /* trigger's rts lands back on this site */
-                m68k_set_reg(M68K_REG_A7, sp);
-                m68k_set_reg(M68K_REG_D0, 0x9cu);              /* retail's UI feedback sound id */
-                m68k_set_reg(M68K_REG_PC, 0x3aa44u);           /* h16+$88: the game's sound trigger */
-                if (g_log) { static int fn = 0; if (fn < 12) {
-                    fprintf(g_log, "SFX-CLICK site=%06x fr=%d ic=%llu\n",
-                            pc, g_cur_frame, (unsigned long long)g_icount);
-                    fflush(g_log); fn++; } }
-                break;
-            }
+    /* B13 manual armor loot (retail 0x2cff2), separate from automatic loot above.
+     * Cracked indexes an unscaled WORD table with the winner's old armor, which
+     * can read an odd address. Retail removes the LOSER's full armor HP bonus,
+     * equips/adds that bonus only when the armor is >= the winner's, and strips
+     * the loser even when inferior. Base armor is a no-op. Resume at the guest
+     * HP add so the following 0x2d1ac sound hook still executes exactly once.
+     * The common selected-item exit below recalculates/caps winner HP using the
+     * original 0x21474 helper, including existing armor and ring bonuses. */
+    if (g_os && g_retail_parity && g_manual_armor_fix && g_lineage == LIN_CRACKED
+        && pc == 0x2d184u && r16(pc) == 0x2a28u && r16(pc + 2u) == 0x005cu
+        && r16(0x2d1a8u) == 0xdb68u && r16(0x2d1acu) == 0x237cu
+        && r16(0x2d1c2u) == 0x4e75u) {
+        uint32_t winner = m68k_get_reg(NULL, M68K_REG_A0);
+        uint32_t loser = m68k_get_reg(NULL, M68K_REG_A1);
+        if (!winner || !loser || winner == loser || ((winner | loser) & 1u)
+            || winner >= RAM_SIZE - 0x84u || loser >= RAM_SIZE - 0x84u) {
+            m68k_set_reg(M68K_REG_PC, 0x2d1c2u);
+            return;
         }
+        uint32_t old = r32(winner + 0x5cu), armor = r32(loser + 0x5cu);
+        if (old < 0x1bu || old > 0x1eu || armor <= 0x1bu || armor > 0x1eu) {
+            m68k_set_reg(M68K_REG_PC, 0x2d1c2u);
+            return;
+        }
+        uint16_t bonus = (uint16_t)((armor - 0x1bu) * 10u);
+        w16(loser + 0x50u, (uint16_t)(r16(loser + 0x50u) - bonus));
+        if (armor >= old) w32(winner + 0x5cu, armor);
+        m68k_set_reg(M68K_REG_D5, armor >= old ? bonus : 0u);
+        m68k_set_reg(M68K_REG_PC, 0x2d1a8u);
+        if (g_log) { static int mn = 0; if (mn++ < 24) {
+            fprintf(g_log, "ARMOR-MANUAL winner=%06x loser=%06x old=%02x loot=%02x bonus=%u equipped=%d fr=%d\n",
+                    winner, loser, old, armor, bonus, armor >= old, g_cur_frame);
+            fflush(g_log);
+        } }
+        return;
     }
-    /* B17 'V' on the overland map = retail's version display (a retail-only key
-     *     handler between the 'E' end-turn and 'Q' checks: three alert globals,
-     *     then the h34 alert routine with a0 -> the "v1.4" tag, then two input
-     *     helpers, then the normal continuation).  Cracked lacks handler AND tag;
-     *     the tag lives in the parity pool, and the calls run as an rts-CHAIN
-     *     pushed on the guest stack (alert -> h20+$40 -> h20+$666 -> continue at
-     *     0x402a2), exactly retail's order.  Hook at the 'Q' compare, where the
-     *     key is still in d0. */
+    /* Retail manual weapon take (0x2d03c): read the LOSER's weapon, ignore
+     * the base sword, keep the winner's better weapon, and strip the loser.
+     * Never use the winner's special sword to decide what the loser supplied.
+     * Reuse the existing sound/selected-item/stat/redraw continuation. */
+    if (g_os && g_retail_parity && g_sword_fix && g_lineage == LIN_CRACKED
+        && pc == 0x2d1ccu && r32(pc) == 0x2a280058u
+        && r16(0x2d1f6u) == 0x4e75u && r16(0x2d23cu) == 0x6000u) {
+        uint32_t winner = m68k_get_reg(NULL, M68K_REG_A0);
+        uint32_t loser = m68k_get_reg(NULL, M68K_REG_A1);
+        if (!winner || !loser || winner == loser || ((winner | loser) & 1u)
+            || winner >= RAM_SIZE - 0x84u || loser >= RAM_SIZE - 0x84u) {
+            m68k_set_reg(M68K_REG_PC, 0x2d1f6u);
+            return;
+        }
+        uint32_t old = r32(winner + 0x58u), weapon = r32(loser + 0x58u);
+        if (old < 0x16u || old > 0x19u || weapon <= 0x16u || weapon > 0x19u) {
+            m68k_set_reg(M68K_REG_PC, 0x2d1f6u);
+            return;
+        }
+        if (weapon == 0x19u) {
+            /* Also handle a hotspot drawn before this build's corrected B14. */
+            m68k_set_reg(M68K_REG_D1, 4u);
+            m68k_set_reg(M68K_REG_PC, 0x2d014u); /* item dispatcher supplies pointers and sound */
+            return;
+        }
+        if (weapon >= old) w32(winner + 0x58u, weapon);
+        w32(loser + 0x58u, 0x16u);
+        m68k_set_reg(M68K_REG_PC, 0x2d23cu);
+        if (g_log) { static unsigned n; if (n++ < 24)
+            fprintf(g_log, "WEAPON-LOOT winner=%06x loser=%06x old=%02x loot=%02x fr=%d\n",
+                    winner, loser, old, weapon, g_cur_frame); }
+        /* A redirected instruction executes immediately, without another hook
+         * callback at 2d23c. Start its click explicitly before the common exit. */
+        retail_sfx_begin(0x2d23cu);
+        return;
+    }
+    /* Retail 0x2d064 sets the single sword's ownership to winner1/loser0.
+     * The old decrement/increment underflows when routed from the wrong actor
+     * and omits the winner's item byte for lair treasure (scene2). */
+    if (g_os && g_retail_parity && g_sword_fix && g_lineage == LIN_CRACKED
+        && pc == 0x2d202u && r32(pc) == 0x04310001u && r16(pc + 4u) == 0x1000u
+        && r16(0x2d23cu) == 0x6000u) {
+        uint32_t source = m68k_get_reg(NULL, M68K_REG_A1), dest = r32(0x2fb0cu);
+        uint32_t winner = r32(0x2fb08u), loser = r32(0x2fb10u);
+        int lair = r32(0x2fb1cu) == 2u;
+        if ((m68k_get_reg(NULL, M68K_REG_D1) & 0xffffu) != 4u
+            || !source || !dest || source == dest || source >= RAM_SIZE - 0x18u
+            || dest >= RAM_SIZE - 0x18u || !r8(source + 4u)
+            || !winner || (winner & 1u) || winner >= RAM_SIZE - 0x84u
+            || (!lair && (!loser || (loser & 1u) || loser == winner || loser >= RAM_SIZE - 0x84u))) {
+            m68k_set_reg(M68K_REG_PC, 0x2d0b4u);
+            return;
+        }
+        w8(dest + 4u, 1);
+        w8(source + 4u, 0);
+        w32(winner + 0x58u, 0x19u);
+        if (!lair) w32(loser + 0x58u, 0x16u);
+        m68k_set_reg(M68K_REG_PC, 0x2d094u); /* item path already played its original click sound */
+        if (g_log) { static unsigned n; if (n++ < 24)
+            fprintf(g_log, "SWORD-LOOT winner=%06x source=%06x scene=%u fr=%d\n",
+                    winner, source, r32(0x2fb1cu), g_cur_frame); }
+        return;
+    }
+    if (g_os && g_retail_parity && g_manual_armor_fix && g_lineage == LIN_CRACKED
+        && pc == 0x2d1b4u && r16(pc) == 0x0679u && r16(pc + 2u) == 1u
+        && r32(pc + 4u) == 0x0002fb02u && r16(0x2d094u) == 0x0679u) {
+        /* One selection, then the original HP/movement recalculation + redraw;
+         * the old armor-specific exit omitted the recalculation. */
+        m68k_set_reg(M68K_REG_PC, 0x2d094u);
+        return;
+    }
+    /* Resume a saved/in-progress click once; otherwise inject the missing call. */
+    if (!sfx_resumed) retail_sfx_begin(pc);
+    /* B17: an old save may still carry the injected V scancode. Consume that
+     * request without entering the native alert/wait chain. The normal Q compare
+     * then falls through; no guest stack, registers or alert globals are changed. */
     if (g_os && g_retail_parity && pc == 0x40296u
         && r16(0x40296u) == 0xb07cu && r16(0x40298u) == 0x0051u
         && (m68k_get_reg(NULL, M68K_REG_D0) & 0xffffu) == 0x56u) {
-        w16(0x7f688u, 1); w16(0x7f684u, 1); w16(0x7f682u, 0);
-        m68k_set_reg(M68K_REG_A0, 0x39bb0u);           /* "v1.4" in the parity pool */
+        if (r16(0x3bf74u) == 0x2fu) w16(0x3bf74u, 0);
+        g_ver_request = 1;
+    }
+    /* Old V saves can be inside h20+$40's raw-key wait. Only our exact two-return
+     * chain identifies this alert: let its original RTS and input flush finish.
+     * Normal native key waits (including name entry) retain their behavior. */
+    if (g_os && g_lineage == LIN_CRACKED && pc == 0x3b930u
+        && r32(pc) == 0x0c790000u && r32(pc + 4u) == 0x0003bf74u
+        && r16(0x3b93cu) == 0x4e75u) {
         uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7);
-        sp -= 4; w32(sp, 0x402a2u);                    /* ...then the dispatcher continuation */
-        sp -= 4; w32(sp, 0x3bf4eu);                    /* ...then h20+$666 (input flush) */
-        sp -= 4; w32(sp, 0x3b928u);                    /* ...then h20+$40 */
-        m68k_set_reg(M68K_REG_A7, sp);
-        m68k_set_reg(M68K_REG_PC, 0x3fae8u);           /* h34+$350: the alert routine */
-        if (g_log) { static int vn = 0; if (vn < 4) {
-            fprintf(g_log, "V-VERSION alert shown fr=%d ic=%llu\n",
-                    g_cur_frame, (unsigned long long)g_icount);
-            fflush(g_log); vn++; } }
+        if (!(sp & 1u) && sp <= RAM_SIZE - 8u
+            && r32(sp) == 0x3bf4eu && r32(sp + 4u) == 0x402a2u) {
+            m68k_set_reg(M68K_REG_PC, 0x3b93cu);
+            g_ver_request = 1;
+            if (g_log) fprintf(g_log, "VERSION recovered legacy key wait fr=%d\n", g_cur_frame);
+        }
     }
     /* B8  wander-destination pick (0x40906): cracked re-rolls the RNG until the
      *     &3 result is nonzero (uniform 1..3 over the 3 nearest map nodes); retail
@@ -4473,24 +5094,76 @@ void moon_instr_hook(unsigned int pc) {
             fprintf(g_log, "QUEST-REROLL site=%06x col=%u fr=%d\n", pc, roll, g_cur_frame);
             fflush(g_log); qn++; } }
     }
-    /* B3  KO-latch: retail latches "this fighter is down" when the KO path runs,
-     *     tests the latch before applying further hit damage/animation (writing
-     *     the -1 no-anim sentinel and exiting instead), and clears it at combat
-     *     setup.  Cracked has no latch, so post-KO hits still process.  The latch
-     *     lives host-side; the three sites mirror retail's. */
+    /* B3: carry the COMPLETE retail rat-kill transition (0x2681c..0x26874),
+     * not just its latch. Retail removes the simultaneous-contact veto, starts
+     * round-end and marks the victim dead immediately after installing the
+     * rat's paired animation, then suppresses BOTH rat reaction paths. Its
+     * old late-cleanup/reselection block is gone. Other death scripts, their
+     * authored timing, gore settings and the canopy fixes remain independent. */
     if (g_os && g_retail_parity) {
-        if (pc == 0x2173cu && r16(0x2173cu) == 0x4279u)      /* combat scene setup */
+        if (g_ko_fix && pc == 0x26118u
+            && r16(pc) == 0x23c8u && r32(pc + 2u) == 0x0002ebd0u)
+            g_ko_latch = 0;     /* retail 0x26230: EACH human handler, not fight setup */
+        if (!g_ko_fix && pc == 0x2173cu && r16(pc) == 0x4279u)
             g_ko_latch = 0;
+        if (g_ko_fix && pc == 0x266fau
+            && r16(pc) == 0x4aa9u && r16(pc + 2u) == 0x000eu
+            && r16(pc + 4u) == 0x6644u) {
+            m68k_set_reg(M68K_REG_PC, 0x26700u); /* retail checks HP even on mutual contact */
+            return;
+        }
         if (pc == 0x2670eu && r16(0x2670eu) == 0x2069u && r16(0x26710u) == 0x0012u)
-            g_ko_latch = 1;                                   /* KO/death path entered */
-        if (g_ko_latch && pc == 0x26b8cu
-            && r16(0x26b8cu) == 0x4eb9u && r32(0x26b8eu) == 0x000269a8u) {
-            w32(0x2eaf8u, 0xffffffffu);                       /* -1 anim sentinel (retail) */
-            m68k_set_reg(M68K_REG_PC, 0x27ec8u);              /* the block's common exit */
-            if (g_log) { static int kn = 0; if (kn < 8) {
-                fprintf(g_log, "KO-LATCH suppressed post-KO hit fr=%d ic=%llu\n",
+            g_ko_latch = 1;
+        if (g_ko_fix && pc == 0x2672eu
+            && r16(pc) == 0x4eb9u && r32(pc + 2u) == 0x0002877cu) {
+            /* Execute the three ORIGINAL guest helpers in retail order. An
+             * rts chain needs no host callback/phase state and survives F5/F9. */
+            uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7);
+            sp -= 4u; w32(sp, 0x26734u); /* original continuation: no victim animation */
+            sp -= 4u; w32(sp, 0x213f4u); /* mark combatant A dead */
+            sp -= 4u; w32(sp, 0x21380u); /* start the original round-end countdown */
+            m68k_set_reg(M68K_REG_A7, sp);
+            m68k_set_reg(M68K_REG_PC, 0x2877cu); /* install paired rat animation first */
+            if (g_log) { static int kd = 0; if (kd < 12) {
+                fprintf(g_log, "KO-RAT paired death fr=%d ic=%llu\n",
                         g_cur_frame, (unsigned long long)g_icount);
+                fflush(g_log); kd++; } }
+            return;
+        }
+        /* The original lookup accepts inactive records with a recycled owner.
+         * Our frozen combat replay has THREE records for this rat, only the
+         * last active. The old late reselection happened to mask that defect;
+         * suppressing it would otherwise erase the entire killing animation.
+         * In THIS paired-install call only, let the original search continue
+         * past inactive matches. The guest return chain identifies the call,
+         * including after a save/load; no global lookup policy is changed. */
+        if (g_ko_fix && g_ko_latch && pc == 0x28846u
+            && r16(pc) == 0xb0aeu && r16(pc + 2u) == 0x0018u) {
+            uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7);
+            uint32_t display = m68k_get_reg(NULL, M68K_REG_A6);
+            if (sp < RAM_SIZE - 12u && display < RAM_SIZE - 0x32u
+                && r32(sp + 4u) == 0x28782u && r32(sp + 8u) == 0x21380u
+                && !r8(display) && r32(display + 0x18u) == m68k_get_reg(NULL, M68K_REG_D0)) {
+                m68k_set_reg(M68K_REG_PC, 0x2884cu);
+                return;
+            }
+        }
+        int rat_hit = pc == 0x26b8cu && r16(pc) == 0x4eb9u
+            && r32(pc + 2u) == 0x000269a8u;
+        int rat_contact = g_ko_fix && pc == 0x26bb8u
+            && r16(pc) == 0x4aa8u && r16(pc + 2u) == 0x000eu;
+        if (g_ko_latch && (rat_hit || rat_contact)) {
+            w32(0x2eaf8u, 0xffffffffu); /* retain the already installed animation */
+            m68k_set_reg(M68K_REG_PC, 0x27ec8u);
+            if (g_log) { static int kn = 0; if (kn < 8) {
+                fprintf(g_log, "KO-LATCH kept rat death animation site=%06x fr=%d ic=%llu\n",
+                        pc, g_cur_frame, (unsigned long long)g_icount);
                 fflush(g_log); kn++; } }
+            return;
+        }
+        if (rat_contact) {
+            m68k_set_reg(M68K_REG_PC, 0x26c12u); /* retail: ordinary reaction when unlatched */
+            return;
         }
     }
     /* B7  AI dragon-scroll auto-use: retail's per-tick AI chain has a stage the
@@ -4742,8 +5415,9 @@ void moon_instr_hook(unsigned int pc) {
     }
     /* WAVE SPAWN/DEATH TRACE (2026-07-09, operator: "killed a monkey and another popped out at
      * the same place"): the wave placer 0x24f9e claims a free combat record (0x24f7a) and writes
-     * its X/Y from the spawn table (off-screen entries, alternating via [0x2e1ea]) -- a mid-arena
-     * pop should be impossible.  Log each placement (record, X written, toggle) at the coord-copy
+     * its X/Y from the spawn table (off-screen entries, alternating via [0x2e1ea]). This records
+     * placement only: stale rat state could overwrite it on the first tick (see A5 above).
+     * Log each placement (record, X written, toggle) at the coord-copy
      * instruction, and each death-bookkeeping pass, to catch the real mechanism.  Read-only, capped. */
     if (g_os && g_log && pc == 0x24fb2u && r16(pc) == 0x3358u && r16(pc + 2u) == 0x0004u) {
         static int sn = 0; if (sn < 30) {
@@ -4978,6 +5652,24 @@ void moon_instr_hook(unsigned int pc) {
     /* (Removed 2026-06-25 per operator: the per-frame enemy-Moonstone "scrub" band-aid.  It changed
      * game state to mask the symptom instead of fixing the leak; the read-only MS-LEAK-SET (in w8/w16/
      * w32) + A7-SMASH watches remain to find the real root.) */
+    /* A10 retail parity: reject an overlapping impact BEFORE its timer/script
+     * reset. The former late dedup prevented crashes but restarted the effect.
+     * Retail 0x29f72 leaves the first impact's 36-tick deadline intact. Keep the
+     * late check too: an older save can resume past this new entry check. */
+    if (g_os && g_tasklist_fix && pc == 0x2a0b8u && task_effect_code()) {
+        uint32_t slot = tasklist_find(0x2a10cu);
+        if (slot && g_retail_parity) {
+            m68k_set_reg(M68K_REG_A0, slot);
+            m68k_set_reg(M68K_REG_SR, (m68k_get_reg(NULL, M68K_REG_SR) & ~15u) | 4u); /* retail CMP: equal */
+            m68k_set_reg(M68K_REG_PC, 0x2a0f0u);
+            return;
+        }
+        if (!slot && !tasklist_free_slot()) {
+            tasklist_full(0x2a10cu);
+            m68k_set_reg(M68K_REG_PC, 0x2a0f0u);
+            return;
+        }
+    }
     /* ===== ROOT FIX (producer side) for the two-troll / double-overhead-swing crash =====
      * 0x3c096..0x3c0ba is the game's PER-VBLANK TASK LIST (the vblank interrupt-server chain;
      * dispatcher 0x3b90a jsr's each entry every frame): cursor-mover, sprite/anim, and timed
@@ -4996,7 +5688,7 @@ void moon_instr_hook(unsigned int pc) {
      * other scene code (see the legend hook below, which checks r16(pc) for the same
      * reason).  Only act when the REAL append instruction (`move.l #$2a10c,(a0)` =
      * 0x20bc) is resident, so an overlay executing through this address is untouched. */
-    if (g_os && g_tasklist_fix && pc == 0x2a0eau && r16(pc) == 0x20bcu) {
+    if (g_os && g_tasklist_fix && pc == 0x2a0eau && task_effect_code()) {
         for (uint32_t s = 0x3c096u; s < 0x3c0bau; s += 4u) {
             if (r32(s) == 0x2a10cu) {                  /* effect handler already registered -> dedup */
                 w32(0x2a15eu, s);                      /* removal target = the existing single slot */
@@ -5009,6 +5701,14 @@ void moon_instr_hook(unsigned int pc) {
                 return;
             }
         }
+        uint32_t slot = tasklist_free_slot();
+        w32(0x2a15eu, slot);
+        if (!slot) {
+            tasklist_full(0x2a10cu);
+            m68k_set_reg(M68K_REG_PC, 0x2a0f0u);
+            return;
+        }
+        m68k_set_reg(M68K_REG_A0, slot); /* original MOVE commits before another IRQ can run */
     }
     /* ROOT FIX for the cursor/menu FREEZE.  The same per-vblank task list [0x3c096,0x3c0ba) holds,
      * among the screen-effect tick-handlers (0x2a10c), the menu's CURSOR-UPDATE handler **0x2d61c**
@@ -5107,20 +5807,9 @@ void moon_instr_hook(unsigned int pc) {
     if (g_os && g_dsk_fastwait && g_bootphase && g_creditsdone && (pc == 0x29c58u || pc == 0x29d5cu)
         && r16(pc) == 0x0839u && r32(pc + 2u) == 0x000000bfu)
         g_ca.icr_flags |= 0x01;
-    /* Multi-candidate numbered popup: its handler busy-waits on the keyboard buffer
-     * [0x3bf74] for a rawkey, translating it via the 0xc1b3 table (routine 0x3ff42)
-     * to ASCII '1'-'9' to pick the option.  This menu exists TWICE in the image:
-     *   - the FRONT-END (`program`) copy at SEED 0x41162 / WAIT 0x41178 -- the overland
-     *     overlap popup (zone-vs-city), reached from the map fire-action 0x41134;
-     *   - the IN-GAME (`Mog`) copy at SEED 0x1e4756 / WAIT 0x1e476c -- a byte-identical
-     *     relocation (delta 0x1a35f4), used by Mog's own numbered selections incl. the
-     *     conditional post-combat treasure-TAKE / reward menu.  Both read the SAME
-     *     [0x3bf74] buffer + 0xc1b3 table, so neither is controller-selectable without
-     *     injection.  Make BOTH joystick/controller/keyboard selectable: at the wait
-     *     loop inject the chosen option's rawkey (option i needs rawkey i+1 per 0xc1b3);
-     *     Up = option 1, Down = option 2 (the two stacked choices), plus keyboard 1-9.
-     *     Seed the edge-state at menu entry so a held navigation direction does NOT
-     *     auto-select. */
+    /* The original map-overlap popup accepts numbered rawkeys. Supply the active
+     * player's highlighted choice through that same parser and dispatcher. */
+    numbered_menu_hook(pc);
     if (g_maplog && g_log && g_os && (pc == 0x4114au || pc == 0x1e473eu))  /* candidate count (d0) */
         fprintf(g_log, "CANDCOUNT d0=%u tokenX=%d tokenY=%d\n", (unsigned)m68k_get_reg(NULL,M68K_REG_D0),
                 (int)(int16_t)r16(0x2e85a), (int)(int16_t)r16(0x2e85c));
@@ -5180,30 +5869,21 @@ void moon_instr_hook(unsigned int pc) {
      * "Loading..." title card).  Opcode-guarded (0x2xxxx is overlaid per phase) and
      * gated on the attract scope being over, so an attract-phase overlay reusing
      * the address can't stamp it.  Consumed only by the skip fast-forward. */
-    if (g_os && PC2(0x22964, 0x22906) && !g_blt_busy_scope && r16(pc) == 0x4eb9u)
+    if (g_os && PC2(0x22964, 0x22906) && !g_blt_busy_scope && r16(pc) == 0x4eb9u) {
         g_menu_live = 1;
+        if (mp_active()) {
+            g_mp_practice = 0;
+            mp_campaign_clear();
+            mp_reset(&g_mp);
+            mp_clear_host_input();
+        }
+    }
     /* (Legend cookie-cut redirect REMOVED: now that the loader-HLE opcode guard above
      * no longer hijacks 0x2cda0 during the char engine, the char engine's OWN `beq.w
      * $2cda6` runs and the per-glyph cookie-cut reaches the display naturally for the
      * WHOLE intro -- legend included -- so the legend-only PC redirect is obsolete.
      * The legend background-prime at 0x2221c above is kept so the text lands on the
      * vortex master.) */
-    if (g_os && (pc == 0x41162u || pc == 0x41178u ||      /* program (front-end) copy */
-                 pc == 0x1e4756u || pc == 0x1e476cu)) {   /* Mog (in-game) copy */
-        int seed = (pc == 0x41162u || pc == 0x1e4756u);
-        int cur = g_kdigit ? g_kdigit : (g_ji_up ? 1 : (g_ji_dn ? 2 : 0));
-        if (seed) {                           /* menu just appeared: ignore held input */
-            g_menusel_prev = cur;
-        } else {                              /* waiting on [0x3bf74]: inject on a fresh press */
-            if (cur && cur != g_menusel_prev) {
-                w16(0x3bf74u, (uint16_t)(cur + 1));
-                g_popup_injected = (uint16_t)(cur + 1);   /* remember it: the popup exit never clears
-                                                           * the buffer, so the next map poll retracts
-                                                           * a still-lingering digit (audit 2026-07-02) */
-            }
-            g_menusel_prev = cur;
-        }
-    }
     /* TYPED-TEXT ENTRY (Select-Knight custom name): the name-entry FSM busy-polls
      * [0x3bf74] at 0x22be8 (front-end 0x22b84 field) / 0x1c86b8 (byte-identical Mog
      * field 0x1c86d6) -- `tst.w $3bf74; beq <loophead>`.  When the field is waiting
@@ -5289,6 +5969,17 @@ void moon_instr_hook(unsigned int pc) {
         if (r16(0x3bf74u) == 0x10u) w16(0x3bf74u, 0);
         g_quest_quit_pending = 0;
     }
+    /* Retail removes this obsolete map-input gate. The earlier TST.L spans
+     * both the unused word at 2fa00 and the live dead-human counter at 2fa02.
+     * Skipping an eliminated player therefore bypassed the keyboard poll for
+     * the next living knight, disabling End Turn/inventory and movement costs.
+     * Keep the counter and original all-players-dead handling intact. */
+    if (g_os && g_retail_parity && g_lineage == LIN_CRACKED && pc == 0x40224u
+        && r16(pc) == 0x4ab9u && r32(pc + 2u) == 0x0002fa00u
+        && r32(pc + 6u) == 0x66000076u && r32(pc + 10u) == 0x0241000fu) {
+        m68k_set_reg(M68K_REG_PC, pc + 10u);
+        return;
+    }
     if (g_os && pc == 0x4024cu) {           /* overland-map keyboard poll */
         g_mappoll_hot = 1;                  /* the normal map turn-loop ran this frame (distinguishes it from the delivery overview) */
         g_map_live = g_cur_frame;           /* request-capture gate: the map loop is live NOW */
@@ -5339,85 +6030,33 @@ void moon_instr_hook(unsigned int pc) {
             w16(0x3bf74u, 0x10); g_quest_quit_request = 0;         /* 0x10 translates to ASCII 'Q' */
             g_quest_quit_pending = 1;
         }
-        else if (g_ver_request && r16(0x3bf74u) == 0) {            /* B17: 'V' -> version display */
-            w16(0x3bf74u, 0x2f); g_ver_request = 0;                /* 0x2f = the game's 'V' index */
-        }
     }
     if (g_os && pc == 0x405b4u) g_in_inventory = 1;   /* inventory screen just opened */
 
-    /* ============================================================================
-     * ROOT FIX for the famous original-game "enemy/Guardian HAS a Moonstone" bug
-     * (the one whose downstream crash we already contain with sndcode_guard).
-     *
-     * THE ACTOR/INVENTORY MODEL (RE'd, all in the program/Mog image):
-     *   The 4-entry roster is at 0x2e7dc, stride 0x84.  A record's +0x36 = knight
-     *   slot: 0-3 = a HUMAN player's chosen knight, 4 = AI enemy, 5 = the Guardian
-     *   (the fixed Guardian record is 0x2e9ec, slot 5).  Two fields carry Moonstone
-     *   state:  +0x4e = the Moonstone COUNT (word), and the per-actor quest/inventory
-     *   struct at [+0x60] holds a byte/word item array whose offset +0x16 is the
-     *   Moonstone-TOKEN bitfield (item id 0x16) and +0x14 = the four-keys byte (item
-     *   id 0x14).  New-game init (0x2608e) clears every actor's +0x4e=0 and zeroes
-     *   the whole +0x60 struct, so enemies START with no Moonstone.
-     *
-     * HOW A MOONSTONE LEAKS INTO A NON-PLAYER (the bug, two paths, both in combat
-     * win-resolution -- proven by disassembly; these are the ONLY writers of +0x4e
-     * or of item 0x16 into a record):
-     *   (1) +0x4e COUNT, AI combat winner.  At 0x21b90 the winner record is in a0;
-     *       `cmpi.l #4,$36(a0); beq $21bf2` -- i.e. ONLY when the winner is an AI
-     *       enemy (slot 4) does it fall to 0x21bf2 `addi.w #1,$4e(a0)` (the enemy
-     *       gets a Moonstone).  When the winner is a PLAYER (slot 0-3) it instead
-     *       goes to 0x21b9c = the interactive loot/reward screen (scene 1) -- a
-     *       SEPARATE path that never touches 0x21bf2.
-     *   (2) TOKEN (item 0x16), inherited on a death-transfer.  The item-transfer
-     *       routine 0x2150e (a0=winner, a1=loser) moves the loser's items into the
-     *       winner.  Items 0x16 (token) and 0x14 (keys) are OR-merged into the
-     *       winner's +0x60 struct at exactly two sites: 0x215ca (routine B, loser
-     *       permanently dead -- full transfer) and 0x215ec (routine A, loser still
-     *       alive -- "steal one item").  Callers whose winner can be a NON-player:
-     *       0x21bf8 (AI won the wilderness/actor fight) and 0x2221c (the PLAYER LOST
-     *       to the Guardian -> the Guardian record 0x2e9ec inherits the token).
-     *
-     * WHY THIS CANNOT TOUCH THE LEGIT WIN PATH:
-     *   The player-Moonstone awards are entirely independent of the above:
-     *     - Guardian DEFEATED -> player +3 : 0x22738 `addi.w #3,$4e(a0)` with
-     *       a0=[0x2ebd0] (the active player), no 0x2150e involved.
-     *     - "season of Moonstones" altar -> player +1 : 0x21cfa, a1=[0x2ebd0].
-     *     - special encounter win -> player +2 : 0x22240, a0=[0x2e1f6] (the player).
-     *     - grave pillage : 0x40e58 calls 0x2150e with a0=[0x2ebd0] (player=winner).
-     *     - player wins a fight : the loot screen (0x21b9c, scene 1), where the
-     *       player takes items via the click dispatcher (edits [0x2fb08]=player rec).
-     *   Every one of those has a PLAYER as the destination, so the guards below --
-     *   which fire ONLY when the destination/winner record's slot is 4 (AI) or 5
-     *   (Guardian) -- are provably inert on the win path.  A player who beats a
-     *   token-carrying enemy still legitimately inherits the token (winner slot 0-3,
-     *   guard does not fire).
-     *
-     * THE SURGICAL FIX (faithful, Moonstone-only, g_os-gated):
-     *   (1) at 0x21bf2, redirect PC to 0x21bf8 -- skip the AI winner's +0x4e
-     *       increment (we only reach 0x21bf2 when the winner is AI, so no test
-     *       needed).  The AI still loots its normal items via the 0x2150e call.
-     *   (2) at the token-merge entry points 0x215c2 / 0x215e4, if the current item
-     *       d0 == 0x16 (Moonstone-token) AND the winner (a0) is a non-player
-     *       (slot 4 or 5), redirect PC to that block's normal exit (routine B ->
-     *       0x21596 next-item; routine A -> 0x21578 done) so the token's
-     *       read/OR/write/clr is skipped ENTIRELY -- the token stays where it was
-     *       and is never written into the enemy/Guardian.  d0 != 0x16 (keys 0x14,
-     *       and the additive items handled elsewhere) and player winners are
-     *       untouched, so enemies still hold/drop all their normal loot.
-     * ============================================================================ */
-    if (g_os && pc == 0x21bf2u) {              /* AI combat winner: skip the +0x4e Moonstone count */
-        m68k_set_reg(M68K_REG_PC, 0x21bf8u);   /* jump past `addi.w #1,$4e(a0)` to the item-transfer call */
-        g_msleak_blocked++;
-        if (g_maplog && g_log)
-            fprintf(g_log, "MS-LEAK-BLOCK fr=%d ic=%llu enemy +0x4e Moonstone-count award SUPPRESSED (winner=%06x slot=%d)\n",
-                    g_cur_frame, (unsigned long long)g_icount,
-                    (unsigned)m68k_get_reg(NULL,M68K_REG_A0),
-                    (int)r32(m68k_get_reg(NULL,M68K_REG_A0)+0x36));
-        return;
+    /* Actor+4e is XP, spent by 40eba (AI) / 2d0f8 (human stat UI).
+     * [actor+60]+14 holds keys; +16 holds Moonstone bits; +4 is the Sword of
+     * Sharpness count (equipped weapon id19). Ownership at actor+36 is 0..3
+     * human, 4 AI; the special record uses 5. See moonstone-ai-xp.md.
+     * An older port comment confused XP with Moonstones and disabled this
+     * native victory reward. Let ADDI execute with its native CCR behavior.
+     * Disabled modes retain that former suppression solely for A/B tests. */
+    if (g_os && g_lineage == LIN_CRACKED && pc == 0x21bf2u
+        && r32(pc) == 0x06680001u && r16(pc + 4u) == 0x004eu
+        && r32(pc + 6u) == 0x6100f914u) {
+        uint32_t actor = m68k_get_reg(NULL, M68K_REG_A0);
+        if (actor && !(actor & 1u) && actor <= RAM_SIZE - 0x84u
+            && r32(actor + 0x36u) == 4u) {
+            if (!g_retail_parity || !g_ai_xp_fix) {
+                m68k_set_reg(M68K_REG_PC, 0x21bf8u);
+                return;
+            }
+            if (g_log) fprintf(g_log, "AI-XP victory actor=%06x xp=%u->%u fr=%d\n",
+                               actor, r16(actor + 0x4eu),
+                               (uint16_t)(r16(actor + 0x4eu) + 1u), g_cur_frame);
+        }
     }
-    /* LOOT-EVENT trace (always-on, 2026-06-26): the moonstone leaks during COMBAT loot, not on the
-     * menu click -- log the item-transfer entry (0x2150e: a0=winner, a1=loser) so any enemy looting
-     * a defeated carrier is captured with both records' slots.  Bounded.  Read-only. */
+    /* Bounded, read-only item-transfer trace: A0=winner, A1=loser.
+     * Actual Moonstone transfers and XP awards must never be conflated. */
     if (g_os && pc == 0x2150eu && g_log) {
         static int le = 0;
         if (le < 60) { le++;
@@ -5432,39 +6071,27 @@ void moon_instr_hook(unsigned int pc) {
         uint32_t d0  = m68k_get_reg(NULL,M68K_REG_D0) & 0xffff;
         uint32_t win = m68k_get_reg(NULL,M68K_REG_A0); /* a0 = winner record (preserved through 0x2150e) */
         uint32_t slot = (win < RAM_SIZE) ? r32(win+0x36) : 0;
-        /* ALWAYS-ON quest-token loot trace: every 0x14/0x16 token transfer, with winner slot, so a
-         * leak is captured with the exact item id even when the block below doesn't fire. Bounded. */
+        uint8_t wkind = (win < RAM_SIZE) ? g_ram[(win + 0x4du) & (RAM_SIZE - 1u)] : 0;
+        int is_dragon = (slot == 5u && (wkind == 0x14u || wkind == 0x28u));
+        /* Existing operator-selected token policy, independent of XP:
+         * item16 is blocked for non-human winners except the Guardian. The
+         * dragon shares slot5 but has kind14/28 and remains blocked. Keys are
+         * item14; the special sword is item4. Those and all other loot retain
+         * their existing behavior. This policy does not establish the cause
+         * of the separately fixed phantom-item rendering crash. */
+        int blocked = d0 == 0x16u
+            && ((slot != 0u && slot != 1u && slot != 2u && slot != 3u && slot != 5u) || is_dragon);
         { static int lt = 0; if (g_log && lt < 80) { lt++;
             fprintf(g_log, "LOOT-TOKEN pc=%06x item=%04x winner=%06x slot=%d ic=%llu%s\n",
                     pc, d0, win, (int)slot, (unsigned long long)g_icount,
-                    (d0==0x16u && (slot==4u||slot==5u)) ? " -> BLOCKED" : ""); fflush(g_log); } }
-        /* BROADENED 2026-06-26: block the moonstone token (item 0x16 -- a BITFIELD holding all 4
-         * moonstone phases) from transferring to ANY non-player winner (slot NOT 0-3), not just
-         * slots 4/5.  Operator: enemies must never loot ANY moonstone; the original game let them
-         * (a never-fixed dev bug).  Slot is the 32-bit type field the game itself tests with
-         * `cmpi.l #4,$36(a0)` (0-3 player, 4 AI, 5 Guardian).  Item 0x14 = "Sword of Sharpness"
-         * (a unique weapon, NOT a moonstone) -- deliberately NOT blocked; this is moonstone-only.
-         * EXCLUDE slot 5 (Guardian): it LEGITIMATELY holds the moonstone (the random 1-of-4 reward
-         * the player takes when beating it), so it must be allowed to win/hold one.  Block only
-         * true enemies = any non-player winner that is NOT the Guardian.
-         * TIGHTENED 2026-07-08 (operator): the DRAGON shares slot 5 with the Guardian (same roster
-         * record, kind byte +0x4d = 0x14 landed / 0x28 flying) and was therefore exempt -- but a
-         * dragon holding the moonstone exposes the SAME unfixed click-crash as the knights did, so
-         * it is blocked too until that root cause is fixed (then the faithful "dragon hoards it,
-         * slay it to reclaim" behaviour can return).  The Guardian (slot 5, non-dragon kind)
-         * remains the only non-player that can hold it. */
-        {
-            uint8_t wkind = (win < RAM_SIZE) ? g_ram[(win + 0x4du) & (RAM_SIZE - 1u)] : 0;
-            int is_dragon = (slot == 5u && (wkind == 0x14u || wkind == 0x28u));
-            if (d0 == 0x16u && ((slot != 0u && slot != 1u && slot != 2u && slot != 3u && slot != 5u) || is_dragon)) {
-            m68k_set_reg(M68K_REG_PC, (pc == 0x215c2u) ? 0x21596u   /* routine B: continue to next item */
-                                                        : 0x21578u);/* routine A: finish (its normal token exit) */
+                    blocked ? " -> BLOCKED" : ""); fflush(g_log); } }
+        if (blocked) {
+            m68k_set_reg(M68K_REG_PC, (pc == 0x215c2u) ? 0x21596u : 0x21578u);
             g_msleak_blocked++;
             if (g_log)
                 fprintf(g_log, "MS-LEAK-BLOCK fr=%d ic=%llu quest-token=%04x transfer to non-player SUPPRESSED (winner=%06x slot=%d kind=%02x)\n",
                         g_cur_frame, (unsigned long long)g_icount, d0, win, (int)slot, wkind), fflush(g_log);
             return;
-            }
         }
     }
 
@@ -5556,14 +6183,25 @@ void moon_instr_hook(unsigned int pc) {
          * wait at 0x22fd0 (the press loop: bsr 0x22fe6 / btst #4,d1 / beq 0x22fd0)
          * -- and after the settle window so the disk has been validated.  Drive
          * the port-1 fire (/FIR1, g_fire2) HIGH at the press-loop body and release
-         * it at the release loop (0x22fda) so both halves of the wait fall
-         * through.  PC-gated so it can't race ahead of the wait. */
-        if (g_autoswap && g_autoswap_armed && g_autoswap_settle == 0) {
-            if (PC2(0x22fd0, 0x22f7c)) g_fire2 = 1;      /* press loop: assert fire */
-            else if (PC2(0x22fda, 0x22f86)) {            /* release loop reached: done */
-                g_fire2 = 0; g_autoswap_armed = 0;
-                if (g_log) fprintf(g_log, "AUTO-SWAP confirmed (synthetic fire) ic=%llu\n",
-                                   (unsigned long long)g_icount);
+         * it at the release loop (0x22fda). Multiplayer replaces decoded input
+         * at the reader's return, so also supply the automatic press/release
+         * at this wait's guarded BTST instructions, after that routing. Ignore
+         * held player buttons here; they must neither skip settling nor stall
+         * release. Keep the existing serialized flag until release is consumed. */
+        if (g_autoswap && g_autoswap_armed) {
+            if (g_autoswap_settle == 0 && PC2(0x22fd0, 0x22f7c)) g_fire2 = 1;
+            else if (PC2(0x22fda, 0x22f86)) g_fire2 = 0;
+            else if ((PC2(0x22fd4, 0x22f80) || PC2(0x22fde, 0x22f8a))
+                     && r32(pc) == 0x08010004u) { /* btst #4,d1; native CCR preserved */
+                unsigned input = m68k_get_reg(NULL, M68K_REG_D1) & ~16u;
+                if (PC2(0x22fd4, 0x22f80)) {
+                    if (g_autoswap_settle == 0) input |= 16u;
+                } else {
+                    g_fire2 = 0; g_autoswap_armed = 0;
+                    if (g_log) fprintf(g_log, "AUTO-SWAP confirmed (synthetic fire) ic=%llu fr=%d\n",
+                                       (unsigned long long)g_icount, g_cur_frame);
+                }
+                m68k_set_reg(M68K_REG_D1, input);
             }
         }
         /* program's entry (0x21000, reached AFTER nb streamed `program`) stores its
@@ -5626,7 +6264,7 @@ void moon_instr_hook(unsigned int pc) {
     }
     /* --poke (DEBUG-ONLY, g_os-gated): apply each requested memory write ONCE
      * when PC first reaches its gate address.  Used purely to fast-forward to
-     * end-game state for verification (e.g. set the Moonstone count, the Valley
+     * end-game state for verification (e.g. set XP, the Valley
      * key gate, or the map position) without a long real-time playthrough.
      * Inert unless --poke is given (g_npokes stays 0). */
     if (g_npokes && g_os) {
@@ -5802,38 +6440,31 @@ void moon_instr_hook(unsigned int pc) {
                     rec, (int16_t)r16(rec+0x4a), r32(rec+0x5c),
                     r32(rec+0x58), (int16_t)r16(rec+0x50));
         }
-        /* ---- END-GAME / WIN-PATH instrumentation (all read-only logging) ----
-         * The Moonstone count lives at player_rec+0x4e ([0x2ebd0]+0x4e); the
-         * Valley-of-the-Gods node (id 0x1c, map 152,97) gates on the four-keys
-         * byte [player+0x60 +0x14]==0xf and, on a Guardian win, awards +3 ([+0x4e]);
-         * the code-2 "season of the Moonstones" altar (0x21ca4) awards +1; the
-         * quest is COMPLETED when the player returns the matching Moonstone-token
-         * (player+0x60 +0x16 bit) to its home village (node 0x1b), which shows
-         * "You have completed the quest" (0x22876) and relaunches the front-end
-         * with the win-code in $3e0 (0x2289e). */
+        /* ---- END-GAME / WIN-PATH instrumentation (read-only) ----
+         * Actor+4e is XP: a lair gives +1 and the Guardian gives +3.
+         * The Valley requires all four keys at [actor+60]+14. Defeating the
+         * Guardian separately grants one random Moonstone bit at inventory+16
+         * (405e2). Returning the matching token to its home village completes
+         * the quest. XP is never a Moonstone ownership/completion condition. */
         {
             uint32_t pr = r32(0x2ebd0);
             if (pc == 0x226e6u)                        /* Valley node: 4-keys gate passed -> Guardian battle */
-                fprintf(g_log, "VALLEY-GUARDIAN fr=%d ic=%llu keys[+14]=0x%02x moonstones[+4e]=%d -> Guardian battle\n",
+                fprintf(g_log, "VALLEY-GUARDIAN fr=%d ic=%llu keys[+14]=0x%02x xp[+4e]=%d -> Guardian battle\n",
                         g_cur_frame, (unsigned long long)g_icount,
                         (unsigned)r8(r32(pr+0x60)+0x14), (int16_t)r16(pr+0x4e));
             else if (pc == 0x226d2u)                   /* Valley node: gate FAILED ("need all four keys") */
                 fprintf(g_log, "VALLEY-LOCKED fr=%d ic=%llu keys[+14]=0x%02x (need 0xf)\n",
                         g_cur_frame, (unsigned long long)g_icount, (unsigned)r8(r32(pr+0x60)+0x14));
-            else if (pc == 0x22738u)                   /* Guardian defeated: +3 Moonstones */
-                fprintf(g_log, "GUARDIAN-WIN fr=%d ic=%llu moonstones %d -> %d (+3)\n",
+            else if (pc == 0x22738u)                   /* Guardian defeated: +3 XP */
+                fprintf(g_log, "GUARDIAN-WIN fr=%d ic=%llu xp %d -> %d (+3)\n",
                         g_cur_frame, (unsigned long long)g_icount,
                         (int16_t)r16(pr+0x4e), (int16_t)r16(pr+0x4e)+3);
-            else if (pc == 0x21cfau)                   /* altar "season of Moonstones": +1 Moonstone */
-                fprintf(g_log, "ALTAR-MOONSTONE fr=%d ic=%llu moonstones %d -> %d (+1)\n",
-                        g_cur_frame, (unsigned long long)g_icount,
-                        (int16_t)r16(pr+0x4e), (int16_t)r16(pr+0x4e)+1);
-            else if (pc == 0x21bf2u)                   /* wilderness fight won: +1 Moonstone */
-                fprintf(g_log, "COMBAT-MOONSTONE fr=%d ic=%llu moonstones %d -> %d (+1)\n",
+            else if (pc == 0x21cfau)                   /* lair victory: +1 XP */
+                fprintf(g_log, "LAIR-XP-TRACE fr=%d ic=%llu xp %d -> %d (+1)\n",
                         g_cur_frame, (unsigned long long)g_icount,
                         (int16_t)r16(pr+0x4e), (int16_t)r16(pr+0x4e)+1);
             else if (pc == 0x22876u)                   /* QUEST COMPLETE: "You have completed the quest" */
-                fprintf(g_log, "QUEST-COMPLETE fr=%d ic=%llu home[+12]=0x%02x tokens[+16]=0x%02x moonstones=%d *** ENDING ***\n",
+                fprintf(g_log, "QUEST-COMPLETE fr=%d ic=%llu home[+12]=0x%02x tokens[+16]=0x%02x xp=%d *** ENDING ***\n",
                         g_cur_frame, (unsigned long long)g_icount,
                         (unsigned)r16(0x2e0bc+0x12), (unsigned)r8(r32(pr+0x60)+0x16),
                         (int16_t)r16(pr+0x4e));
@@ -6182,6 +6813,7 @@ static int render_rgb(uint8_t *out, int *out_w, int *out_h) {
     if (vstop<=vstart || vstop-vstart>FB_H) { vstart=0x2c; vstop=0x2c+256; }
     int height  = vstop - vstart; if (height>FB_H) height=FB_H;
     int bytew   = width/8;
+    int display_y = 0;
 
     uint32_t cp = ((uint32_t)reg[0x080>>1]<<16)|reg[0x082>>1];
 
@@ -6215,6 +6847,19 @@ static int render_rgb(uint8_t *out, int *out_w, int *out_h) {
             if (i>0 && (p[i]-p[i-1])!=stride) looks_table = 0;
         }
         if (looks_table && (stride==0 || (stride>=0x400 && stride<0x40000))) {
+            /* The combat impact moves DIWSTRT and DIWSTOP together. Cropping
+             * every frame at its new vstart used to cancel that displacement.
+             * Keep the normal 320x200 viewport fixed for this native effect;
+             * derive everything from saved guest state, never a host timer.
+             * Other windows, overlays and copper-driven intros retain their
+             * existing geometry. The original script supplies all offsets. */
+            if (g_retail_parity && width == 320 && height == 200
+                && (reg[0x08e>>1] & 0xffu) == 0x81u && (diwstop & 0xffu) == 0xc1u
+                && task_effect_code() && tasklist_find(0x2a10cu)) {
+                int dy = vstart - 0x2c;
+                if (dy == 0 || dy == 8 || dy == -8 || dy == 2 || dy == -2 || dy == 1 || dy == -1)
+                    display_y = dy;
+            }
             for (int i=0;i<6;i++)
                 bplptr[i] = (((uint32_t)r16(cp+2+i*8)<<16) | r16(cp+6+i*8)) & (RAM_SIZE-1);
             g_dbg_cp = cp; g_dbg_stride = stride; g_dbg_nplanes = nplanes_hint;   /* DIAG */
@@ -6490,8 +7135,29 @@ static int render_rgb(uint8_t *out, int *out_w, int *out_h) {
         /* advance bitplane pointers by one fetched line (DMA increment) */
         if (planes>0) for (int i=0;i<planes;i++) bplptr[i] += bytew + ((i&1)?mod2:mod1);
     }
+    if (display_y) {
+        /* Move only the rendered playfield; clipped rows have already consumed
+         * their bitplane data. Exposed border uses COLOR00. Hardware sprites
+         * use beam coordinates, so composite them afterwards at the fixed
+         * origin instead of shifting the menu pointer with the playfield. */
+        int gap = display_y > 0 ? display_y : -display_y;
+        size_t rowbytes = FB_W * 3u;
+        memmove(out + (display_y > 0 ? gap * rowbytes : 0),
+                out + (display_y < 0 ? gap * rowbytes : 0), (height - gap) * rowbytes);
+        uint16_t border = reg[0x180>>1] & 0xfffu;
+        int first = display_y > 0 ? 0 : height - gap;
+        for (int y = first; y < first + gap; y++) {
+            uint8_t *row = out + y * rowbytes;
+            memset(row, 0, rowbytes);
+            for (int x = 0; x < width; x++) {
+                row[x*3]   = (uint8_t)(((border >> 8) & 15) * 17);
+                row[x*3+1] = (uint8_t)(((border >> 4) & 15) * 17);
+                row[x*3+2] = (uint8_t)((border & 15) * 17);
+            }
+        }
+    }
     /* Composite hardware sprites (pointer + any others) on top of the bitplanes. */
-    composite_sprites(out, reg, width, vstart, vstop);
+    composite_sprites(out, reg, width, vstart - display_y, vstop - display_y);
     *out_w = width; *out_h = height;
     return 0;
 }
@@ -6704,6 +7370,38 @@ static int  g_nscript;             /* fwd (tentative): script event count, defin
 static int  save_state(const char *path);   /* fwd: quicksave  (F5; defined near main) */
 static int  load_state(const char *path);   /* fwd: quickload  (F9; defined near main) */
 static int  load_in_progress(void);         /* fwd: 1 while a disk/file load is mid-flight (defined below) */
+/* Create only the selected quicksave directories, on F5. Loading and explicit
+ * diagnostic paths must not create folders or fall back to a different save. */
+static int quicksave_mkdir(const char *path) {
+#ifdef _WIN32
+    if (CreateDirectoryA(path, NULL)) return 1;
+    DWORD err = GetLastError();
+    if (err == ERROR_ALREADY_EXISTS) {
+        DWORD attributes = GetFileAttributesA(path);
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) return 1;
+    }
+    char detail[256] = "";
+    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                   NULL, err, 0, detail, sizeof(detail), NULL);
+    if (g_log) fprintf(g_log, "QUICKSAVE cannot create folder '%s': Windows error %lu: %s\n",
+                       path, (unsigned long)err, detail);
+#else
+    if (mkdir(path, 0777) == 0) return 1;
+    int err = errno;
+    struct stat info;
+    if (err == EEXIST && stat(path, &info) == 0 && S_ISDIR(info.st_mode)) return 1;
+    if (g_log) fprintf(g_log, "QUICKSAVE cannot create folder '%s': %s (errno=%d)\n",
+                       path, strerror(err), err);
+#endif
+    return 0;
+}
+static int quicksave_directories_ready(void) {
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/saves", g_exedir[0] ? g_exedir : ".");
+    if (!quicksave_mkdir(path)) return 0;
+    snprintf(path, sizeof(path), "%s/saves/%s", g_exedir[0] ? g_exedir : ".", save_profile_folder());
+    return quicksave_mkdir(path);
+}
 static void run_one_frame(void) {
     g_frame_cycle = 0;
     int zeroburst = 0;
@@ -6815,15 +7513,7 @@ typedef struct {
     int visible, connected;
     Uint32 started;
 } ControllerNotice;
-
-static SDL_GameController *controller_open_first(void) {
-    for (int i = 0; i < SDL_NumJoysticks(); i++) {
-        if (!SDL_IsGameController(i)) continue;
-        SDL_GameController *pad = SDL_GameControllerOpen(i);
-        if (pad) return pad;
-    }
-    return NULL;
-}
+#include "multiplayer_sdl.h"
 
 static void controller_notice_show(ControllerNotice *notice, SDL_GameController *pad) {
     notice->visible = 1;
@@ -6837,29 +7527,8 @@ static void controller_notice_show(ControllerNotice *notice, SDL_GameController 
     }
 }
 
-static void controller_device_event(SDL_GameController **pad, ControllerNotice *notice,
-                                    const SDL_ControllerDeviceEvent *event) {
-    if (event->type == SDL_CONTROLLERDEVICEADDED && !*pad) {
-        *pad = controller_open_first();
-        if (*pad) controller_notice_show(notice, *pad);
-    } else if (event->type == SDL_CONTROLLERDEVICEREMOVED && *pad &&
-               event->which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(*pad))) {
-        /* Removal events use an instance ID, not a device index. Unplugging an
-         * unused second pad must not close the active one. Prefer a remaining
-         * controller when the active pad is unplugged. */
-        SDL_GameControllerClose(*pad);
-        *pad = controller_open_first();
-        controller_notice_show(notice, *pad);
-    }
-}
-
-static void controller_notice_draw(SDL_Renderer *ren, ControllerNotice *notice, Uint32 now) {
-    if (!notice->visible) return;
-    Uint32 elapsed = now - notice->started; /* unsigned subtraction handles tick wrap */
-    if (elapsed >= 4000) { notice->visible = 0; return; }
-    Uint8 alpha = elapsed < 3500 ? 255 : (Uint8)((4000 - elapsed) * 255 / 500);
-    const char *label = notice->connected ? "CONTROLLER CONNECTED" : "CONTROLLER DISCONNECTED";
-    /* Small, original 5x7 uppercase bitmap alphabet: no font dependency. */
+static void host_draw_text(SDL_Renderer *ren, const char *text, int left, int top) {
+    /* Small, original 5x7 bitmap alphabet: no font dependency. */
     static const uint8_t letters[26][7] = {
         {14,17,17,31,17,17,17}, {30,17,17,30,17,17,30}, {14,17,16,16,16,17,14},
         {30,17,17,17,17,17,30}, {31,16,16,30,16,16,31}, {31,16,16,30,16,16,16},
@@ -6871,6 +7540,39 @@ static void controller_notice_draw(SDL_Renderer *ren, ControllerNotice *notice, 
         {17,17,17,17,17,10,4}, {17,17,17,21,21,21,10}, {17,17,10,4,10,17,17},
         {17,17,10,4,4,4,4}, {31,1,2,4,8,16,31}
     };
+    static const uint8_t digits[10][7] = {
+        {14,17,19,21,25,17,14},{4,12,4,4,4,4,14},{14,17,1,2,4,8,31},
+        {30,1,1,14,1,1,30},{2,6,10,18,31,2,2},{31,16,16,30,1,1,30},
+        {14,16,16,30,17,17,14},{31,1,2,4,8,8,8},{14,17,17,14,17,17,14},
+        {14,17,17,15,1,1,14}
+    };
+    static const uint8_t lowercase[26][7] = {
+        {0,0,14,1,15,17,15}, {16,16,30,17,17,17,30}, {0,0,14,16,16,17,14},
+        {1,1,15,17,17,17,15}, {0,0,14,17,31,16,14}, {6,9,8,28,8,8,8},
+        {0,15,17,17,15,1,14}, {16,16,30,17,17,17,17}, {4,0,12,4,4,4,14},
+        {2,0,6,2,2,18,12}, {16,16,18,20,24,20,18}, {12,4,4,4,4,4,14},
+        {0,0,26,21,21,21,21}, {0,0,30,17,17,17,17}, {0,0,14,17,17,17,14},
+        {0,0,30,17,30,16,16}, {0,0,15,17,15,1,1}, {0,0,22,25,16,16,16},
+        {0,0,15,16,14,1,30}, {8,8,28,8,8,9,6}, {0,0,17,17,17,19,13},
+        {0,0,17,17,17,10,4}, {0,0,17,17,21,21,10}, {0,0,17,10,4,10,17},
+        {0,0,17,17,15,1,14}, {0,0,31,2,4,8,31}
+    };
+    for (int i = 0; text[i]; i++) {
+        const uint8_t *glyph = text[i] >= 'A' && text[i] <= 'Z' ? letters[text[i]-'A'] :
+                               text[i] >= 'a' && text[i] <= 'z' ? lowercase[text[i]-'a'] :
+                               text[i] >= '0' && text[i] <= '9' ? digits[text[i]-'0'] : NULL;
+        if (glyph) for (int y=0;y<7;y++) for (int x=0;x<5;x++)
+            if (glyph[y] & (1 << (4-x))) SDL_RenderDrawPoint(ren,left+i*6+x,top+y);
+        if (text[i]=='-') SDL_RenderDrawLine(ren,left+i*6,top+3,left+i*6+4,top+3);
+        if (text[i]=='.') SDL_RenderDrawPoint(ren,left+i*6+2,top+6);
+    }
+}
+static void controller_notice_draw(SDL_Renderer *ren, ControllerNotice *notice, Uint32 now) {
+    if (!notice->visible) return;
+    Uint32 elapsed = now - notice->started;
+    if (elapsed >= 4000) { notice->visible = 0; return; }
+    Uint8 alpha = elapsed < 3500 ? 255 : (Uint8)((4000 - elapsed) * 255 / 500);
+    const char *label = notice->connected ? "CONTROLLER CONNECTED" : "CONTROLLER DISCONNECTED";
     int width = (int)strlen(label) * 6 + 23;
     SDL_Rect box = {(320 - width) / 2, 8, width, 23};
     Uint8 old_r, old_g, old_b, old_a;
@@ -6887,12 +7589,27 @@ static void controller_notice_draw(SDL_Renderer *ren, ControllerNotice *notice, 
     SDL_Rect indicator = {box.x + 7, box.y + 9, 5, 5};
     SDL_RenderFillRect(ren, &indicator);
     SDL_SetRenderDrawColor(ren, 240, 242, 245, alpha);
-    for (int i = 0; label[i]; i++) {
-        if (label[i] < 'A' || label[i] > 'Z') continue;
-        for (int y = 0; y < 7; y++) for (int x = 0; x < 5; x++)
-            if (letters[label[i] - 'A'][y] & (1 << (4 - x)))
-                SDL_RenderDrawPoint(ren, box.x + 17 + i * 6 + x, box.y + 8 + y);
-    }
+    host_draw_text(ren,label,box.x+17,box.y+8);
+    SDL_SetRenderDrawColor(ren, old_r, old_g, old_b, old_a);
+    SDL_SetRenderDrawBlendMode(ren, old_blend);
+}
+
+static void version_notice_draw(SDL_Renderer *ren) {
+    if (!g_version_visible) return;
+    int width = (int)strlen(MOON_REVISION) * 6 + 15;
+    /* Below the controller notice, so connecting a pad cannot obscure either. */
+    SDL_Rect box = {(320 - width) / 2, 36, width, 23};
+    Uint8 old_r, old_g, old_b, old_a;
+    SDL_BlendMode old_blend;
+    SDL_GetRenderDrawColor(ren, &old_r, &old_g, &old_b, &old_a);
+    SDL_GetRenderDrawBlendMode(ren, &old_blend);
+    SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren, 12, 16, 22, 220);
+    SDL_RenderFillRect(ren, &box);
+    SDL_SetRenderDrawColor(ren, 99, 109, 120, 255);
+    SDL_RenderDrawRect(ren, &box);
+    SDL_SetRenderDrawColor(ren, 240, 242, 245, 255);
+    host_draw_text(ren, MOON_REVISION, box.x + 8, box.y + 8);
     SDL_SetRenderDrawColor(ren, old_r, old_g, old_b, old_a);
     SDL_SetRenderDrawBlendMode(ren, old_blend);
 }
@@ -6967,7 +7684,7 @@ static int run_sdl(int scale) {
     else host_report_issue(1, NULL, SDL_MESSAGEBOX_WARNING,
                            "Moonstone couldn't open an audio device. The game will continue without sound.",
                            NULL, SDL_GetError());
-    snprintf(g_wintitle, sizeof(g_wintitle), "Moonstone (native) - build %s", MOON_BUILD);
+    snprintf(g_wintitle, sizeof(g_wintitle), "Moonstone - %s save - build %s", save_profile_name(), MOON_BUILD);
     SDL_Window  *win = SDL_CreateWindow(g_wintitle, SDL_WINDOWPOS_CENTERED,
                        SDL_WINDOWPOS_CENTERED, 320*scale, 256*scale, SDL_WINDOW_RESIZABLE);
     if (!win) { sdl_startup_error(NULL, "SDL_CreateWindow"); SDL_Quit(); return 1; }
@@ -7005,21 +7722,21 @@ static int run_sdl(int scale) {
         free(qoi); free(sb);
     }
     int boot_splash_done = 0;
-    /* open the first attached game controller (hot-plug handled in the loop) */
-    SDL_GameController *pad = controller_open_first();
+    /* Register all attached pads. Fresh input chooses the primary controller;
+     * SDL's startup device order must not decide which user's pad works. */
     ControllerNotice controller_notice = {0};
-    if (pad) controller_notice_show(&controller_notice, pad);
-    else if (g_log) fprintf(g_log, "gamepad: none (keyboard/mouse only)\n");
+    controller_open_all(&controller_notice);
+    if (!mp_pad_count() && g_log) fprintf(g_log, "gamepad: none (keyboard/mouse only)\n");
 
     /* keyboard + mouse-button state is held here and OR'd with the pad each
      * frame, so neither input source clobbers the other. */
     int kb_u=0, kb_d=0, kb_l=0, kb_r=0, kb_fire=0;
     int m_fire=0, m_rmb=0;
-    int prev_pad_action[CONTROL_COUNT] = {0};
+    int mp_focused = 1, mp_audio_hold = 0;
     int running = 1;
     int status_frames = 0;   /* >0: a SAVED/LOADED title flash is up; restore g_wintitle at 0 */
     char savepath[1100];
-    snprintf(savepath, sizeof(savepath), "%s/moonstone.sav", g_exedir[0] ? g_exedir : ".");
+    quicksave_path(savepath, sizeof(savepath));
     /* High-resolution frame pacing.  PAL is 50 Hz, so each frame should occupy
      * exactly 1/50 s of wall time.  SDL_GetTicks()/SDL_Delay() are millisecond-
      * resolution and SDL_Delay over-sleeps by the OS timer granularity (up to
@@ -7059,25 +7776,42 @@ static int run_sdl(int scale) {
     int skip_intro = 0;   /* set by any key/pad during the attract -> fast-forward to Mog launch */
     int prev_scope = g_blt_busy_scope;   /* natural intro-end edge detector (g_introcut) */
     while (running && !g_stop) {
-        g_cur_frame++;   /* advance the host-frame counter in the LIVE path too: it was only set in the
+        int mp_advanced = !mp_active() || (g_mp.phase == MP_PLAY && mp_focused);
+        if (mp_advanced) g_cur_frame++; /* advance only while the original game runs */
+        /* advance the host-frame counter in the LIVE path too: it was only set in the
                           * headless --frames loop, so in real play g_cur_frame stayed 0 and the 3 s
                           * win-screen auto-advance timer (el = g_cur_frame - g_winwait_frame) never
                           * elapsed.  A monotonic per-frame tick is all that timer + the maplog need. */
         int do_save = 0, do_load = 0;   /* quicksave/quickload requested this frame (F5/F9) */
+        int mp_keyboard_claim = 0;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = 0;
+            else if (e.type == SDL_WINDOWEVENT && e.window.windowID == SDL_GetWindowID(win)) {
+                if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                    mp_focused = 0;
+                    m_fire = m_rmb = 0;
+                    if (mp_active()) mp_clear_host_input();
+                } else if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) mp_focused = 1;
+            }
             else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
                 int d = (e.type == SDL_KEYDOWN);
                 int sym = e.key.keysym.sym;
                 SDL_Scancode sc = e.key.keysym.scancode;
+                if (mp_active() && (g_mp.phase != MP_PLAY || !mp_focused)) {
+                    if (d && !e.key.repeat) {
+                        if (sym == SDLK_ESCAPE) running = 0;
+                        if (sym == SDLK_RETURN || sym == SDLK_KP_ENTER) mp_keyboard_claim = 1;
+                    }
+                    continue; /* setup input never enters the game's keyboard queue */
+                }
                 /* TYPED-TEXT: on keydown queue the 0xc1b3-index for any text key
                  * (A-Z, 0-9, space, Backspace, Return) so the Select-Knight name
                  * field can be typed into.  The queue is only drained at the name-
                  * entry poll site, so this is inert on every other screen.  Done in
                  * addition to (not instead of) the navigation mapping below, so the
                  * same keys still drive fire/menu where those screens are active. */
-                if (d) { uint8_t ix = keysym_to_idx(sym); if (ix) keyq_push(ix); }
+                if (d && !g_mp_practice) { uint8_t ix = keysym_to_idx(sym); if (ix) keyq_push(ix); }
                 switch (sym) {
                     case SDLK_F10: if (d) { g_livedump = !g_livedump;  /* toggle live frame recorder (diagnostics) */
                         if (win) SDL_SetWindowTitle(win, g_livedump ? "Moonstone - RECORDING FRAMES (F10 to stop)" : g_wintitle); } break;
@@ -7088,7 +7822,13 @@ static int run_sdl(int scale) {
                      * no longer bound to F-keys.  (F12 re-bound to audio capture, above.) */
                     case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5:
                     case SDLK_6: case SDLK_7: case SDLK_8: case SDLK_9:
-                        g_kdigit = d ? (e.key.keysym.sym - SDLK_1 + 1) : 0; break;  /* overlap-popup select */
+                    case SDLK_KP_1: case SDLK_KP_2: case SDLK_KP_3: case SDLK_KP_4: case SDLK_KP_5:
+                    case SDLK_KP_6: case SDLK_KP_7: case SDLK_KP_8: case SDLK_KP_9: {
+                        int digit = sym >= SDLK_KP_1 ? sym - SDLK_KP_1 + 1 : sym - SDLK_1 + 1;
+                        if (mp_keyboard_gameplay() && d) g_kdigit = digit;
+                        else if (!d && g_kdigit == digit) g_kdigit = 0;
+                        break;
+                    }
                     default: break;
                 }
                 /* Configurable actions are edge-triggered here.  Keep the original
@@ -7099,15 +7839,16 @@ static int run_sdl(int scale) {
                     if (control_key_matches(CONTROL_QUIT, sc)) running = 0;
                     if (control_key_matches(CONTROL_QUICKSAVE, sc)) do_save = 1;
                     if (control_key_matches(CONTROL_QUICKLOAD, sc)) do_load = 1;
-                    if (control_key_matches(CONTROL_INVENTORY, sc) && !g_blt_busy_scope && !g_in_inventory
+                    if (mp_keyboard_gameplay() && control_key_matches(CONTROL_INVENTORY, sc) && !g_blt_busy_scope && !g_in_inventory
                         && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
                     if (control_key_matches(CONTROL_PAUSE, sc) && !g_blt_busy_scope
-                        && g_combat_pause_live && (g_cur_frame - g_combat_pause_live) < 3) g_pause_request = 1;
-                    if (control_key_matches(CONTROL_END_TURN, sc) && !g_blt_busy_scope && !g_in_inventory
+                        && (g_mp_practice || g_mp_context==MP_CAM_COMBAT || mp_practice_snapshot() || (g_combat_pause_live
+                            && (g_cur_frame - g_combat_pause_live) < 3))) g_pause_request = 1;
+                    if (mp_keyboard_gameplay() && control_key_matches(CONTROL_END_TURN, sc) && !g_blt_busy_scope && !g_in_inventory
                         && g_map_live && (g_cur_frame - g_map_live) < 3) g_rest_request = 1;
-                    if (control_key_matches(CONTROL_ABANDON_QUEST, sc) && !g_blt_busy_scope && !g_in_inventory
+                    if (mp_keyboard_gameplay() && control_key_matches(CONTROL_ABANDON_QUEST, sc) && !g_blt_busy_scope && !g_in_inventory
                         && g_map_live && (g_cur_frame - g_map_live) < 3) g_quest_quit_request = 1;
-                    if (control_key_matches(CONTROL_SHOW_VERSION, sc) && g_retail_parity && !g_blt_busy_scope && !g_in_inventory
+                    if (mp_keyboard_gameplay() && control_key_matches(CONTROL_SHOW_VERSION, sc) && g_retail_parity && !g_blt_busy_scope && !g_in_inventory
                         && g_map_live && (g_cur_frame - g_map_live) < 3) g_ver_request = 1;
                     if (g_blt_busy_scope && control_key_matches(CONTROL_SKIP_INTRO, sc)) skip_intro = 1;
                 }
@@ -7127,7 +7868,7 @@ static int run_sdl(int scale) {
                 if (dy >  8) dy =  8; else if (dy < -8) dy = -8;
                 g_mouse_dx += dx; g_mouse_dy += dy;
             } else if (e.type == SDL_CONTROLLERDEVICEADDED || e.type == SDL_CONTROLLERDEVICEREMOVED) {
-                controller_device_event(&pad, &controller_notice, &e.cdevice);
+                controller_device_event(&controller_notice, &e.cdevice);
             }
         }
 
@@ -7137,9 +7878,13 @@ static int run_sdl(int scale) {
          * Amiga joystick. */
         int pad_strength[CONTROL_COUNT] = {0};
         int pad_now[CONTROL_COUNT] = {0};
-        if (pad) for (int a = 0; a < CONTROL_COUNT; a++) {
-            pad_strength[a] = control_pad_strength(pad, (ControlAction)a);
-            pad_now[a] = pad_strength[a] > 0;
+        int pad_edge[CONTROL_COUNT] = {0};
+        mp_poll_pads();
+        MpPad *primary = controller_primary(mp_focused);
+        if (primary) for (int a = 0; a < CONTROL_COUNT; a++) {
+            pad_strength[a] = control_pad_strength(primary->handle, (ControlAction)a);
+            pad_now[a] = primary->now[a];
+            pad_edge[a] = primary->edge[a];
         }
         int pad_u = pad_now[CONTROL_UP], pad_d = pad_now[CONTROL_DOWN];
         int pad_l = pad_now[CONTROL_LEFT], pad_r = pad_now[CONTROL_RIGHT];
@@ -7152,22 +7897,22 @@ static int run_sdl(int scale) {
         /* Edge-triggered controller actions use the same guest-side scope gates
          * as keyboard actions.  Independent per-action edge state lets one pad
          * input intentionally serve context-exclusive actions. */
-        if (pad_now[CONTROL_QUIT] && !prev_pad_action[CONTROL_QUIT]) running = 0;
-        if (pad_now[CONTROL_QUICKSAVE] && !prev_pad_action[CONTROL_QUICKSAVE]) do_save = 1;
-        if (pad_now[CONTROL_QUICKLOAD] && !prev_pad_action[CONTROL_QUICKLOAD]) do_load = 1;
-        if (pad_now[CONTROL_INVENTORY] && !prev_pad_action[CONTROL_INVENTORY]
+        if (pad_edge[CONTROL_QUIT]) running = 0;
+        if (pad_edge[CONTROL_QUICKSAVE]) do_save = 1;
+        if (pad_edge[CONTROL_QUICKLOAD]) do_load = 1;
+        if (pad_edge[CONTROL_INVENTORY]
             && !g_blt_busy_scope && !g_in_inventory && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
-        if (pad_now[CONTROL_PAUSE] && !prev_pad_action[CONTROL_PAUSE]
-            && !g_blt_busy_scope && g_combat_pause_live && (g_cur_frame - g_combat_pause_live) < 3) g_pause_request = 1;
-        if (pad_now[CONTROL_END_TURN] && !prev_pad_action[CONTROL_END_TURN]
+        if (pad_edge[CONTROL_PAUSE]
+            && !g_blt_busy_scope && (mp_practice_snapshot() || (g_combat_pause_live
+                && (g_cur_frame - g_combat_pause_live) < 3))) g_pause_request = 1;
+        if (pad_edge[CONTROL_END_TURN]
             && !g_blt_busy_scope && !g_in_inventory && g_map_live && (g_cur_frame - g_map_live) < 3) g_rest_request = 1;
-        if (pad_now[CONTROL_ABANDON_QUEST] && !prev_pad_action[CONTROL_ABANDON_QUEST]
+        if (pad_edge[CONTROL_ABANDON_QUEST]
             && !g_blt_busy_scope && !g_in_inventory && g_map_live && (g_cur_frame - g_map_live) < 3) g_quest_quit_request = 1;
-        if (pad_now[CONTROL_SHOW_VERSION] && !prev_pad_action[CONTROL_SHOW_VERSION]
+        if (pad_edge[CONTROL_SHOW_VERSION]
             && g_retail_parity && !g_blt_busy_scope && !g_in_inventory
             && g_map_live && (g_cur_frame - g_map_live) < 3) g_ver_request = 1;
         if (g_blt_busy_scope && pad_now[CONTROL_SKIP_INTRO]) skip_intro = 1;
-        memcpy(prev_pad_action, pad_now, sizeof(prev_pad_action));
 
         /* --skipat N (diag, cushion-loss repro 2026-07-02): trigger the intro-skip
          * automatically at host frame N, so the post-skip audio-queue state can be
@@ -7204,6 +7949,36 @@ static int run_sdl(int scale) {
          * Mirror configured directions into JOY0 exactly as controller directions do. */
         g_mouse_dx += pad_mx + (kb_r ? 6 : 0) - (kb_l ? 6 : 0);
         g_mouse_dy += pad_my + (kb_d ? 6 : 0) - (kb_u ? 6 : 0);
+
+        if (mp_active() && mp_update(keyboard,mp_keyboard_claim,mp_focused,m_fire,
+                                      &do_save,&do_load,&running)) {
+            if (mp_advanced) g_cur_frame--;
+            if (!mp_audio_hold) {
+                if (g_audio_dev) { SDL_PauseAudioDevice(g_audio_dev,1); SDL_ClearQueuedAudio(g_audio_dev); }
+                mp_audio_hold = 1;
+                capture_frame();
+            }
+            SDL_SetRenderDrawColor(ren,0,0,0,255);
+            SDL_RenderClear(ren);
+            if (g_cap_w > 0 && g_cap_h > 0) {
+                SDL_UpdateTexture(tex,NULL,g_cap,FB_W*3);
+                SDL_Rect area = {0,0,g_cap_w,g_cap_h};
+                SDL_RenderCopy(ren,tex,&area,NULL);
+            }
+            mp_overlay(ren,mp_focused);
+            SDL_RenderPresent(ren);
+            SDL_Delay(10);
+            continue;
+        }
+        if (mp_audio_hold) {
+            audio_reprime(4);
+            if (g_audio_dev && !g_audio_paused) SDL_PauseAudioDevice(g_audio_dev,0);
+            next_deadline = (double)SDL_GetPerformanceCounter() + frame_ticks;
+            mp_audio_hold = 0;
+            /* This frame began frozen; avoid advancing with an old frame stamp. */
+            if (!mp_advanced) g_cur_frame++;
+            m_fire = m_rmb = 0;
+        }
 
         /* NATURAL INTRO END (operator 2026-07-03): a fully-watched intro used to drop
          * into the same ~20 s landing zone the skip did (loader black + looping chant,
@@ -7269,18 +8044,20 @@ static int run_sdl(int scale) {
         /* QUICKSAVE / QUICKLOAD: act at this clean between-frames boundary,
          * in-game only (saving/loading during the scripted attract is meaningless and
          * would fight the video-delay ring).  Whole-machine snapshot to/from
-         * <exedir>/moonstone.sav; a 2.4s title flash gives feedback. */
+         * the launch-selected file under saves/; a 2.4s title flash gives feedback. */
         if ((do_save || do_load) && !g_blt_busy_scope) {
             const char *msg;
+            int mp_loaded = 0;
             if (do_save) {
                 msg = load_in_progress() ? "BUSY LOADING - SAVE IN A SEC"
-                    : save_state(savepath) ? "GAME SAVED" : "SAVE FAILED";
+                    : (quicksave_directories_ready() && save_state(savepath)) ? "GAME SAVED" : "SAVE FAILED";
             } else {
                 if (load_state(savepath)) {
                     msg = "GAME LOADED";
                     if (g_audio_dev) SDL_ClearQueuedAudio(g_audio_dev);   /* drop now-stale queued audio */
                     audio_reprime(4);   /* rebuild the anti-underrun cushion the clear just destroyed */
                     next_deadline = (double)SDL_GetPerformanceCounter() + frame_ticks;  /* resync pacing */
+                    if (mp_active()) { m_fire = m_rmb = 0; mp_loaded = 1; }
                 } else {
                     msg = "NO SAVE TO LOAD";
                 }
@@ -7290,6 +8067,7 @@ static int run_sdl(int scale) {
                 SDL_SetWindowTitle(win, t);
                 status_frames = 120;   /* ~2.4s, then restore the base title */
             }
+            if (mp_loaded) continue; /* establish neutral inputs before executing the loaded game */
         }
 
         Uint64 t_w0 = SDL_GetPerformanceCounter();   /* frame-time watch: start of host work */
@@ -7297,6 +8075,16 @@ static int run_sdl(int scale) {
         autoswap_tick();   /* seamless disk swap: auto-confirm any "insert disk" prompt */
         run_one_frame();
         g_mouse_dx = g_mouse_dy = 0;   /* consume this frame's mouse delta */
+        /* Version is presentation only: a fresh configured press toggles it.
+         * Leaving the map dismisses it, without delaying or consuming gameplay. */
+        if (!g_map_live || (g_cur_frame - g_map_live) >= 3 || g_in_inventory || g_blt_busy_scope)
+            g_version_visible = 0;
+        else if (g_ver_request) {
+            g_version_visible = !g_version_visible;
+            if (g_log) fprintf(g_log, "VERSION %s: %s\n",
+                               g_version_visible ? "shown" : "hidden", MOON_REVISION);
+        }
+        g_ver_request = 0;
         /* Injection scene-change retract (audit 2026-07-02): if we injected a scancode and
          * the map poll STOPPED running (scene changed under us -- combat start, town entry),
          * the pending byte would linger in [0x3bf74] for the next scene's consumers.  Retract
@@ -7313,7 +8101,10 @@ static int run_sdl(int scale) {
             if (g_quest_quit_pending && r16(0x3bf74u) == 0x10u) w16(0x3bf74u, 0);
             g_quest_quit_request = g_quest_quit_pending = g_ver_request = 0;
         }
-        if (g_pause_request && (g_cur_frame - g_combat_pause_live) > 5)
+        /* Practice can resume mid-animation after F9, before its next original
+         * pause poll. Its known scene remains valid even when that poll is old. */
+        if (g_pause_request && !g_mp_practice && g_mp_context!=MP_CAM_COMBAT && !mp_practice_snapshot()
+            && (g_cur_frame - g_combat_pause_live) > 5)
             g_pause_request = 0;   /* combat ended before we could inject: drop stale pause */
         /* Render via capture_frame so the live window gets the same vblank-aligned
          * snapshot + empty-backbuffer recovery + scene-transition hold as the dump
@@ -7378,7 +8169,10 @@ static int run_sdl(int scale) {
             SDL_RenderClear(ren);
             SDL_RenderCopy(ren, tex, &srcr, NULL);
         }
+        numbered_menu_draw(ren,w,h);
         controller_notice_draw(ren, &controller_notice, SDL_GetTicks());
+        version_notice_draw(ren);
+        mp_overlay(ren,mp_focused);
         SDL_RenderPresent(ren);
         if (g_avlog && g_log) {   /* A/V-sync probe: when was WHICH emu frame actually presented */
             double tms = (double)SDL_GetPerformanceCounter() * 1000.0
@@ -7485,6 +8279,8 @@ static int run_sdl(int scale) {
                     g_stop_reason, pc, (unsigned long long)g_icount, g_unmapped);
             fflush(g_log);
         }
+        if (g_data_read_failed) report_data_read_error(1, win);
+        else {
         char hint[1400], msg[2048];
         host_log_hint(hint, sizeof(hint));
         snprintf(msg, sizeof(msg),
@@ -7493,11 +8289,12 @@ static int run_sdl(int scale) {
                  "Please report these details so this can be investigated.",
                  g_stop_reason, pc, (unsigned long long)g_icount, hint);
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Moonstone", msg, win);
+        }
     }
-    if (pad) SDL_GameControllerClose(pad);
+    mp_close_pads();
     if (g_audio_dev) { SDL_CloseAudioDevice(g_audio_dev); g_audio_dev = 0; }
     SDL_DestroyTexture(tex); SDL_DestroyRenderer(ren); SDL_DestroyWindow(win); SDL_Quit();
-    return 0;
+    return g_data_read_failed ? 1 : 0;
 }
 
 /* ============================ AmigaOS HLE ============================ */
@@ -7625,8 +8422,8 @@ static void hle_dispatch(uint32_t pc) {
  *   0x2cf06  STREAM-SKIP:  d0 = BYTE count. Advances the cursor without copying
  *            (the orchestrator uses it to skip each hunk's size longword).
  * Each ends in an RTS we synthesize in C, so the original disk bodies never run.
- * This is fully general: program, Mog and every asset are loaded by the same
- * trio.  `program` reuses these hunks verbatim but relocated (delta -0x1cd8), so
+ * This covers the boot modules; Mog still uses its original OFS/trackdisk
+ * reader for scene assets. `program` reuses these hunks relocated (delta -0x1cd8), so
  * its own loader copies (0x2adbc/0x2b0c8/0x2b22e) are trapped to the same C. */
 static uint8_t *g_loadbuf = NULL;     /* current open file's bytes */
 static long     g_loadsize = 0;       /* total size */
@@ -7655,30 +8452,40 @@ static void hle_rts(void) {
 /* 0x2ca94: load file named by a0 into g_loadbuf; reset cursor. */
 static void hle_load_by_name(void) {
     char nm[64]; read_cstr(hle_reg(M68K_REG_A0), nm, sizeof(nm));
-    char path[256]; long sz = find_file(nm, path, sizeof(path));
+    char path[1300]; long sz = find_file(nm, path, sizeof(path));
     if (g_loadbuf) { free(g_loadbuf); g_loadbuf = NULL; }
     g_loadsize = 0; g_loadpos = 0; g_loadname[0] = 0;
     if (sz < 0) {
         if (g_log) fprintf(g_log, "HLE load-by-name \"%s\" -> NOT FOUND\n", nm);
         /* result flag <0 = failure. nb's copy @0x2ca22, program's @0x2ad4a. */
         w16(0x2ca22, 0xffff); w16(0x2ad4a, 0xffff);
-        hle_rts();
+        data_read_failure(path, "Cannot open '%s' for reading: %s (errno=%d).", nm, strerror(errno), errno);
         return;
     }
     FILE *f = fopen(path, "rb");
-    g_loadbuf = f ? (uint8_t*)malloc(sz) : NULL;
+    g_loadbuf = f ? (uint8_t*)malloc(sz > 0 ? (size_t)sz : 1u) : NULL;
     if (!f || !g_loadbuf) {                       /* open/alloc failed (file vanished mid-session,
                                                    * OOM): fail exactly like NOT FOUND -- never
                                                    * fread through NULL */
+        int err = errno, opened = f != NULL;
         if (f) fclose(f);
         if (g_loadbuf) { free(g_loadbuf); g_loadbuf = NULL; }
         if (g_log) fprintf(g_log, "HLE load-by-name \"%s\" -> open/alloc FAILED\n", nm);
         w16(0x2ca22, 0xffff); w16(0x2ad4a, 0xffff);
-        hle_rts();
+        if (opened) data_read_failure(path, "Not enough memory to read '%s' (%ld bytes).", nm, sz);
+        else data_read_failure(path, "Cannot open '%s' for reading: %s (errno=%d).", nm, strerror(err), err);
         return;
     }
+    errno = 0;
     g_loadsize = (long)fread(g_loadbuf, 1, sz, f);
-    fclose(f);
+    int extra = fgetc(f), failed = ferror(f), err = errno;
+    if (fclose(f) != 0) { failed = 1; if (!err) err = errno; }
+    if (g_loadsize != sz || extra != EOF || failed || !boot_data_matches(nm, g_loadbuf, g_loadsize)) {
+        data_read_failure(path, "Cannot read complete, matching data for '%s' (%ld of %ld bytes; errno=%d). Check that this file matches your game disks.", nm, g_loadsize, sz, err);
+        free(g_loadbuf); g_loadbuf = NULL; g_loadsize = 0;
+        w16(0x2ca22, 0xffff); w16(0x2ad4a, 0xffff);
+        return;
+    }
     snprintf(g_loadname, sizeof(g_loadname), "%s", nm);
     if (!strcmp(nm, "program")) g_program_served = 1;
     /* success state the original leaves: stream cursors zeroed, status>=0.
@@ -7689,12 +8496,24 @@ static void hle_load_by_name(void) {
     hle_rts();
 }
 
+static int hle_stream_available(uint32_t n) {
+    if (g_loadpos >= 0 && g_loadpos <= g_loadsize &&
+        (g_loadbuf || !n) && (uint64_t)n <= (uint64_t)(g_loadsize - g_loadpos)) return 1;
+    const char *base = g_loadname;
+    for (const char *p = g_loadname; *p; p++) if (*p == ':' || *p == '/' || *p == '\\') base = p + 1;
+    char path[1300]; snprintf(path, sizeof(path), "%s/%s", g_dataset, base);
+    data_read_failure(path, "Incomplete game data in '%s': requested %u bytes at offset %ld, file size %ld. Check that the startup files match your game disks.",
+                      base, n, g_loadpos, g_loadsize);
+    w16(0x2ca22, 0xffff); w16(0x2ad4a, 0xffff);
+    return 0;
+}
+
 /* 0x2cda0: copy next d0 bytes of the open file into a0; advance cursor. */
 static void hle_stream_read(void) {
     uint32_t dst = hle_reg(M68K_REG_A0);
     uint32_t n   = hle_reg(M68K_REG_D0);
-    long avail = g_loadbuf ? (g_loadsize - g_loadpos) : 0;
-    uint32_t cnt = (long)n <= avail ? n : (avail > 0 ? (uint32_t)avail : 0);
+    if (!hle_stream_available(n)) return;
+    uint32_t cnt = n;
     for (uint32_t i = 0; i < cnt; i++) w8(dst + i, g_loadbuf[g_loadpos + i]);
     g_loadpos += cnt;
     if (g_log && g_streamlog < 40) {
@@ -7709,8 +8528,8 @@ static void hle_stream_read(void) {
  * per-hunk size longword the orchestrator doesn't keep). Leaves d0 intact. */
 static void hle_stream_skip(void) {
     uint32_t n = hle_reg(M68K_REG_D0);
-    long avail = g_loadbuf ? (g_loadsize - g_loadpos) : 0;
-    uint32_t cnt = (long)n <= avail ? n : (avail > 0 ? (uint32_t)avail : 0);
+    if (!hle_stream_available(n)) return;
+    uint32_t cnt = n;
     g_loadpos += cnt;
     if (g_log && g_streamlog < 40) {
         fprintf(g_log, "HLE stream-skip \"%s\" n=%u (pos=%ld/%ld)\n",
@@ -7791,10 +8610,12 @@ static int vertb_gate(void) {
 typedef struct { int frame; int u,d,l,r,fire,rest,quest_quit; } ScriptEv;
 static ScriptEv g_script[MAX_SCRIPT];
 static int      g_nscript = 0;
+static ScriptEv g_script2[MAX_SCRIPT];
+static int      g_nscript2;
 #define MOUSE_STEP 3
 
-static void parse_script(const char *s) {
-    while (*s && g_nscript < MAX_SCRIPT) {
+static void parse_script_events(const char *s, ScriptEv *events, int *count) {
+    while (*s && *count < MAX_SCRIPT) {
         char *end;
         long fr = strtol(s, &end, 10);
         if (end == s) break;
@@ -7811,9 +8632,22 @@ static void parse_script(const char *s) {
             }
             s++;
         }
-        g_script[g_nscript++] = ev;
+        events[(*count)++] = ev;
         if (*s == ',') s++;
     }
+}
+static void parse_script(const char *s) { parse_script_events(s, g_script, &g_nscript); }
+static void parse_script2(const char *s) {
+    g_mp_script = 1;
+    parse_script_events(s, g_script2, &g_nscript2);
+}
+static uint16_t script_word(const ScriptEv *e) {
+    return (uint16_t)(e->r | (e->l << 1) | (e->d << 2) | (e->u << 3) | (e->fire << 4));
+}
+static void apply_script2(int fr) {
+    g_mp_input[1] = 0;
+    for (int i = 0; i < g_nscript2 && g_script2[i].frame <= fr; i++)
+        g_mp_input[1] = script_word(&g_script2[i]);
 }
 
 /* Apply the script at frame `fr`: find the latest event whose frame <= fr and
@@ -7821,8 +8655,9 @@ static void parse_script(const char *s) {
 static void apply_script(int fr) {
     int idx = -1;
     for (int i = 0; i < g_nscript; i++) if (g_script[i].frame <= fr) idx = i; else break;
-    if (idx < 0) { g_ji_up=g_ji_dn=g_ji_lf=g_ji_rt=0; g_fire=g_fire2=0; g_mouse_dx=g_mouse_dy=0; return; }
+    if (idx < 0) { g_mp_input[0]=0; g_ji_up=g_ji_dn=g_ji_lf=g_ji_rt=0; g_fire=g_fire2=0; g_mouse_dx=g_mouse_dy=0; return; }
     ScriptEv *e = &g_script[idx];
+    if (g_mp_script) g_mp_input[0] = script_word(e);
     g_ji_up=e->u; g_ji_dn=e->d; g_ji_lf=e->l; g_ji_rt=e->r;
     g_fire = e->fire; g_fire2 = e->fire;
     g_mouse_dx = (e->r?MOUSE_STEP:0) - (e->l?MOUSE_STEP:0);
@@ -7959,11 +8794,15 @@ static void apply_diskat(int fr) {
  * machine to a file and thaw it back: the 68000 context, all 2MB of RAM, and
  * every piece of mutable chip / CIA / Paula / HLE state.  No knowledge of the
  * game's own data structures is needed (the 1991 game had no save format), and
- * it works anywhere -- even mid-combat.  Single quicksave slot at
- * <exedir>/moonstone.sav.  F5 saves, F9 loads.  The original Amiga release had
+ * it works anywhere -- even mid-combat. One launch-selected quicksave under
+ * saves/Singleplayer/ or saves/Multiplayer/ beside the EXE. F5 saves, F9 loads.
+ * The original Amiga release had
  * NO save/password at all (one of its most-criticized flaws); this fixes that. */
 #define SAVE_MAGIC   "MOONSAVE"
-#define SAVE_VERSION 2u    /* v2: portable CPU REGISTERS instead of Musashi's context blob.
+#define SAVE_VERSION 5u    /* v5: serialized once-per-lair XP rewards, shared by all players.
+                            * v4: serialized transient rat-kill latch (including mid-handler saves).
+                            * v3: serialized campaign-wide sword-generation latch.
+                            * v2: portable CPU REGISTERS instead of Musashi's context blob.
                             * v1 embedded the context, which contains HOST function pointers,
                             * so a v1 save loaded by a different build dereferenced stale
                             * pointers -> crash.  v2 saves only register VALUES, so a save
@@ -7986,7 +8825,7 @@ static const int SAVE_REGS[] = {
  *   2. RESET ON LOAD: reconstructable protocol gates -> paula_sidecar_reset()
  *      (adding to the blob would break save-version compat).
  *   3. HOST-INPUT state (the g_rest_, g_inv_, g_pause_ families, plus
- *      g_popup_injected / keyq / g_menusel_prev): scoped by liveness stamps
+ *      g_popup_injected / keyq / g_numbered): scoped by liveness stamps
  *      (g_map_live, g_combat_pause_live) with scene-change retracts -- self-healing
  *      across loads, keep it that way.
  *   4. DIAG-ONLY (watch counters, log dedup state): stale values only cost log
@@ -8015,7 +8854,7 @@ static int sv_blob(SvCursor *s, void *p, size_t n) {
     s->pos += n;
     return 1;
 }
-static int sv_serialize(SvCursor *s, uint32_t *regs, int nregs) {
+static int sv_serialize(SvCursor *s, uint32_t *regs, int nregs, uint32_t version) {
     int ok = 1;
     ok &= sv_blob(s, regs, (size_t)nregs*sizeof(uint32_t)); /* 68000 CPU registers (portable) */
     ok &= sv_blob(s, g_ram, RAM_SIZE);            /* all 2MB chip RAM            */
@@ -8046,6 +8885,9 @@ static int sv_serialize(SvCursor *s, uint32_t *regs, int nregs) {
     ok &= sv_blob(s, &g_blt_busy_scope, sizeof(g_blt_busy_scope));
     ok &= sv_blob(s, &g_blit_count, sizeof(g_blit_count));
     ok &= sv_blob(s, g_diskev_done, sizeof(g_diskev_done));
+    if (version >= 3u) ok &= sv_blob(s, &g_sword_created, sizeof(g_sword_created));
+    if (version >= 4u) ok &= sv_blob(s, &g_ko_latch, sizeof(g_ko_latch));
+    if (version >= 5u) ok &= sv_blob(s, g_lair_xp_awarded, sizeof(g_lair_xp_awarded));
     /* dos-HLE streamer: save the file NAME + cursor; the buffer itself (a host
      * pointer) is reconstructed on load by re-reading the dataset file. */
     ok &= sv_blob(s, g_loadname, sizeof(g_loadname));
@@ -8055,10 +8897,10 @@ static int sv_serialize(SvCursor *s, uint32_t *regs, int nregs) {
     return ok;
 }
 
-static size_t sv_payload_size(void) {
+static size_t sv_payload_size(uint32_t version) {
     uint32_t regs[SAVE_NREGS] = {0};
     SvCursor s = { NULL, SIZE_MAX, 0, 1 };
-    return sv_serialize(&s, regs, SAVE_NREGS) ? s.pos : 0;
+    return sv_serialize(&s, regs, SAVE_NREGS, version) ? s.pos : 0;
 }
 
 static int sv_replace_file(const char *tmp, const char *path) {
@@ -8072,7 +8914,7 @@ static int sv_replace_file(const char *tmp, const char *path) {
 /* Validate and reconstruct the only host-pointer sidecar before committing a
  * loaded payload.  A changed/missing dataset file makes the load fail cleanly
  * with the running machine untouched instead of leaving an oversized cursor. */
-static int sv_prepare_streamer(const uint8_t *payload, size_t payload_size,
+static int sv_prepare_streamer(const uint8_t *payload, size_t payload_size, uint32_t version,
                                uint8_t **stream_out) {
     const size_t tail = sizeof(g_loadname) + sizeof(g_loadpos) +
                         sizeof(g_loadsize) + sizeof(g_program_served);
@@ -8081,6 +8923,11 @@ static int sv_prepare_streamer(const uint8_t *payload, size_t payload_size,
     *stream_out = NULL;
     if (payload_size < tail) return 0;
     size_t off = payload_size - tail;
+    /* Validate every parity sidecar before committing ANY live state. */
+    size_t flags = version >= 4u ? 2u : version >= 3u ? 1u : 0u;
+    if (version >= 5u) flags += sizeof(g_lair_xp_awarded);
+    if (off < flags) return 0;
+    for (size_t i = 0; i < flags; i++) if (payload[off - flags + i] > 1u) return 0;
     memcpy(name, payload + off, sizeof(name)); off += sizeof(name);
     memcpy(&pos, payload + off, sizeof(pos)); off += sizeof(pos);
     memcpy(&size, payload + off, sizeof(size));
@@ -8098,7 +8945,7 @@ static int sv_prepare_streamer(const uint8_t *payload, size_t payload_size,
     int extra = fgetc(f);
     int read_error = ferror(f);
     int close_error = fclose(f) != 0;
-    if (!buf || got != want || extra != EOF || read_error || close_error) {
+    if (!buf || got != want || extra != EOF || read_error || close_error || !boot_data_matches(name, buf, size)) {
         free(buf);
         return 0;
     }
@@ -8110,10 +8957,10 @@ static int save_state(const char *path) {
     uint32_t ver = SAVE_VERSION, ram = RAM_SIZE, nregs = SAVE_NREGS;
     uint32_t regs[SAVE_NREGS];
     for (int i = 0; i < SAVE_NREGS; i++) regs[i] = m68k_get_reg(NULL, SAVE_REGS[i]);
-    size_t payload_size = sv_payload_size();
+    size_t payload_size = sv_payload_size(ver);
     uint8_t *payload = payload_size ? (uint8_t*)malloc(payload_size) : NULL;
     SvCursor s = { payload, payload_size, 0, 1 };
-    int ok = payload && sv_serialize(&s, regs, SAVE_NREGS) && s.pos == payload_size;
+    int ok = payload && sv_serialize(&s, regs, SAVE_NREGS, ver) && s.pos == payload_size;
 
     size_t tmp_size = strlen(path) + 40u;
     char *tmp = ok ? (char*)malloc(tmp_size) : NULL;
@@ -8151,17 +8998,28 @@ static int save_state(const char *path) {
     return ok;
 }
 
+/* Recognize original Practice state after a cold load, without serializing host
+ * device IDs or changing the original actors. Include opcode and mode guards. */
+static int mp_practice_snapshot(void) {
+    return (r16(0x22fc4) == 0x0c28 && r32(0x22fc6) == 0x0001000b
+            && r16(0x3051e) == 2 && r32(0x37162) == 12
+            && r8(0x2e7e7) == 2 && r8(0x2e86b) == 1)
+        || (r16(0x22f70) == 0x0c28 && r32(0x22f72) == 0x0001000b
+            && r16(0x302d2) == 2 && r32(0x36f12) == 12
+            && r8(0x2e5bf) == 2 && r8(0x2e643) == 1);
+}
+
 static int load_state(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
     char magic[8]; uint32_t ver=0, ram=0, nregs=0;
     int ok = (fread(magic,1,8,f)==8) && memcmp(magic,SAVE_MAGIC,8)==0;
-    ok = ok && (fread(&ver,4,1,f)==1) && ver==SAVE_VERSION;        /* v1 (context-blob) saves rejected here */
+    ok = ok && (fread(&ver,4,1,f)==1) && (ver>=2u && ver<=SAVE_VERSION); /* reject v1 host pointers */
     ok = ok && (fread(&ram,4,1,f)==1) && ram==RAM_SIZE;
     ok = ok && (fread(&nregs,4,1,f)==1) && nregs==(uint32_t)SAVE_NREGS;
     if (!ok) { fclose(f); return 0; }
 
-    size_t payload_size = sv_payload_size();
+    size_t payload_size = sv_payload_size(ver);
     uint8_t *payload = payload_size ? (uint8_t*)malloc(payload_size) : NULL;
     if (!payload) { fclose(f); return 0; }
     size_t got = fread(payload, 1, payload_size, f);
@@ -8174,15 +9032,24 @@ static int load_state(const char *path) {
     }
 
     uint8_t *staged_stream = NULL;
-    if (!sv_prepare_streamer(payload, payload_size, &staged_stream)) {
+    if (!sv_prepare_streamer(payload, payload_size, ver, &staged_stream)) {
         free(payload);
         return 0;
     }
     uint32_t regs[SAVE_NREGS];
     SvCursor s = { payload, payload_size, 0, 0 };
-    ok = sv_serialize(&s, regs, SAVE_NREGS) && s.pos == payload_size;
+    ok = sv_serialize(&s, regs, SAVE_NREGS, ver) && s.pos == payload_size;
     free(payload);
     if (ok) {
+        /* Legacy v2 has no generation history. It can still be loaded for
+         * diagnostics, but only a new campaign establishes the retail rule. */
+        if (ver == 2u) g_sword_created = 0;
+        /* Older files contain no KO state. Start neutral instead of importing
+         * a previous session's latch; new saves retain the exact guest phase. */
+        if (ver < 4u) g_ko_latch = 0;
+        /* Legacy saves never recorded which lairs paid XP. Do not infer it
+         * from loot or remaining enemies, or borrow another world's history. */
+        if (ver < 5u) memset(g_lair_xp_awarded, 0, sizeof(g_lair_xp_awarded));
         /* Restore the CPU: SR FIRST (sets supervisor/user mode + IRQ mask so A7 maps
          * to the correct stack), then all other registers.  Pure values, no pointers. */
         for (int i = 0; i < SAVE_NREGS; i++) if (SAVE_REGS[i]==M68K_REG_SR) m68k_set_reg(M68K_REG_SR, regs[i]);
@@ -8190,6 +9057,9 @@ static int load_state(const char *path) {
         paula_sidecar_reset();   /* Paula reload-protocol statics live outside the blob: rebuild them
                                   * from the just-restored registers (see paula_sidecar_reset) */
         g_ew_armed = 0;          /* edge-walk fix trajectory capture: transient per-turn state, drop on load */
+        g_ver_request = g_version_visible = 0;
+        numbered_menu_reset(); /* Reconstruct the cursor if this save is inside a popup. */
+        g_popup_injected = g_kdigit = 0;
         /* Host-only Guardian transition state is deliberately not serialized.  A warm F9 during
          * the reward/map handoff must not carry its palette blackout into an unrelated save. */
         g_guardian_return_fade = 0;
@@ -8199,6 +9069,23 @@ static int load_state(const char *path) {
         g_loadbuf = staged_stream;
         staged_stream = NULL;
         gameplay_watches_reset(g_snd_loaded); /* warm F9 stays armed; cold --loadstate waits for dispatcher */
+        if (g_sdl_mode || g_mp_script) {
+            int campaign=g_mp_campaign;
+            mp_campaign_clear();
+            g_mp_practice = mp_practice_snapshot()
+                && (g_mp_script || g_mp.phase != MP_OFF || mp_pad_count() > 0);
+            if (g_mp_practice && g_sdl_mode) {
+                if (campaign || g_mp.phase == MP_OFF) mp_begin_practice();
+                else mp_next(&g_mp);
+            } else if (g_sdl_mode && mp_campaign_players()) {
+                if (!campaign) mp_reset(&g_mp);
+                g_mp_restore_pending=1;
+                if (mp_pad_count() || campaign) mp_campaign_restore();
+            } else {
+                mp_reset(&g_mp);
+            }
+            mp_clear_host_input();
+        }
     }
     free(staged_stream);
     if (g_log) fprintf(g_log, "LOADSTATE %s ok=%d ic=%llu\n", path, ok, (unsigned long long)g_icount);
@@ -8213,6 +9100,7 @@ int main(int argc, char **argv) {
     int trace_n = 0;
     uint32_t sr = 0x2000; /* supervisor, mask 0 (got the loader chain furthest) */
     const char *logpath = NULL;   /* default: <exedir>/moonstone.log (set after exedir) */
+    int save_profile_error = 0;
     const char *dumppath = NULL;
     const char *ramdump = NULL;
     int frames = 600;
@@ -8241,6 +9129,11 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--trace")&&i+1<argc) trace_n=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--sr")&&i+1<argc) sr=(uint32_t)strtoul(argv[++i],0,0);
         else if (!strcmp(argv[i],"--log")&&i+1<argc) logpath=argv[++i];
+        else if (!strcmp(argv[i],"--save-profile")) {
+            if (i+1<argc && !strcmp(argv[i+1],"singleplayer")) { g_multiplayer_save=0; i++; }
+            else if (i+1<argc && !strcmp(argv[i+1],"multiplayer")) { g_multiplayer_save=1; i++; }
+            else save_profile_error=1;
+        }
         else if (!strcmp(argv[i],"--flow")) g_flow=1;
         else if (!strcmp(argv[i],"--trace-from")&&i+1<argc) g_trace_from=strtoull(argv[++i],0,0);
         else if (!strcmp(argv[i],"--tracen")&&i+1<argc) g_trace_budget=atoi(argv[++i]);
@@ -8284,7 +9177,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--rdbg")) g_rdbg=1;
         else if (!strcmp(argv[i],"--rawcapture")) g_rawcapture=1;  /* diag: bypass both render heuristics */
         else if (!strcmp(argv[i],"--maplog")) g_maplog=1;
-        else if (!strcmp(argv[i],"--delvlog")) g_delvlog=1;   /* TEMP diag: trace moonstone-delivery altar handler */
+        else if (!strcmp(argv[i],"--delvlog")) g_delvlog=1;   /* diag: trace lair rewards and the separate quest-return handler */
         else if (!strcmp(argv[i],"--livedump")) g_livedump=1; /* TEMP diag: force the F10 displayed-frame recorder on */
         else if (!strcmp(argv[i],"--spritex")&&i+1<argc) g_sprite_xoff=atoi(argv[++i]);  /* sprite-x origin calibration */
         else if (!strcmp(argv[i],"--recover")) g_recover=1;        /* re-enable the (now-unneeded) recovery heuristic */
@@ -8296,6 +9189,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--bltlog")&&i+2<argc) { g_bltlog=1; g_bltlog_from=strtoull(argv[++i],0,0); g_bltlog_to=strtoull(argv[++i],0,0); }
         else if (!strcmp(argv[i],"--cflog")) g_cflog=1;
         else if (!strcmp(argv[i],"--script")&&i+1<argc) parse_script(argv[++i]);
+        else if (!strcmp(argv[i],"--script2")&&i+1<argc) parse_script2(argv[++i]); /* diagnostic: independent Practice P2 */
         else if (!strcmp(argv[i],"--type")&&i+1<argc) parse_type(argv[++i]);
         else if (!strcmp(argv[i],"--diskat")&&i+1<argc) parse_diskat(argv[++i]);
         else if (!strcmp(argv[i],"--poke")&&i+1<argc) parse_poke(argv[++i]);   /* debug-only end-game state setup (g_os-gated) */
@@ -8324,7 +9218,20 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--bootboost")&&i+1<argc) g_bootboost=atoi(argv[++i]); /* boot loader CPU boost (1=authentic) */
         else if (!strcmp(argv[i],"--nogoldfix")) g_gold_fix=0;   /* A/B: restore the cracked-build knife-restock gold corruption */
         else if (!strcmp(argv[i],"--noretailparity")) g_retail_parity=0;   /* A/B: disable the retail-parity data/code patches (keeps the cracked-baseline behaviour + goldens) */
+        else if (!strcmp(argv[i],"--noratspawnfix")) g_rat_spawn_fix=0;   /* A/B: retain recycled rats' stale jump/grapple state */
+        else if (!strcmp(argv[i],"--nomanualarmorfix")) g_manual_armor_fix=0; /* A/B: retain the earlier manual armor loot routine */
+        else if (!strcmp(argv[i],"--noswordfix")) g_sword_fix=0;
+        else if (!strcmp(argv[i],"--nodragondamagefix")) g_dragon_damage_fix=0;
+        else if (!strcmp(argv[i],"--nodragonfirefix")) g_dragon_fire_fix=0;
+        else if (!strcmp(argv[i],"--noknightreactionfix")) g_knight_reaction_fix=0;
+        else if (!strcmp(argv[i],"--nolairxpfix")) g_lair_xp_fix=0;
+        else if (!strcmp(argv[i],"--nolairsetupfix")) g_lair_setup_fix=0;
+        else if (!strcmp(argv[i],"--noaixpfix")) g_ai_xp_fix=0;
+        else if (!strcmp(argv[i],"--nolifeiconsfix")) g_life_icons_fix=0;
+        else if (!strcmp(argv[i],"--nodanufix")) g_danu_fix=0;
+        else if (!strcmp(argv[i],"--nokofix")) g_ko_fix=0;
         else if (!strcmp(argv[i],"--noretailsfx")) g_retail_sfx=0;   /* A/B: disable the B15 retail UI-feedback-sound sites (parity stays otherwise on) */
+        else if (!strcmp(argv[i],"--nocursorrng")) g_cursor_rng_fix=0; /* A/B: suppress the B15 menu RNG tick */
         else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
@@ -8404,10 +9311,17 @@ int main(int argc, char **argv) {
     fprintf(g_log, "build: %s\n", MOON_BUILD);
     host_log_system_info();
     fprintf(g_log, "exedir=%s dataset=%s diskdir=%s mod=%s\n", g_exedir, g_dataset, g_diskdir, mod);
+    if (save_profile_error) {
+        host_report_issue(sdl, NULL, SDL_MESSAGEBOX_ERROR,
+                          "Choose --save-profile singleplayer or --save-profile multiplayer.",
+                          NULL, "Missing or invalid save profile; the game was not started.");
+        return 2;
+    }
+    char quicksave[1100];
+    quicksave_path(quicksave, sizeof(quicksave));
+    fprintf(g_log, "SAVE-PROFILE %s quicksave=%s\n", save_profile_name(), quicksave);
 
-    /* Convenience: if the player supplied only the three .adf disk images, pull
-     * the four boot modules (nb/program/mog/crystal) out of Disk 1's filesystem
-     * so they don't have to extract them by hand.  No-op once they exist. */
+    /* Validate disks/cached modules and extract only missing startup files. */
     int boot_data_ready = ensure_boot_modules(g_dataset, g_diskdir);
     if (g_os && !boot_data_ready) {
         report_game_data_error(sdl);
@@ -8448,7 +9362,7 @@ int main(int argc, char **argv) {
     /* stack near top of RAM, below custom space */
     uint32_t sp = 0x80000;
     setup_amigaos(sp);
-    if (g_os) disk_load_adfs();   /* trackdisk DMA reads served from these */
+    /* Trackdisk uses the exact image buffers validated by ensure_boot_modules. */
     /* Blitter busy-time model active for the attract intro only (g_os path);
      * disabled at Mog launch (see moon_instr_hook) and never on for the cracktro. */
     g_blt_busy_scope = g_os;
@@ -8502,6 +9416,7 @@ int main(int argc, char **argv) {
         }
         if (g_ndiskev) apply_diskat(fr);
         if (g_nscript) apply_script(fr);
+        if (g_mp_script) apply_script2(fr);
         if (g_ntypeev) apply_type(fr);   /* scripted typed text (--type) for headless name-entry validation */
         poke_tick();       /* --poke8 one-shot (diag) */
         autoswap_tick();   /* seamless disk swap: auto-confirm any "insert disk" prompt */
@@ -8612,10 +9527,11 @@ int main(int argc, char **argv) {
             pc, (unsigned)m68k_get_reg(NULL,M68K_REG_SR), (unsigned long long)g_icount, g_unmapped);
     fprintf(g_log, "  custom writes logged=%u, cia w=%u r=%u\n", g_custw_log, g_ciaw_log, g_ciar_log);
     if (g_msleak_blocked)
-        fprintf(g_log, "  Moonstone enemy-leak guards fired=%d (enemy/Guardian Moonstone assignments blocked)\n", g_msleak_blocked);
+        fprintf(g_log, "  Moonstone token transfers blocked=%d\n", g_msleak_blocked);
+    if (g_data_read_failed) report_data_read_error(0, NULL);
     if (g_log != stderr) fclose(g_log);
 
     printf("done: stop=%s pc=%06x icount=%llu unmapped=%u (see %s)\n",
            g_stop_reason, pc, (unsigned long long)g_icount, g_unmapped, logpath);
-    return 0;
+    return g_data_read_failed ? 1 : 0;
 }

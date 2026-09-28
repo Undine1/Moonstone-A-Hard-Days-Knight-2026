@@ -49,6 +49,8 @@ mindscape
 # --- Build output / caches ---
 /recomp/build/
 /dist/release-staging/
+/dist/release/
+/dist/MoonstoneMultiplayerBeta/
 __pycache__/
 *.pyc
 

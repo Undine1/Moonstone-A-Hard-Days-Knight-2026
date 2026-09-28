@@ -10,6 +10,7 @@ import ctypes as c
 from ctypes import wintypes as w
 import os
 from pathlib import Path
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -23,6 +24,7 @@ def main():
     ap.add_argument("--exe", type=Path, default=ROOT / "recomp/build/moonstone.exe")
     ap.add_argument("--data", type=Path, default=ROOT / "dist/MoonstoneNative/data")
     ap.add_argument("--host-probe-exe", type=Path, help="Optional test-only host_error_probe executable")
+    ap.add_argument("--loader-probe-exe", type=Path, help="Optional test-only loader_integrity_probe executable")
     args = ap.parse_args()
     if os.name != "nt":
         ap.error("Native dialog checks require Windows")
@@ -83,8 +85,9 @@ def main():
         return found
 
     def check_dialog_owner(pid, dialog, title):
-        game = next((hwnd for hwnd in windows(pid) if text(hwnd) == title), None)
+        game = ui.GetWindow(dialog, 4) if title == "*" else next((hwnd for hwnd in windows(pid) if text(hwnd) == title), None)
         assert game, "Missing game window during warning"
+        assert game in windows(pid), "Dialog owner must belong to the test process"
         assert ui.GetWindow(dialog, 4) == game, "Warning must be owned by the game window"  # GW_OWNER
         assert not ui.IsWindowEnabled(game), "Game window must be disabled while warning is open"
         # Raising the game used to cover the warning and leave play apparently frozen.
@@ -103,7 +106,7 @@ def main():
 
         passed = 0
 
-        def run_case(name, extra, expected, reason=None, live=True, env=None, missing_log=False, exit_code=1, log_hint=True, alternate_exe=None, owner_title=None, dialog_text=()):
+        def run_case(name, extra, expected, reason=None, live=True, env=None, missing_log=False, exit_code=1, log_hint=True, alternate_exe=None, owner_title=None, dialog_text=(), timeout=12):
             nonlocal passed
             log = no_dir / "unwritable.log" if missing_log else tmp / (name + ".log")
             cmd = base + ["--log", str(log)] + (["--sdl"] if live else []) + extra
@@ -113,10 +116,10 @@ def main():
             child_env.update(env or {})
             # File redirection prevents pipe backpressure on diagnostic runs.
             with (tmp / (name + ".stdout")).open("w+b") as out, (tmp / (name + ".stderr")).open("w+b") as err:
-                proc = subprocess.Popen(cmd, stdout=out, stderr=err, env=child_env, cwd=tmp)
+                proc = subprocess.Popen(cmd, stdout=out, stderr=err, env=child_env, cwd=tmp, creationflags=0x08000000)
                 seen = []
                 dismissed = set()
-                deadline = time.monotonic() + 12
+                deadline = time.monotonic() + timeout
                 try:
                     while proc.poll() is None and time.monotonic() < deadline:
                         current = dialogs(proc.pid)
@@ -167,6 +170,22 @@ def main():
         saved = "couldn't load the saved game"
         recording = "couldn't create the audio recording"
         run_case("missing-disk-dialog", ["--diskdir", str(no_dir)], ["Cannot open Disk 1 for reading"], "Cannot open Disk 1 for reading")
+        for fault in ('checksum', 'cached-program'):
+            damaged = tmp / fault; damaged.mkdir()
+            for i in range(1, 4):
+                source = next(p for p in (data / f'Disk{i}.adf', data / f'Moonstone - A Hard Days Knight_Disk{i}.adf') if p.is_file())
+                shutil.copyfile(source, damaged / f'Disk{i}.adf')
+            for module in ('nb', 'program', 'mog', 'crystal'):
+                if (data / module).is_file(): shutil.copyfile(data / module, damaged / module)
+            if fault == 'checksum':
+                path = damaged / 'Disk2.adf'; raw = bytearray(path.read_bytes()); raw[880 * 512 + 20] ^= 1
+                path.write_bytes(raw)
+                reason = 'checksum mismatch in root directory block 880'
+            else:
+                path = damaged / 'program'; path.write_bytes(path.read_bytes()[:32])
+                reason = "Startup file 'program' does not match Disk 1"
+            run_case(fault + '-dialog', ['--dataset', str(damaged), '--diskdir', str(damaged)], [reason], reason,
+                     dialog_text=(str(damaged) + '/' + path.name,))
         write_blocked = tmp / "write-blocked"
         write_blocked.mkdir()
         subprocess.run(["icacls", str(write_blocked), "/deny", "*S-1-1-0:(WD)"], check=True, capture_output=True)
@@ -203,6 +222,12 @@ def main():
             assert "Probe SDL warning routed to file" in probe_log
             assert "Probe game window re-enabled; recording retry succeeded" in probe_log
             assert (no_dir / "capture-1.wav").stat().st_size == 44
+        if args.loader_probe_exe:
+            run_case('short-stream-dialog', ['--probe-loader-short'], ["Moonstone couldn't read its game data"],
+                     'Incomplete game data', alternate_exe=args.loader_probe_exe, owner_title='*',
+                     dialog_text=('program', 'requested'), timeout=45)
+            run_case('headless-short-stream', ['--probe-loader-short', '--frames', '2000'], [],
+                     'Incomplete game data', alternate_exe=args.loader_probe_exe, live=False)
     print(f"All {passed} console-free startup/diagnostic checks passed.")
 
 

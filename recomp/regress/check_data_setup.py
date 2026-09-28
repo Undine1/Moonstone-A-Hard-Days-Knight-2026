@@ -25,6 +25,15 @@ def put32(data, offset, value):
     struct.pack_into('>I', data, offset, value & 0xffffffff)
 
 
+def checksums(data):
+    """Keep structural fixtures valid except for the field under test."""
+    for start in range(2 * 512, len(data), 512):
+        if struct.unpack_from('>I', data, start)[0] in (2, 8, 16):
+            put32(data, start + 20, 0)
+            put32(data, start + 20, -sum(struct.unpack_from('>128I', data, start)))
+    return data
+
+
 def test_disk(files=()):
     """Small OFS directory in a full-size image, with one data block per file."""
     data = bytearray(ADF_BYTES)
@@ -42,15 +51,18 @@ def test_disk(files=()):
         put32(data, header + 324, 4)
         put32(data, header + 16, block // 512)
         put32(data, block, 8)
+        put32(data, block + 4, header // 512)
+        put32(data, block + 8, 1)
         put32(data, block + 12, 4)
         data[block + 24:block + 28] = b'test'
-    return data
+    return checksums(data)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--exe', type=Path, default=ROOT / 'recomp/build/moonstone.exe')
     ap.add_argument('--host-probe-exe', type=Path)
+    ap.add_argument('--retail-data', type=Path, help='Optional read-only IPF-derived three-disk directory')
     args = ap.parse_args()
     exe = args.exe.resolve()
     source = ROOT / 'dist/MoonstoneNative/data'
@@ -83,7 +95,8 @@ def main():
             log = data.parent / 'run.log'
             cmd = [str(alternate or exe), '--os', '--dataset', str(data), '--diskdir', str(data),
                    '--frames', '2', '--log', str(log), *extra]
-            result = subprocess.run(cmd, cwd=data.parent, capture_output=True, timeout=15)
+            result = subprocess.run(cmd, cwd=data.parent, capture_output=True, timeout=15,
+                                    creationflags=0x08000000 if os.name == 'nt' else 0)
             report = log.read_text(errors='replace')
             assert result.returncode == exit_code, (data.parent.name, result.returncode, report)
             if os.name == 'nt':
@@ -151,6 +164,7 @@ def main():
             data = prepare(name, missing=('nb',), synthetic=True)
             disk = test_disk(('nb',))
             mutate(disk)
+            checksums(disk)
             (data / 'Disk1.adf').write_bytes(disk)
             run(data, [expected])
             assert not (data / 'nb').exists(), 'Invalid extraction left a cached module'
@@ -159,6 +173,52 @@ def main():
         (data / 'nb').write_bytes(b'')
         run(data, ['Startup file is empty or unreadable', 'Existing file was preserved'])
         assert (data / 'nb').read_bytes() == b''
+
+        # Only checksum metadata is changed; no executable payload is invented.
+        for disk_number, original in enumerate(disks, 1):
+            raw = original.read_bytes()
+            headers = [b for b in range(2, ADF_BYTES // 512)
+                       if struct.unpack_from('>I', raw, b * 512)[0] == 2
+                       and struct.unpack_from('>i', raw, b * 512 + 508)[0] == -3]
+            header = next(b for b in headers if struct.unpack_from('>I', raw, b * 512 + 16)[0])
+            block = struct.unpack_from('>I', raw, header * 512 + 16)[0]
+            ext = next(struct.unpack_from('>I', raw, b * 512 + 504)[0] for b in headers
+                       if struct.unpack_from('>I', raw, b * 512 + 504)[0])
+            for kind, target in [('root directory', 880), ('header', header), ('data', block), ('extension', ext)]:
+                for fresh in (False, True):
+                    data = prepare(f'disk{disk_number}-{kind.replace(" ", "-")}-checksum-{"fresh" if fresh else "cached"}',
+                                   missing=MODULES if fresh else ())
+                    damaged = bytearray(raw); damaged[target * 512 + 20] ^= 1
+                    path = data / f'Disk{disk_number}.adf'; path.write_bytes(damaged)
+                    run(data, [f'Disk {disk_number} is damaged', f'checksum mismatch in {kind} block {target}'])
+                    assert path.read_bytes() == damaged
+                    if fresh:
+                        assert all(not (data / m).exists() for m in MODULES), 'Invalid disks must not generate startup files'
+
+        data = prepare('cached-blank-disk')
+        (data / 'Disk2.adf').write_bytes(bytes(ADF_BYTES))
+        run(data, ['Disk 2 is damaged', 'no AmigaDOS signature'])
+
+        for module in MODULES:
+            for fault in ('truncated', 'altered', 'extended'):
+                data = prepare(module + '-' + fault)
+                path = data / module; raw = bytearray(path.read_bytes())
+                if fault == 'truncated': raw = raw[:32]
+                elif fault == 'altered': raw[-1] ^= 1
+                else: raw += b'\0'
+                path.write_bytes(raw)
+                run(data, [f"Startup file '{module}' does not match Disk 1", 'Existing file was preserved', 'Move this startup file aside'])
+                assert path.read_bytes() == raw
+
+        if args.retail_data:
+            data = prepare('retail-fresh', missing=MODULES)
+            for i in range(1, 4):
+                shutil.copyfile(args.retail_data / f'Disk{i}.adf', data / f'Disk{i}.adf')
+            run(data, ['OFS structure and checksums verified', 'write access confirmed'], 0)
+            assert not (data / 'crystal').exists(), 'Retail does not contain the optional crack intro'
+            before = {m: (data / m).read_bytes() for m in MODULES[:3]}
+            run(data, ['SETUP MODULE: verified'], 0)
+            assert all((data / m).read_bytes() == before[m] for m in before)
 
         if os.name == 'nt':
             kernel = ctypes.WinDLL('kernel32', use_last_error=True)

@@ -8,5 +8,6 @@ Use three ADF files, each exactly 901,120 bytes, and rename them:
     Disk2.adf
     Disk3.adf
 
-Then double-click moonstone.exe. On first launch, the runtime extracts the
-required boot files from Disk1.adf automatically.
+Then open Moonstone Singleplayer.exe or Moonstone Multiplayer.exe in the game
+folder. On first launch, the runtime extracts the required boot files from
+Disk1.adf automatically. See README.txt for controls and savegame locations.

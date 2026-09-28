@@ -35,4 +35,12 @@ fi
   $RES \
   -o "build/$TARGET.exe"
 cp -f "$SDL/bin/SDL2.dll" build/ 2>/dev/null || true
-echo "built build/$TARGET.exe (+ SDL2.dll)"
+# Small portable launch entries, both using the existing executable icon.
+for profile in Singleplayer Multiplayer; do
+  MULTI=0
+  if [ "$profile" = Multiplayer ]; then MULTI=1; fi
+  "$ZIG" cc -O2 -std=c11 -municode -Wl,--subsystem,windows \
+    -DMOON_MULTIPLAYER="$MULTI" src/save_launcher.c $RES -luser32 \
+    -o "build/Moonstone $profile.exe"
+done
+echo "built build/$TARGET.exe (+ SDL2.dll and both save launchers)"
