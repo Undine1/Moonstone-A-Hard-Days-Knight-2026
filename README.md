@@ -7,18 +7,16 @@ with local multiplayer. No external emulator or Kickstart ROM required.
 
 1. Download **`Moonstone-2026-Windows-x64.zip`** from the
    [latest release](https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026/releases/latest)
-   and extract the complete ZIP. Requires **64-bit Windows**.
-2. Put the three Moonstone ADF files from **wowroms** in **`data`**, named
-   `Disk1.adf`, `Disk2.adf` and `Disk3.adf`. Other disk versions may not work.
-3. Open **`Moonstone Singleplayer.exe`** or **`Moonstone Multiplayer.exe`**.
-   Press **Enter** or controller **A** to skip the intro.
+   and extract the complete ZIP.
+2. Grab all 3 Moonstone ADF files from **wowroms** and place them in the
+   **`data`** folder.
+3. Run **`Moonstone Singleplayer.exe`** or **`Moonstone Multiplayer.exe`**.
 
-The game now has 2 launchers. They are identical. Their only purpose is to
-separate your single & multiplayer saves. Save games now live in
-`saves/Singleplayer/singleplayer.sav` and `saves/Multiplayer/multiplayer.sav`.
-
-The first controller used during startup becomes the main controller and
-**Player 1 in Practice**.
+- The 2 launchers are identical. Their only purpose is to separate your single & multiplayer saves.
+- The intro is skippable.
+- The first controller used during startup becomes the main controller and Player 1 in Practice.
+- ADF files should be sourced from **wowroms** or they may not work.
+- This port requires 64-bit Windows.
 
 ## Basic controls
 
