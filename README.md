@@ -33,10 +33,6 @@ Check [controls.ini](recomp/controls.ini) for all bindings and detailed setup.
 
 ## Local multiplayer
 
-**Practice:** two players. **Campaign:** set **Players** to 2–4 and choose
-**Select Knight**. Confirm each player's device with **Start** (controller)
-or **Enter** (keyboard) when prompted.
-
 Up to 4 players can use their own controller/keyboard, or share them if needed.
 At least 2 input devices are recommended for multiplayer, because PvP requires
 a separate device for each fighter. If two players sharing a device attack each
@@ -45,9 +41,6 @@ other, one is prompted to choose a different device for the fight.
 You can technically all share one input device and avoid PvP. However, if the
 keys needed to reach the Guardian end up split between players, you will need
 a second input device to fight for them.
-
-More details: [multiplayer guide](recomp/MULTIPLAYER.md) ·
-[v1.4 release notes](RELEASE-NOTES.md).
 
 ## Highlights
 
