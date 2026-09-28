@@ -47,6 +47,7 @@ a second input device to fight for them.
 - Automatic disk swapping with no interruption.
 - Faithful graphics and Paula audio through the custom OCS runtime.
 - Modernized input handling.
+- Save / Load functionality.
 - Improved selection menus when multiple map encounters overlap.
 - Extensive bug fixes (including all known crashes).
 - Gameplay was brought in line with the latest official release of the game.
