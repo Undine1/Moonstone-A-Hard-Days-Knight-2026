@@ -50,7 +50,7 @@ a second input device to fight for them.
 - Save / Load functionality.
 - Improved selection menus when multiple map encounters overlap.
 - Extensive bug fixes (including all known crashes).
-- Gameplay was brought in line with the latest official release of the game.
+- Gameplay reflects latest official release of the game
 
 ## Game revisions
 
