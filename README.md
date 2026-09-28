@@ -1,61 +1,57 @@
 # Moonstone 2026
 
-Prebuilt native Windows port of *Moonstone: A Hard Days Knight*
-(Mindscape, 1991). The original Amiga game runs through an embedded 68000 core
-and custom OCS implementation, with no external emulator or Kickstart ROM.
+Native Windows port of *Moonstone: A Hard Days Knight* (Mindscape, 1991),
+with local multiplayer. No external emulator or Kickstart ROM required.
 
-**v1.4.0 (+ Local Multiplayer)** supports two-player Practice and up to four
-campaign players through the original game's selection, turns and combat.
-Campaign players can share controllers or the keyboard. Each knight's initial choice is
-reused automatically on later turns, including after day changes.
-Any campaign player can choose keyboard with Enter, even with extra controllers;
-everyone can still type a custom knight name. A disconnected normal controller
-must be reclaimed with Start; the game never switches players to keyboard automatically.
-Reconnect the missing pad or use an unassigned replacement; recovery preserves
-other players' controller assignments and existing sharing groups.
-When two opponents share a controller, one can explicitly borrow the keyboard
-with Enter for their duel and loot, provided its usual owner is not fighting.
-Everyone's usual device assignments resume afterward.
-When two opponents share the keyboard, one explicitly chooses a controller for
-the duel and loot. A keyboard-only campaign needs a controller connected for PvP.
-Choose **Practice** directly: P1 keeps the menu controller and P2 gets the next
-available controller, or the keyboard, without an extra Start prompt. Unknown
-owners and reconnects still require identification. The campaign's Players
-setting does not affect Practice. See [the multiplayer guide](recomp/MULTIPLAYER.md).
+## Quickstart
 
-Numbered map choices use Up/Down to highlight an option and Attack/Select to
-confirm. Number keys and numpad keys also work on the keyboard player's turn.
+1. Download **`Moonstone-2026-Windows-x64.zip`** from the
+   [latest release](https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026/releases/latest)
+   and extract the complete ZIP. Requires **64-bit Windows**.
+2. Put the three Moonstone ADF files from **wowroms** in **`data`**, named
+   `Disk1.adf`, `Disk2.adf` and `Disk3.adf`. Other disk versions may not work.
+3. Open **`Moonstone Singleplayer.exe`** or **`Moonstone Multiplayer.exe`**.
+   Press **Enter** or controller **A** to skip the intro.
 
-The release includes **Moonstone Singleplayer.exe** and **Moonstone Multiplayer.exe**
-to keep separate F5/F9 saves: `saves/Singleplayer/singleplayer.sav` and
-`saves/Multiplayer/multiplayer.sav`. Opening `moonstone.exe` directly uses the
-singleplayer file. Set Players in the game menu as usual. To keep an old
-`moonstone.sav`, close the game, keep a backup, rename it to the appropriate
-filename and place it in the matching folder without overwriting an existing
-save. Earlier beta saves in the root directory also need to be placed there.
+The game now has 2 launchers. They are identical. Their only purpose is to
+separate your single & multiplayer saves. Save games now live in
+`saves/Singleplayer/singleplayer.sav` and `saves/Multiplayer/multiplayer.sav`.
 
-## Download and setup
+The first controller used during startup becomes the main controller and
+**Player 1 in Practice**.
 
-1. Open the [Releases page](https://github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026/releases).
-2. Download **`Moonstone-2026-Windows-x64.zip`**.
-3. Extract the complete ZIP.
-4. Grab Moonstone Disk1, Disk2, Disk3 ADF files on **`wowroms`** and extract them
-   into the **`data`** folder, named `Disk1.adf`, `Disk2.adf` and `Disk3.adf`.
-5. Open **`Moonstone Singleplayer.exe`** or **`Moonstone Multiplayer.exe`**.
-   Each launcher selects its own save folder; choose the player count in the game.
+## Basic controls
 
-## Notes
+| Action | Keyboard | Controller |
+|---|---|---|
+| Move / move pointer | Arrow keys | Left stick / D-pad |
+| Attack / select | Ctrl / Enter | A |
+| Pass turn on the map | E | Back / Select |
+| Open inventory on the map | I / Space | Y |
+| Pause / resume combat | Space | Start |
+| Quicksave / quickload | F5 / F9 | Use keyboard |
 
-- This build requires 64-bit Windows.
-- Disk files should be sourced from wowroms or they may not work.
-- Keyboard and controller bindings can be changed in `controls.ini` (optional).
-- Quicksave and Quickload anywhere, including during combat. (F5/F9)
-- Skip intro: Press Space / Enter / Ctrl or
-  A / B / LB / RB / RT on controller.
+In map choice menus, use **Up/Down** to highlight and **Attack/Select** to confirm.
+Check [controls.ini](recomp/controls.ini) for all bindings and detailed setup.
+Edit the copy beside the game, then restart to apply changes.
 
-See [RELEASE-NOTES.md](RELEASE-NOTES.md) for the update list and save compatibility
-notes. Keep a backup when importing an old save: some corrections need a new
-campaign, and v1.4 saves cannot be loaded by v1.3 or earlier.
+## Local multiplayer
+
+**Practice:** two players. **Campaign:** set **Players** to 2–4 and choose
+**Select Knight**. Confirm each player's device with **Start** (controller)
+or **Enter** (keyboard) when prompted.
+
+Up to 4 players can use their own controller/keyboard, or share them if needed.
+At least 2 input devices are recommended for multiplayer, because PvP requires
+a separate device for each fighter. If two players sharing a device attack each
+other, one is prompted to choose a different device for the fight.
+
+You can technically all share one input device and avoid PvP. However, if the
+keys needed to reach the Guardian end up split between players, you will need
+a second input device to fight for them.
+
+More details: [multiplayer guide](recomp/MULTIPLAYER.md) ·
+[v1.4 release notes](RELEASE-NOTES.md).
 
 ## Highlights
 
