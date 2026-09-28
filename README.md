@@ -22,16 +22,14 @@ with local multiplayer. No external emulator or Kickstart ROM required.
 
 | Action | Keyboard | Controller |
 |---|---|---|
-| Move / move pointer | Arrow keys | Left stick / D-pad |
+| Move | Arrow keys | Left stick / D-pad |
 | Attack / select | Ctrl / Enter | A |
-| Pass turn on the map | E | Back / Select |
-| Open inventory on the map | I / Space | Y |
-| Pause / resume combat | Space | Start |
+| Pass turn | E | Back / Select |
+| Open inventory | I / Space | Y |
+| Pause combat | Space | Start |
 | Quicksave / quickload | F5 / F9 | Use keyboard |
 
-In map choice menus, use **Up/Down** to highlight and **Attack/Select** to confirm.
 Check [controls.ini](recomp/controls.ini) for all bindings and detailed setup.
-Edit the copy beside the game, then restart to apply changes.
 
 ## Local multiplayer
 
