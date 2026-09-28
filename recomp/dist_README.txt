@@ -90,9 +90,9 @@ Start/Enter press. Existing saves work.
     has no controller setup popup.
 
     Each player chooses a device when first needed, normally at their knight's
-    selection turn: Start on their controller, or Enter for keyboard. One player
-    can choose keyboard even with four controllers connected. Extra controllers
-    remain unassigned. If everyone chooses a different device, it follows their
+    selection turn: Start on their controller, or Enter for keyboard. Any number
+    of players can choose keyboard, even with four controllers connected.
+    Extra controllers remain unassigned. If everyone chooses a different device, it follows their
     knight through turns, towns, inventory and combat.
 
     Examples: three players can use two controllers plus keyboard. Four players
@@ -100,22 +100,26 @@ Start/Enter press. Existing saves work.
     Keyboard typing works for EVERYONE'S custom knight name, even if another
     player owns keyboard gameplay. Text goes to the active name field without
     changing device assignments. Outside name entry, gameplay keys and mouse
-    actions belong to the keyboard player.
+    actions belong to the active keyboard player.
 
     The prompt stays visible until the requested player chooses or confirms
     their device. It offers Start or Enter while keyboard is available, then
     only the applicable action. Existing assignments stay intact on confirmation.
 
-    When players outnumber available devices, choose a shared controller with
-    Start during knight selection. Each knight's choice is reused automatically
-    on later turns and day changes. One player may choose keyboard and keep it.
-    Three players with two pads may choose keyboard or share just the pads.
+    To share a device, choose the same controller with Start or the same keyboard
+    with Enter during knight selection. Sharing is allowed even with spare
+    controllers connected. Each knight's choice is reused automatically on later
+    turns and day changes. Only the active knight receives shared-device input.
 
     Two human opponents need different devices in a duel. If both normally use
     the same pad, one can press Start on another controller or Enter to borrow
-    an unassigned keyboard for that fight. This requires an explicit choice.
-    Controller players cannot borrow an inactive third player's keyboard.
-    The winner keeps their device for looting; usual choices resume on the map.
+    the keyboard for that fight, including an idle third player's keyboard.
+    This requires an explicit choice; a fighter's keyboard cannot be borrowed.
+    The winner keeps their device for looting; usual choices resume on the map,
+    including all players sharing the keyboard. If both fighters normally share
+    the keyboard, one presses Start on a controller for the duel and loot.
+    A keyboard-only campaign waits for a controller to be connected for PvP.
+    One controller plus keyboard can serve up to four campaign players.
     Monster fights require only the participating player's device.
 
     Restarting and loading asks for identification again. Device IDs are not

@@ -64,9 +64,9 @@ static void mp_campaign_context(MpCampaignContext context, int owner, unsigned f
     g_mp_ui_player = owner;
     g_mp_combatants = fighters;
     if (first && (g_mp.phase == MP_OFF || g_mp.players != players)) {
-        int pads = mp_pad_count();
-        int capacity = pads < 2 ? pads + 1 : pads;
-        mp_begin_campaign(&g_mp,players,capacity < players,required);
+        /* Connected spares must not dictate personal/shared choices. Allow
+         * explicit sharing during enrollment, then finalize from those choices. */
+        mp_begin_campaign(&g_mp,players,1,required);
     } else {
         g_mp.required = required;
         if (changed) mp_use_choices(&g_mp,owner,context==MP_CAM_COMBAT || winner

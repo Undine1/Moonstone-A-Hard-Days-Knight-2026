@@ -6,15 +6,18 @@ and custom OCS implementation, with no external emulator or Kickstart ROM.
 
 **v1.4.0 (+ Local Multiplayer)** supports two-player Practice and up to four
 campaign players through the original game's selection, turns and combat.
-Campaign players can share fewer controllers. Each knight's initial choice is
+Campaign players can share controllers or the keyboard. Each knight's initial choice is
 reused automatically on later turns, including after day changes.
-One campaign player can choose keyboard with Enter, even with extra controllers;
+Any campaign player can choose keyboard with Enter, even with extra controllers;
 everyone can still type a custom knight name. A disconnected normal controller
 must be reclaimed with Start; the game never switches players to keyboard automatically.
 Reconnect the missing pad or use an unassigned replacement; recovery preserves
 other players' controller assignments and existing sharing groups.
-When two opponents share a controller, one can explicitly borrow an unassigned
-keyboard with Enter for their duel and loot, then resume their usual controller.
+When two opponents share a controller, one can explicitly borrow the keyboard
+with Enter for their duel and loot, provided its usual owner is not fighting.
+Everyone's usual device assignments resume afterward.
+When two opponents share the keyboard, one explicitly chooses a controller for
+the duel and loot. A keyboard-only campaign needs a controller connected for PvP.
 Choose **Practice** directly: P1 keeps the menu controller and P2 gets the next
 available controller, or the keyboard, without an extra Start prompt. Unknown
 owners and reconnects still require identification. The campaign's Players

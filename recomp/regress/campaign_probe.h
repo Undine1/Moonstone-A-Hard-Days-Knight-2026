@@ -14,6 +14,8 @@ static unsigned campaign_polled_word[4];
 static unsigned campaign_prompt_done;
 static int campaign_prompt_age,campaign_prompt_devices[4],campaign_prompt_white;
 static int campaign_keyboard_player=-1;
+static unsigned campaign_keyboard_mask,campaign_returned_players;
+static int campaign_shared_pad,campaign_pad_prompt_age,campaign_normal_choices[4];
 static unsigned campaign_names_checked;
 static char campaign_prompt_expected[64];
 static int campaign_prompt_device;
@@ -28,13 +30,17 @@ static int campaign_duel_keyboard,campaign_duel_keyboard_before,campaign_keyboar
 static int campaign_opponent(void) { return campaign_duel_opponent>=0?campaign_duel_opponent:campaign_players-1; }
 
 static int campaign_choice(void) {
+    if((g_mp.claim==campaign_keyboard_player || (campaign_keyboard_mask&(1u<<g_mp.claim)))
+        && !(g_mp.enrolled&(1u<<g_mp.claim))) {
+        CHECK(mp_keyboard_claimable());return MP_KEYBOARD;
+    }
+    if(campaign_shared_pad && !(g_mp.enrolled&(1u<<g_mp.claim))) {
+        CHECK(campaign_pad_count && mp_can_claim(&g_mp,campaign_pads[0].id));return campaign_pads[0].id;
+    }
     if(campaign_duel_keyboard && !(g_mp.enrolled&(1u<<g_mp.claim))) {
-        /* Reported setup: P1/P2 share pad0, P3 uses pad1; optional P4 shares. */
+        /* P1/P2 share pad0; other players may use a pad or own the keyboard. */
         int which=(g_mp.claim?g_mp.claim-1:0)%campaign_pad_count;
         CHECK(mp_can_claim(&g_mp,campaign_pads[which].id));return campaign_pads[which].id;
-    }
-    if(g_mp.claim==campaign_keyboard_player && !(g_mp.enrolled&(1u<<g_mp.claim))) {
-        CHECK(mp_keyboard_claimable());return MP_KEYBOARD;
     }
     for(int pass=0;pass<2;pass++) for(int i=0;i<campaign_pad_count;i++) {
         int which=(i+g_mp.claim+1)%campaign_pad_count,id=campaign_pads[which].id;
@@ -101,8 +107,7 @@ static void campaign_guest(unsigned pc) {
     }
 }
 
-static void campaign_button(int player, SDL_GameControllerButton key, int down) {
-    int id=g_mp.device[player];
+static void campaign_device_button(int id, SDL_GameControllerButton key, int down) {
     if (id==MP_KEYBOARD) {
         SDL_Scancode sc=key==SDL_CONTROLLER_BUTTON_A?SDL_SCANCODE_LCTRL:
             key==SDL_CONTROLLER_BUTTON_START?SDL_SCANCODE_RETURN:
@@ -114,6 +119,12 @@ static void campaign_button(int player, SDL_GameControllerButton key, int down) 
         if (sc) key_event(sc,SDL_GetKeyFromScancode(sc),down);
     } else for(int i=0;i<campaign_pad_count;i++)
         if (campaign_pads[i].id==id) button(campaign_pads[i],key,down);
+}
+static void campaign_button(int player, SDL_GameControllerButton key, int down) {
+    campaign_device_button(g_mp.device[player],key,down);
+}
+static void campaign_menu_button(SDL_GameControllerButton key, int down) {
+    campaign_device_button(campaign_pad_count?campaign_pads[0].id:MP_KEYBOARD,key,down);
 }
 static void campaign_release(void) {
     for(int i=0;i<campaign_pad_count;i++) if(campaign_pads[i].joy)
@@ -164,12 +175,9 @@ static void campaign_scene_check(SDL_Renderer *ren) {
 }
 static int campaign_selection_prompt(SDL_Renderer *ren) {
     int p=g_mp_ui_player;
-    if(probe_live!=7 || !g_mp_campaign || g_mp.shared || g_mp_context!=MP_CAM_SELECT
+    if(probe_live!=7 || !g_mp_campaign || g_mp_context!=MP_CAM_SELECT
         || p<1 || (campaign_prompt_done&(1u<<p))) return 0;
-    /* A shared setup can become personal on the last player's first choice;
-     * that Enter/Start already acknowledges their selection handoff. */
-    if(campaign_pad_count<campaign_players && campaign_players>2
-        && !campaign_prompt_age && g_mp.phase!=MP_CONFIRM) return 0;
+    if(!campaign_prompt_age && g_mp.phase!=MP_CLAIM && g_mp.phase!=MP_CONFIRM)return 0;
     int age=++campaign_prompt_age;
     char text[64];
     const char *prompt=mp_prompt(1,text);
@@ -180,7 +188,7 @@ static int campaign_selection_prompt(SDL_Renderer *ren) {
             : (g_mp.device[p]==MP_KEYBOARD?"ENTER":"START");
         campaign_prompt_device=g_mp.phase==MP_CLAIM?campaign_choice():g_mp.device[p];
         campaign_prompt_was_claim=g_mp.phase==MP_CLAIM;
-        if(g_mp.phase==MP_CLAIM && campaign_prompt_device==MP_KEYBOARD && campaign_pad_count==1)
+        if(g_mp.phase==MP_CLAIM && !campaign_pad_count)
             action="ENTER";
         snprintf(campaign_prompt_expected,sizeof(campaign_prompt_expected),"PLAYER %d PRESS %s",p+1,action);
         CHECK(prompt && !strcmp(prompt,campaign_prompt_expected));
@@ -190,14 +198,18 @@ static int campaign_selection_prompt(SDL_Renderer *ren) {
         campaign_prompt_white=campaign_prompt_pixels(ren);
     }
     if(age>=2 && age<=65) check_frozen();
-    for(int q=0;q<campaign_players;q++)
-        CHECK(g_mp.device[q]==(q==p && age>=62?campaign_prompt_device:campaign_prompt_devices[q]));
+    for(int q=0;q<campaign_players;q++) {
+        int expected=campaign_prompt_devices[q];
+        if(age>=62 && campaign_prompt_was_claim && expected==campaign_prompt_device)expected=MP_NONE;
+        if(q==p && age>=62)expected=campaign_prompt_device;
+        CHECK(g_mp.device[q]==expected);
+    }
     if(age<=61 && !(age>=41 && age<=45)) {
         CHECK(prompt && !strcmp(prompt,campaign_prompt_expected));
         if(!(age%10)) CHECK(campaign_prompt_pixels(ren)==campaign_prompt_white);
     }
-    /* Wrong player / wrong device / gameplay buttons cannot dismiss it. */
-    if(age==10) campaign_button(0,SDL_CONTROLLER_BUTTON_START,1);
+    /* Initial setup accepts any idle device; a confirmation keeps its choice. */
+    if(age==10 && !campaign_prompt_was_claim) campaign_button(0,SDL_CONTROLLER_BUTTON_START,1);
     if(age==20 && !mp_keyboard_claimable() && campaign_prompt_device!=MP_KEYBOARD)
         key_event(SDL_SCANCODE_RETURN,SDLK_RETURN,1);
     if(age==30) key_event(SDL_SCANCODE_LCTRL,SDLK_LCTRL,1);
@@ -211,7 +223,7 @@ static int campaign_selection_prompt(SDL_Renderer *ren) {
         CHECK(g_mp.phase==MP_PLAY && !prompt && g_icount>probe_icount);
         campaign_prompt_done|=1u<<p;campaign_prompt_age=0;
         if(campaign_prompt_was_claim) campaign_claims[p]++;
-        printf("PASS: P%d selection prompt remains visible and frozen, ignores other devices, survives focus loss and waits for Start/Enter release\n",p+1);
+        printf("PASS: P%d selection prompt remains visible and frozen, ignores gameplay buttons, survives focus loss and consumes Start/Enter\n",p+1);
         fflush(stdout);
     }
     return 1;
@@ -222,6 +234,7 @@ static void campaign_duel_present(SDL_Renderer *ren) {
     uint32_t winner=0x2e7dc+p*0x84,loser=0x2e7dc+q*0x84;
     if(campaign_step==0) {
         CHECK(g_mp_campaign && g_mp.players==campaign_players);
+        memcpy(campaign_normal_choices,g_mp.chosen,sizeof(campaign_normal_choices));
         campaign_duel_request=1;campaign_step=1;campaign_age=0;
     } else if(campaign_step==1 && g_mp_context==MP_CAM_COMBAT && campaign_duel_polls==(int)required) {
         CHECK(g_mp.required==required);
@@ -282,17 +295,17 @@ static void campaign_duel_present(SDL_Renderer *ren) {
         if(campaign_age==60) {
             CHECK(r16(0x392d4)<campaign_loot_x);
             printf("PASS: P1 vs P%d campaign duel (%s); distinct input roles, simultaneous movement, warm reload, original lethal attack and winner-only loot\n",q+1,campaign_reverse?"P1 defends":"P1 initiates");
-            if(campaign_duel_keyboard) { campaign_step=5;campaign_age=0; }
+            if(campaign_duel_keyboard || campaign_keyboard_mask || campaign_shared_pad) { campaign_step=5;campaign_age=0; }
             else { SDL_Event e={.type=SDL_QUIT};SDL_PushEvent(&e);campaign_step=4; }
         }
     } else if(campaign_step==5) {
         CHECK(++campaign_age<600 && g_mp.phase==MP_PLAY);
-        if(g_mp_context==MP_CAM_MAP && g_map_live && g_cur_frame-g_map_live<3
-            && g_mp_ui_player==mp_roster_player(r32(0x2ebd0),1)) {
-            CHECK(mp_owner(&g_mp,MP_KEYBOARD)<0);
-            CHECK(g_mp.chosen[0]==campaign_pads[0].id && g_mp.chosen[q]==campaign_pads[0].id);
+        /* The defeated attacker's map turn may end without any input poll.
+         * Verify cleanup at the map boundary, then actual turns in step6. */
+        if(g_mp_context==MP_CAM_MAP) {
+            CHECK(!memcmp(campaign_normal_choices,g_mp.chosen,sizeof(campaign_normal_choices)));
             for(int i=0;i<campaign_players;i++) CHECK(g_mp.device[i]==MP_NONE || g_mp.device[i]==g_mp.chosen[i]);
-            CHECK(g_mp.device[g_mp_ui_player]==g_mp.chosen[g_mp_ui_player]);
+            if(g_mp_ui_player>=0)CHECK(g_mp.device[g_mp_ui_player]==g_mp.chosen[g_mp_ui_player]);
             char path[1200];snprintf(path,sizeof(path),"%s.map.sav",campaign_save);
             CHECK(save_state(path));MpSession before=g_mp;
             CHECK(load_state(path) && !memcmp(before.chosen,g_mp.chosen,sizeof(g_mp.chosen)));
@@ -315,13 +328,27 @@ static void campaign_duel_present(SDL_Renderer *ren) {
             else if(!(campaign_age%10)) campaign_button(p,SDL_CONTROLLER_BUTTON_A,1);
         }
     } else if(campaign_step==6) {
-        CHECK(++campaign_age<400 && g_mp.phase==MP_PLAY && mp_owner(&g_mp,MP_KEYBOARD)<0);
-        if(g_mp_context==MP_CAM_MAP && g_map_live && g_cur_frame-g_map_live<3
+        CHECK(++campaign_age<1200 && g_mp.phase==MP_PLAY);
+        CHECK(!memcmp(campaign_normal_choices,g_mp.chosen,sizeof(campaign_normal_choices)));
+        if(g_mp_context==MP_CAM_MAP && g_mp_ui_player>=0 && g_map_live && g_cur_frame-g_map_live<3
             && g_mp_ui_player==mp_roster_player(r32(0x2ebd0),1)) {
             CHECK(g_mp.device[g_mp_ui_player]==g_mp.chosen[g_mp_ui_player]);
-            puts("PASS: explicit duel keyboard, pending/combat/loot/map warm saves, original loot exit and restored shared controller on map");
+            campaign_returned_players|=1u<<g_mp_ui_player;
+            if((campaign_keyboard_mask || campaign_shared_pad)
+                ? campaign_returned_players!=(1u<<campaign_players)-1
+                : campaign_keyboard_player>=0 && g_mp_ui_player!=campaign_keyboard_player) {
+                if(!(campaign_age%20))campaign_button(g_mp_ui_player,SDL_CONTROLLER_BUTTON_BACK,1);
+                return;
+            }
+            if(campaign_keyboard_mask || campaign_shared_pad)
+                puts("PASS: shared-device duel, warm combat/loot/map saves, original loot exit and every player's usual device restored on their next turn");
+            else {
+                if(campaign_keyboard_player>=0) CHECK(mp_keyboard_gameplay());
+                puts("PASS: explicit duel keyboard, pending/combat/loot/map warm saves, original loot exit, restored shared controller and keyboard owner's next turn");
+            }
             SDL_Event e={.type=SDL_QUIT};SDL_PushEvent(&e);campaign_step=4;
-        }
+        } else if(g_mp_context==MP_CAM_UI && g_mp_ui_player>=0 && !(campaign_age%20))
+            campaign_button(g_mp_ui_player,SDL_CONTROLLER_BUTTON_A,1);
     }
 }
 static void campaign_restore_present(SDL_Renderer *ren) {
@@ -376,6 +403,7 @@ static void campaign_restore_present(SDL_Renderer *ren) {
 }
 static void campaign_present(SDL_Renderer *ren) {
     int n=++probe_frame;
+    if(campaign_step==4) {SDL_RenderPresent(ren);return;}
     CHECK(n<4500);
     if (!(n%250)) { fprintf(g_log,"PROBE-CAM n=%d step=%d players=%u row=%u context=%d owner=%d phase=%d pickstep=%d name=%u remaining=%u cursor=%u,%u\n",
         n,campaign_step,r16(0x2e024),r16(0x3051e),g_mp_context,g_mp_ui_player,g_mp.phase,campaign_pick_step,
@@ -424,7 +452,10 @@ static void campaign_present(SDL_Renderer *ren) {
         int age=++campaign_keyboard_prompt_age,p=campaign_reverse?0:campaign_opponent();
         CHECK(campaign_step==1 && g_mp.claim==p && g_mp.device[p]==MP_NONE);
         char text[64],expected[64];
-        snprintf(expected,sizeof(expected),"PLAYER %d PRESS %s",p+1,campaign_duel_keyboard_before?"START":"START OR ENTER");
+        const char *action=campaign_duel_keyboard_before
+            ? (campaign_pad_count>1?"PRESS START":"CONNECT CONTROLLER")
+            : (campaign_pad_count>1?"PRESS START OR ENTER":"PRESS ENTER");
+        snprintf(expected,sizeof(expected),"PLAYER %d %s",p+1,action);
         CHECK(!strcmp(mp_prompt(1,text),expected));
         CHECK(mp_keyboard_claimable()==!campaign_duel_keyboard_before);
         if(age==1) {
@@ -439,14 +470,29 @@ static void campaign_present(SDL_Renderer *ren) {
         if(age==10) key_event(campaign_reverse?SDL_SCANCODE_KP_ENTER:SDL_SCANCODE_RETURN,
                              campaign_reverse?SDLK_KP_ENTER:SDLK_RETURN,1);
         if(campaign_duel_keyboard_before && age==12) {
-            CHECK(mp_owner(&g_mp,MP_KEYBOARD)<0);
-            puts("REPRO: shared-controller duel rejects Enter with an unused keyboard and offers only Start");
+            CHECK(mp_owner(&g_mp,MP_KEYBOARD)==campaign_keyboard_player);
+            puts("REPRO: shared-controller duel rejects Enter; keyboard remains unavailable to the fighter");
             SDL_Event e={.type=SDL_QUIT};SDL_PushEvent(&e);campaign_step=4;
         }
         SDL_RenderPresent(ren);return;
     }
     if (g_mp.phase==MP_CLAIM && g_mp_campaign) {
-        if(campaign_players==2 && campaign_pad_count<=2 && !g_mp.recovery && g_mp.claim==0) {
+        if(campaign_duel_started && !campaign_pad_count) {
+            char text[64];CHECK(strstr(mp_prompt(1,text),"CONNECT CONTROLLER"));
+            if(!campaign_pad_prompt_age) {
+                probe_icount=g_icount;probe_guest_frame=g_cur_frame;
+                capture_named_overlay(ren,"connect-duel-controller");
+            } else check_frozen();
+            if(++campaign_pad_prompt_age==4) {
+                char path[1200];snprintf(path,sizeof(path),"%s.claim.sav",campaign_save);
+                CHECK(save_state(path));MpSession before=g_mp;
+                CHECK(load_state(path) && !memcmp(&before,&g_mp,sizeof(g_mp)));
+            }
+            if(campaign_pad_prompt_age==10)campaign_pads[campaign_pad_count++]=attach_pad();
+            SDL_RenderPresent(ren);return;
+        }
+        if(campaign_players==2 && campaign_pad_count>0 && campaign_pad_count<=2
+            && !(g_mp.enrolled&1) && g_mp.claim==0) {
             char text[64];CHECK(!strcmp(mp_prompt(1,text),"PLAYER 1 PRESS START OR ENTER"));
         }
         if (!(n%4)) {
@@ -463,11 +509,11 @@ static void campaign_present(SDL_Renderer *ren) {
     if(probe_live==8) {campaign_duel_present(ren);SDL_RenderPresent(ren);return;}
     if(probe_live==9) {campaign_restore_present(ren);SDL_RenderPresent(ren);return;}
     if(campaign_step==0) {
-        if(r16(0x2e024)<campaign_players) button(campaign_pads[0],SDL_CONTROLLER_BUTTON_DPAD_RIGHT,n%12<6);
-        else if(r16(0x3051e)<3) button(campaign_pads[0],SDL_CONTROLLER_BUTTON_DPAD_DOWN,n%12<6);
+        if(r16(0x2e024)<campaign_players) campaign_menu_button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT,n%12<6);
+        else if(r16(0x3051e)<3) campaign_menu_button(SDL_CONTROLLER_BUTTON_DPAD_DOWN,n%12<6);
         else { campaign_step=1;campaign_age=0; }
     } else if(campaign_step==1) {
-        if(++campaign_age%30>=15) button(campaign_pads[0],SDL_CONTROLLER_BUTTON_A,1);
+        if(++campaign_age%30>=15) campaign_menu_button(SDL_CONTROLLER_BUTTON_A,1);
         if(g_mp_campaign) { CHECK(g_mp.players==campaign_players);campaign_step=2; }
     } else if(campaign_step==2 && g_mp_context==MP_CAM_SELECT) {
         int p=g_mp_ui_player;
@@ -503,6 +549,7 @@ static void campaign_present(SDL_Renderer *ren) {
         CHECK(campaign_names_checked==(1u<<campaign_players)-1);
         if(campaign_keyboard_player>=0) CHECK(g_mp.device[campaign_keyboard_player]==MP_KEYBOARD);
         for(int p=0;p<campaign_players;p++) {
+            if(campaign_keyboard_mask&(1u<<p))CHECK(g_mp.chosen[p]==MP_KEYBOARD);
             CHECK(r32(0x2e7dc+p*0x84+0x36)==(unsigned)(3-p));
             CHECK(r8(0x2e7dc+p*0x84+0xb)==2);
         }
@@ -527,7 +574,10 @@ static void campaign_present(SDL_Renderer *ren) {
                 campaign_button(p,SDL_CONTROLLER_BUTTON_A,1); /* original daybreak acknowledgement */
             if(campaign_turns>campaign_players) {
                 int keyboard_owner=mp_owner(&g_mp,MP_KEYBOARD);
-                CHECK(g_mp.shared==(campaign_players>campaign_pad_count+(keyboard_owner>=0)));
+                int shared=0;
+                for(int a=0;a<campaign_players;a++)for(int b=0;b<a;b++)
+                    if(g_mp.chosen[a]==g_mp.chosen[b])shared=1;
+                CHECK(g_mp.shared==shared);
                 if(campaign_keyboard_player>=0) CHECK(keyboard_owner==campaign_keyboard_player);
                 if(!campaign_zone_before) for(int q=0;q<campaign_players;q++) CHECK(campaign_claims[q]==1);
                 printf("PASS: original campaign turn rotation and assigned End Turn work for %d players / %d controllers, claims=%d,%d,%d,%d\n",

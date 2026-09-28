@@ -85,8 +85,8 @@ static void choices(void) {
                 assert(s.phase==MP_CLAIM && s.claim==b);
                 assert(!mp_claim(&s,chosen[a]));
                 MpSession keys=s;
-                assert(mp_claim(&keys,MP_KEYBOARD)==(keyboard<0));
-                if(keyboard<0) {
+                assert(mp_claim(&keys,MP_KEYBOARD));
+                {
                     assert(keys.device[b]==MP_KEYBOARD && keys.device[a]==chosen[a]);
                     assert(!memcmp(keys.chosen,chosen,players*sizeof(int)));
                     for(int winner=0;winner<2;winner++) {
@@ -100,6 +100,15 @@ static void choices(void) {
                         mp_use_choices(&loot,p,0);
                         assert(loot.phase==MP_PLAY && loot.device[p]==chosen[p]);
                         assert(mp_owner(&loot,MP_KEYBOARD)<0);
+                        for(int next=0;next<players;next++) {
+                            MpSession resumed=keys;
+                            resumed.required=1u<<p;mp_use_choices(&resumed,p,1);
+                            resumed.required=1u<<next;mp_use_choices(&resumed,next,0);
+                            assert(resumed.phase==MP_PLAY && resumed.device[next]==chosen[next]);
+                            assert(!memcmp(resumed.chosen,chosen,players*sizeof(int)));
+                            resumed=ai;resumed.required=1u<<next;mp_use_choices(&resumed,next,1);
+                            assert(resumed.phase==MP_PLAY && resumed.device[next]==chosen[next]);
+                        }
                     }
                     keyboards++;
                 }
@@ -146,6 +155,83 @@ static void choices(void) {
         assert(mp_claim(&s,201) && s.chosen[1]==101);
     }
     printf("PASS: %u device-choice sessions, %u automatic turns, %u shared/personal duels, %u temporary keyboard duels and shared reconnect/temporary-pad loss\n",sessions,turns,duels,keyboards);
+}
+static void keyboard_loan_guards(void) {
+    unsigned cases=0;
+    for(int players=3;players<=4;players++)for(int keyboard=0;keyboard<players;keyboard++)
+    for(int a=0;a<players;a++)for(int b=0;b<players;b++)
+    if(a!=b && a!=keyboard && b!=keyboard) {
+        MpSession s;mp_begin_campaign(&s,players,1,1);
+        for(int p=0;p<players;p++)choose(&s,p,p==keyboard?MP_KEYBOARD:100);
+        s.required=1u<<a;mp_use_choices(&s,a,0);
+        s.required=(1u<<a)|(1u<<b);mp_use_choices(&s,a,1);
+        assert(s.claim==b && mp_can_claim(&s,MP_KEYBOARD));
+        for(int bound=0;bound<2;bound++) {
+            MpSession before=s;before.required|=1u<<keyboard;
+            if(!bound)before.device[keyboard]=MP_NONE;
+            MpSession rejected=before;
+            assert(!mp_claim(&rejected,MP_KEYBOARD) && !memcmp(&before,&rejected,sizeof(before)));
+        }
+        MpSession initial=s;initial.enrolled&=~(1u<<b);
+        assert(mp_can_claim(&initial,MP_KEYBOARD));
+        initial.device[keyboard]=MP_NONE;assert(mp_can_claim(&initial,MP_KEYBOARD));
+        initial.required|=1u<<keyboard;assert(!mp_can_claim(&initial,MP_KEYBOARD));
+        MpSession lost=s;mp_removed(&lost,100);
+        assert(!mp_can_claim(&lost,MP_KEYBOARD));
+        assert(mp_claim(&s,MP_KEYBOARD) && s.chosen[keyboard]==MP_KEYBOARD && s.chosen[b]==100);
+        cases++;
+    }
+    printf("PASS: %u owned-keyboard loan layouts permit explicit initial sharing, protect active/remembered fighters and preserve disconnected-pad recovery\n",cases);
+}
+static void shared_device_choices(void) {
+    unsigned sessions=0,turns=0,duels=0;
+    /* Every keyboard/three-controller assignment across 2..4 players. */
+    for(int players=2;players<=4;players++)for(unsigned layout=0;layout<(1u<<(2*players));layout++) {
+        MpSession base;int chosen[4],shared=0;mp_begin_campaign(&base,players,1,1);
+        for(int p=0;p<players;p++) {
+            int kind=(layout>>(2*p))&3;
+            chosen[p]=kind?99+kind:MP_KEYBOARD;choose(&base,p,chosen[p]);
+            for(int q=0;q<p;q++)if(chosen[p]==chosen[q])shared=1;
+        }
+        assert(base.shared==shared && base.enrolled==(1u<<players)-1);
+        for(int round=0;round<3;round++)for(int p=0;p<players;p++) {
+            base.required=1u<<p;mp_use_choices(&base,p,0);
+            assert(base.phase==MP_PLAY && base.device[p]==chosen[p]);
+            assert(mp_owner(&base,chosen[p])==p);
+            assert(!memcmp(base.chosen,chosen,players*sizeof(int)));turns++;
+        }
+        for(int a=0;a<players;a++)for(int b=0;b<players;b++)if(a!=b) {
+            MpSession duel=base;duel.required=1u<<a;mp_use_choices(&duel,a,0);
+            duel.required=(1u<<a)|(1u<<b);mp_use_choices(&duel,a,1);
+            if(chosen[a]==chosen[b]) {
+                assert(duel.phase==MP_CLAIM && duel.claim==b && !mp_claim(&duel,chosen[a]));
+                assert(mp_can_claim(&duel,MP_KEYBOARD)==(chosen[a]!=MP_KEYBOARD));
+                assert(mp_claim(&duel,200));duel.phase=MP_PLAY;
+                /* Losing a borrowed pad must not replace a shared keyboard. */
+                mp_removed(&duel,200);assert(!duel.disconnected && duel.claim==b);
+                assert(mp_claim(&duel,201));duel.phase=MP_PLAY;
+            }
+            assert(duel.phase==MP_PLAY && duel.device[a]!=duel.device[b]);
+            assert(!memcmp(duel.chosen,chosen,players*sizeof(int)));
+            for(int role=0;role<2;role++)for(int next=-1;next<players;next++) {
+                int winner=role?b:a,device=duel.device[winner];MpSession loot=duel;
+                loot.required=1u<<winner;mp_use_choices(&loot,winner,1);
+                assert(loot.phase==MP_PLAY && loot.device[winner]==device);
+                loot.required=next<0?0:1u<<next;mp_use_choices(&loot,next,0);
+                assert(loot.phase==MP_PLAY);
+                if(next>=0)assert(loot.device[next]==chosen[next]);
+                /* An AI map turn may immediately lead into another attack. */
+                loot.required=1u<<winner;mp_use_choices(&loot,winner,1);
+                assert(loot.phase==MP_PLAY && loot.device[winner]==chosen[winner]);
+                assert(!memcmp(loot.chosen,chosen,players*sizeof(int)));
+            }
+            duels++;
+        }
+        sessions++;
+    }
+    MpSession s;mp_begin_campaign(&s,2,1,1);choose(&s,0,MP_KEYBOARD);
+    s.device[0]=MP_NONE;choose(&s,1,MP_KEYBOARD);assert(s.shared && s.shared_used);
+    printf("PASS: %u arbitrary device layouts, %u shared/personal turns and %u duels preserve choices, distinct fighters, both loot outcomes and all next owners\n",sessions,turns,duels);
 }
 static void reconnect_choices(void) {
     unsigned cases=0;
@@ -211,7 +297,7 @@ int main(int argc,char **argv) {
     }
     if(!log || !fixture || !retail)return 2;
     g_log=fopen(log,"w");assert(g_log);m68k_init();m68k_set_cpu_type(M68K_CPU_TYPE_68000);
-    assert(load_state(fixture));g_lineage=LIN_CRACKED;combat_oracle();choices();reconnect_choices();
+    assert(load_state(fixture));g_lineage=LIN_CRACKED;combat_oracle();choices();keyboard_loan_guards();shared_device_choices();reconnect_choices();
     FILE *f=fopen(retail,"rb");unsigned char header[20];assert(f && fread(header,1,20,f)==20);
     unsigned regs=header[16]|header[17]<<8|header[18]<<16|header[19]<<24;
     assert(regs<=SAVE_NREGS && !fseek(f,20+regs*4,SEEK_SET));

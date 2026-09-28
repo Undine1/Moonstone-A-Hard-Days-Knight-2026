@@ -124,28 +124,33 @@ its normal keyboard/controller controls without setup popups.
 
 - Each player chooses a device when first needed, normally at their knight's
   selection turn: **Start** on a controller, or **Enter** for keyboard.
-- One player may choose keyboard even when three or four controllers are
-  connected. The keyboard is optional and belongs to that player for this session.
+- Any number of players may choose the keyboard, even with extra controllers
+  connected. Players may also choose the same controller when spares are available.
 - If everyone chooses a different device, assignments follow their knights
   through turns, towns, inventory and duels. Extra controllers stay unassigned.
-- When controllers are short, players can choose the same pad during knight
-  selection and pass it between turns. Each knight's choice is reused
+- Players can choose the same keyboard or controller during knight selection
+  and share it between turns. Each knight's choice is reused
   automatically; later turns and day changes need no setup Start/Enter press.
-  The keyboard stays with its chosen player.
+  The active knight controls the shared device; inactive players receive no input.
 - Duelling humans need distinct devices: two controllers, or controller plus
-  keyboard. A player cannot take the keyboard from an inactive third player.
+  keyboard. An idle third player's keyboard may be borrowed for a duel.
   If both fighters normally share one pad, the other fighter is prompted to
-  press **Start** on another controller, or **Enter** to use an unassigned
-  keyboard for that fight. Enter is an explicit choice; the game never assigns
+  press **Start** on another controller, or **Enter** to use the keyboard if
+  its usual owner is not fighting. Enter is an explicit choice; the game never assigns
   the keyboard automatically. The winner keeps their duel device for looting,
-  then their usual shared controller resumes on the map.
+  then usual assignments resume on the map. If both fighters normally share the
+  keyboard, one presses **Start** on a controller for the fight and loot. With no
+  controller connected, the game waits for one. Sharing a keyboard does not split
+  it into two simultaneous sets of combat controls.
 
 | Campaign setup | Choices |
 |---|---|
-| 2 players, 1 controller | One player chooses controller; the other chooses keyboard |
-| 3 players, 2 controllers | Choose two controllers plus keyboard, or share the controllers |
-| 4 players, 4 controllers | Choose four controllers, or three controllers plus keyboard |
-| 4 players, 2 controllers | Share the controllers; one player may choose to keep the keyboard |
+| 2 players, 1 controller | Use one device each, or share either device between turns |
+| 3 players, 2 controllers | Use three separate devices, or share controllers/keyboard |
+| 4 players, 4 controllers | Use separate devices, or explicitly share any controller/keyboard |
+| 4 players, 2 controllers | Share the controllers and/or keyboard in any combination |
+| 3 or 4 players, 1 controller + keyboard | Share either device; duels use one fighter on each |
+| 2–4 players, keyboard only | Share the keyboard; connect a controller if two players fight |
 
 The one-line prompt stays visible until the requested player chooses or confirms
 their device. It offers **START OR ENTER** while keyboard is available, then only
@@ -169,7 +174,7 @@ that shared choice for all of them. The other players keep their assignments.
 Keyboard typing remains available for **everyone's custom knight name**, even
 when another player owns keyboard gameplay. While a name field is open, text
 goes to that knight's name; typing does not change device ownership. Gameplay
-keys and mouse actions belong to the keyboard player. Keyboard save/load, pause,
+keys and mouse actions belong to the active keyboard player. Keyboard save/load, pause,
 quit and diagnostics remain available.
 Tap Start/Enter when identifying a device. The original daybreak screen still
 uses its normal Fire acknowledgement, without an additional setup prompt.

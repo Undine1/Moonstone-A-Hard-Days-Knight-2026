@@ -639,9 +639,11 @@ static void mixed_campaign_device_tests(void) {
     s.required=4;mp_next(&s);CHECK(mp_claim(&s,10));
     s.required=6;s.device[1]=s.device[2]=MP_NONE;mp_next(&s);
     CHECK(mp_claim(&s,10));
-    CHECK(s.phase==MP_CLAIM && s.claim==2 && !mp_claim(&s,MP_KEYBOARD) && !mp_claim(&s,10));
+    CHECK(s.phase==MP_CLAIM && s.claim==2 && mp_can_claim(&s,MP_KEYBOARD) && !mp_claim(&s,10));
+    MpSession loan=s;CHECK(mp_claim(&loan,MP_KEYBOARD));
+    CHECK(loan.device[0]==MP_NONE && loan.device[2]==MP_KEYBOARD && loan.chosen[0]==MP_KEYBOARD);
     CHECK(s.device[0]==MP_KEYBOARD && mp_claim(&s,20) && s.shared);
-    puts("PASS: any campaign player can choose keyboard with four pads; one keyboard owner, no hotplug takeover/fallback, fresh reconnect, simultaneous claim isolation and stable shared/personal choices");
+    puts("PASS: personal keyboard with four pads, no hotplug takeover/fallback, fresh reconnect, simultaneous claim isolation and stable shared/personal choices");
 }
 static void scene_input_tests(void) {
     char text[64];
@@ -897,11 +899,166 @@ static void duel_keyboard_tests(void) {
     s.required=2;mp_next(&s);CHECK(mp_claim(&s,10));
     s.required=4;mp_next(&s);CHECK(mp_claim(&s,MP_KEYBOARD));
     s.required=1;mp_use_choices(&s,0,0);s.required=3;mp_use_choices(&s,0,1);
-    /* The remembered keyboard reservation counts even without an active binding. */
-    s.device[2]=MP_NONE;CHECK(!mp_can_claim(&s,MP_KEYBOARD));
+    /* An idle reservation can be loaned even without an active binding. */
+    s.device[2]=MP_NONE;CHECK(mp_can_claim(&s,MP_KEYBOARD));
+    s.required|=4;CHECK(!mp_can_claim(&s,MP_KEYBOARD));
     mp_begin_campaign(&s,2,0,3);CHECK(mp_claim(&s,10));CHECK(mp_claim(&s,20));
     mp_removed(&s,20);CHECK(!mp_claim(&s,MP_KEYBOARD));
-    puts("PASS: explicit unused keyboard for shared-pad duel, visible Start/Enter choice, input isolation, keyboard loot, human/AI map cleanup, reserved keyboard and no disconnect fallback");
+    puts("PASS: explicit keyboard for shared-pad duel, visible Start/Enter choice, input isolation, keyboard loot, human/AI map cleanup, active keyboard reservation and no disconnect fallback");
+}
+static void owned_keyboard_duel_tests(void) {
+    uint8_t *ram=malloc(RAM_SIZE);CHECK(ram);memcpy(ram,g_ram,RAM_SIZE);
+    int prior_os=g_os,prior_sdl=g_sdl_mode,prior_lineage=g_lineage;
+    g_os=g_sdl_mode=1;g_lineage=LIN_CRACKED;g_mp_practice=0;
+    w16(0x22fc4,0x0c28);w32(0x22fc6,0x0001000b);w16(0x3051e,3);
+    unsigned cases=0;
+    for(int players=3;players<=4;players++)for(int k=0;k<players;k++)for(int reverse=0;reverse<2;reverse++) {
+        w16(0x2e024,(uint16_t)players);
+        VirtualPad pad=attach_pad();events();mp_begin_campaign(&g_mp,players,1,1);
+        g_mp_campaign=1;g_mp_context=MP_CAM_SELECT;g_mp_ui_player=0;
+        for(int p=0;p<players;p++) {
+            g_mp_ui_player=p;g_mp.required=1u<<p;mp_next(&g_mp);
+            if(p==k) { probe_keys[SDL_SCANCODE_RETURN]=1;CHECK(update(1,1,0)); }
+            else { button(pad,SDL_CONTROLLER_BUTTON_START,1);CHECK(update(0,1,0)); }
+            button(pad,SDL_CONTROLLER_BUTTON_START,0);memset(probe_keys,0,sizeof(probe_keys));
+            CHECK(!update(0,1,0));
+        }
+        int a=(k+1+reverse)%players,b=(k+2-reverse)%players;
+        int chosen[4];memcpy(chosen,g_mp.chosen,sizeof(chosen));
+        int primary=g_primary_pad;
+        mp_campaign_context(MP_CAM_MAP,a,0);CHECK(!update(0,1,0));
+        mp_campaign_context(MP_CAM_COMBAT,a,(1u<<a)|(1u<<b));
+        char text[64],expected[64];snprintf(expected,sizeof(expected),"PLAYER %d PRESS ENTER",b+1);
+        CHECK(update(0,1,0) && g_mp.claim==b && !strcmp(mp_prompt(1,text),expected));
+        CHECK(g_mp.device[k]==MP_KEYBOARD && g_mp.device[b]==MP_NONE);
+        /* A focused, explicit Enter loans the idle owner's keyboard once. */
+        probe_keys[SDL_SCANCODE_RETURN]=1;CHECK(update(1,0,0) && g_mp.device[b]==MP_NONE);
+        CHECK(update(0,1,0) && g_mp.device[b]==MP_NONE);
+        probe_keys[SDL_SCANCODE_RETURN]=0;CHECK(update(0,1,0));
+        probe_keys[SDL_SCANCODE_RETURN]=1;CHECK(update(1,1,0));
+        CHECK(g_mp.phase==MP_RELEASE && g_mp.device[b]==MP_KEYBOARD && g_mp.device[k]==MP_NONE);
+        CHECK(!memcmp(chosen,g_mp.chosen,sizeof(chosen)) && primary==g_primary_pad);
+        probe_keys[SDL_SCANCODE_RETURN]=0;
+        probe_keys[SDL_SCANCODE_RIGHT]=1;button(pad,SDL_CONTROLLER_BUTTON_DPAD_LEFT,1);
+        CHECK(!update(0,1,0) && g_mp_input[a]==2 && g_mp_input[b]==1 && !g_mp_input[k]);
+        CHECK(update(0,0,0) && !g_mp_input[a] && !g_mp_input[b]);
+        CHECK(!update(0,1,0) && g_mp.device[b]==MP_KEYBOARD);
+        button(pad,SDL_CONTROLLER_BUTTON_DPAD_LEFT,0);memset(probe_keys,0,sizeof(probe_keys));
+        mp_campaign_context(MP_CAM_UI,b,0);CHECK(!update(0,1,0));
+        probe_keys[SDL_SCANCODE_LEFT]=1;
+        CHECK(!update(0,1,0) && g_mp_input[b]==2 && !g_mp_input[k] && mp_keyboard_gameplay());
+        memset(probe_keys,0,sizeof(probe_keys));
+        mp_campaign_context(MP_CAM_MAP,-1,0);CHECK(!update(0,1,0));
+        CHECK(mp_owner(&g_mp,MP_KEYBOARD)<0);
+        mp_campaign_context(MP_CAM_COMBAT,k,1u<<k);
+        CHECK(!update(0,1,0) && g_mp.device[k]==MP_KEYBOARD);
+        mp_campaign_context(MP_CAM_MAP,b,0);CHECK(!update(0,1,0) && g_mp.device[b]==pad.id);
+        /* Borrow again; losing the pad during keyboard loot must not steal
+         * this keyboard permanently or force the idle owner to re-identify. */
+        mp_campaign_context(MP_CAM_MAP,a,0);CHECK(!update(0,1,0));
+        mp_campaign_context(MP_CAM_COMBAT,a,(1u<<a)|(1u<<b));CHECK(update(0,1,0));
+        probe_keys[SDL_SCANCODE_KP_ENTER]=1;CHECK(update(1,1,0));
+        probe_keys[SDL_SCANCODE_KP_ENTER]=0;CHECK(!update(0,1,0));
+        mp_campaign_context(MP_CAM_UI,b,0);CHECK(!update(0,1,0));
+        detach_pad(&pad);CHECK(!update(0,1,0));
+        mp_campaign_context(MP_CAM_MAP,k,0);CHECK(!update(0,1,0) && g_mp.device[k]==MP_KEYBOARD);
+        mp_campaign_context(MP_CAM_MAP,b,0);CHECK(update(0,1,0) && !mp_keyboard_claimable());
+        probe_keys[SDL_SCANCODE_RETURN]=1;CHECK(update(1,1,0) && g_mp.device[b]==MP_NONE);
+        memset(probe_keys,0,sizeof(probe_keys));pad=attach_pad();events();
+        button(pad,SDL_CONTROLLER_BUTTON_START,1);CHECK(update(0,1,0));
+        button(pad,SDL_CONTROLLER_BUTTON_START,0);CHECK(!update(0,1,0));
+        for(int p=0;p<players;p++) {
+            CHECK(g_mp.chosen[p]==(p==k?MP_KEYBOARD:pad.id));
+            mp_campaign_context(MP_CAM_MAP,p,0);CHECK(!update(0,1,0));
+            CHECK(g_mp.device[p]==g_mp.chosen[p]);
+        }
+        CHECK(!g_mp.disconnected);
+        mp_campaign_clear();mp_reset(&g_mp);detach_pad(&pad);events();cases++;
+    }
+    memcpy(g_ram,ram,RAM_SIZE);free(ram);
+    g_os=prior_os;g_sdl_mode=prior_sdl;g_lineage=prior_lineage;
+    printf("PASS: %u three/four-player SDL keyboard-owner/duel-role cases: explicit loan, correct prompt, independent inputs, focus, loot, AI attack, owner return and pad-loss recovery\n",cases);
+}
+static void shared_keyboard_tests(void) {
+    uint8_t *ram=malloc(RAM_SIZE);CHECK(ram);memcpy(ram,g_ram,RAM_SIZE);
+    int prior_os=g_os,prior_sdl=g_sdl_mode,prior_lineage=g_lineage;
+    g_os=g_sdl_mode=1;g_lineage=LIN_CRACKED;g_mp_practice=0;
+    w16(0x22fc4,0x0c28);w32(0x22fc6,0x0001000b);w16(0x3051e,3);
+    unsigned cases=0;
+    for(int players=2;players<=4;players++)for(int connected=0;connected<=4;connected+=4)
+    for(unsigned keys=0;keys<(1u<<players);keys++) {
+        if(!connected && keys!=(1u<<players)-1)continue;
+        VirtualPad pads[4];int count=connected,chosen[4];
+        for(int i=0;i<count;i++)pads[i]=attach_pad();events();
+        w16(0x2e024,(uint16_t)players);mp_campaign_clear();mp_reset(&g_mp);
+        for(int p=0;p<players;p++) {
+            mp_campaign_context(MP_CAM_SELECT,p,0);
+            CHECK(g_mp.phase==MP_CLAIM && g_mp.claim==p && mp_keyboard_claimable());
+            chosen[p]=(keys&(1u<<p))?MP_KEYBOARD:pads[0].id;
+            if(chosen[p]==MP_KEYBOARD) {
+                SDL_Scancode sc=p%2?SDL_SCANCODE_KP_ENTER:SDL_SCANCODE_RETURN;
+                probe_keys[sc]=1;CHECK(update(1,0,0) && g_mp.phase==MP_CLAIM);
+                CHECK(update(0,1,0) && g_mp.phase==MP_CLAIM);
+                probe_keys[sc]=0;CHECK(update(0,1,0));
+                probe_keys[sc]=1;CHECK(update(1,1,0));
+                CHECK(g_mp.phase==MP_RELEASE && g_mp.device[p]==MP_KEYBOARD);
+                CHECK(update(0,1,0) && g_mp.phase==MP_RELEASE);
+                probe_keys[sc]=0;
+            } else {
+                button(pads[0],SDL_CONTROLLER_BUTTON_START,1);CHECK(update(0,1,0));
+                CHECK(g_mp.phase==MP_RELEASE && g_mp.device[p]==pads[0].id);
+                button(pads[0],SDL_CONTROLLER_BUTTON_START,0);
+            }
+            CHECK(!update(0,1,0));
+        }
+        int shared=0;
+        for(int p=0;p<players;p++)for(int q=0;q<p;q++)if(chosen[p]==chosen[q])shared=1;
+        CHECK(g_mp.shared==shared && !memcmp(chosen,g_mp.chosen,players*sizeof(int)));
+        for(int round=0;round<2;round++)for(int p=0;p<players;p++) {
+            mp_campaign_context(MP_CAM_MAP,p,0);
+            probe_keys[SDL_SCANCODE_RIGHT]=1;
+            if(connected)button(pads[0],SDL_CONTROLLER_BUTTON_DPAD_LEFT,1);
+            CHECK(!update(0,1,0) && g_mp.device[p]==chosen[p]);
+            CHECK(mp_keyboard_gameplay()==(chosen[p]==MP_KEYBOARD));
+            for(int q=0;q<players;q++)CHECK(g_mp_input[q]==(q==p?(chosen[p]==MP_KEYBOARD?1:2):0));
+            memset(probe_keys,0,sizeof(probe_keys));
+            if(connected)button(pads[0],SDL_CONTROLLER_BUTTON_DPAD_LEFT,0);
+            CHECK(!update(0,1,0));
+        }
+        int a=0,b=players-1;mp_campaign_context(MP_CAM_MAP,a,0);
+        mp_campaign_context(MP_CAM_COMBAT,a,(1u<<a)|(1u<<b));
+        if(chosen[a]==chosen[b]) {
+            char text[64];CHECK(g_mp.phase==MP_CLAIM && g_mp.claim==b);
+            CHECK(mp_keyboard_claimable()==(chosen[a]!=MP_KEYBOARD));
+            if(!count) {
+                CHECK(strstr(mp_prompt(1,text),"CONNECT CONTROLLER"));
+                CHECK(update(1,1,0) && g_mp.device[b]==MP_NONE);
+                pads[count++]=attach_pad();events();
+                CHECK(g_mp.phase==MP_CLAIM && strstr(mp_prompt(1,text),"PRESS START"));
+            }
+            int spare=count-1;button(pads[spare],SDL_CONTROLLER_BUTTON_START,1);
+            CHECK(update(0,1,0));button(pads[spare],SDL_CONTROLLER_BUTTON_START,0);
+            CHECK(!update(0,1,0) && g_mp.device[b]==pads[spare].id);
+            CHECK(!memcmp(chosen,g_mp.chosen,players*sizeof(int)));
+            detach_pad(&pads[spare]);CHECK(update(0,1,0) && g_mp.claim==b && !g_mp.disconnected);
+            pads[spare]=attach_pad();events();
+            button(pads[spare],SDL_CONTROLLER_BUTTON_START,1);CHECK(update(0,1,0));
+            button(pads[spare],SDL_CONTROLLER_BUTTON_START,0);CHECK(!update(0,1,0));
+        }
+        CHECK(g_mp.device[a]!=g_mp.device[b] && g_mp.phase==MP_PLAY);
+        int loot_device=g_mp.device[b];mp_campaign_context(MP_CAM_UI,b,0);
+        CHECK(!update(0,1,0) && g_mp.device[b]==loot_device);
+        mp_campaign_context(MP_CAM_MAP,-1,0);CHECK(!update(0,1,0));
+        for(int p=0;p<players;p++) {
+            mp_campaign_context(MP_CAM_MAP,p,0);CHECK(!update(0,1,0));
+            CHECK(g_mp.device[p]==chosen[p] && !memcmp(chosen,g_mp.chosen,players*sizeof(int)));
+        }
+        mp_campaign_clear();mp_reset(&g_mp);
+        for(int i=0;i<count;i++)detach_pad(&pads[i]);events();cases++;
+    }
+    memcpy(g_ram,ram,RAM_SIZE);free(ram);
+    g_os=prior_os;g_sdl_mode=prior_sdl;g_lineage=prior_lineage;
+    printf("PASS: %u SDL shared keyboard/controller layouts with zero/four pads: real enrollment, focus/held claims, turn isolation, late duel pad, loan loss, loot and return\n",cases);
 }
 static void unit_tests(void) {
     SDL_SetMainReady();
@@ -915,6 +1072,8 @@ static void unit_tests(void) {
     shared_campaign_tests();
     reconnect_group_tests();
     duel_keyboard_tests();
+    owned_keyboard_duel_tests();
+    shared_keyboard_tests();
     g_mp_practice=1;
     mp_begin(&g_mp);
     CHECK(update(0,1,0) && g_mp.claim == 0 && !mp_keyboard_claimable());
@@ -1017,6 +1176,8 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i],"--probe-campaign-save") && i+1<argc) campaign_save=argv[++i];
         else if (!strcmp(argv[i],"--probe-keyboard-player") && i+1<argc) campaign_keyboard_player=atoi(argv[++i])-1;
+        else if (!strcmp(argv[i],"--probe-keyboard-mask") && i+1<argc) campaign_keyboard_mask=(unsigned)atoi(argv[++i]);
+        else if (!strcmp(argv[i],"--probe-shared-controller")) campaign_shared_pad=1;
         else if (!strcmp(argv[i],"--probe-zone-after-setup") && i+2<argc) {
             campaign_zone_owner=atoi(argv[++i])-1;campaign_zone_node=atoi(argv[++i]);
         }
@@ -1035,7 +1196,8 @@ int main(int argc, char **argv) {
     if (replay) return moonstone_main(argc,argv);
     if (probe_live) {
         if(probe_live>=7) {
-            CHECK(campaign_players>=2 && campaign_players<=4 && campaign_pad_count>=1 && campaign_pad_count<=4);
+            CHECK(campaign_players>=2 && campaign_players<=4 && campaign_pad_count>=0 && campaign_pad_count<=4);
+            CHECK(campaign_keyboard_mask<(1u<<campaign_players));
             SDL_SetMainReady();CHECK(SDL_Init(SDL_INIT_GAMECONTROLLER)==0);
             for(int p=0;p<campaign_pad_count;p++) campaign_pads[p]=attach_pad();
         }

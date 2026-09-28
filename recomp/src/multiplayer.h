@@ -17,9 +17,9 @@ typedef struct {
     int claim;                    /* claiming/confirming/accepted slot, never renumber */
     int recovery;                 /* suppress Practice auto-assignment after loss */
     unsigned required;            /* players needed at this original game boundary */
-    int shared;                   /* controller handoffs; finalized after initial choices */
+    int shared;                   /* device handoffs; finalized after initial choices */
     unsigned enrolled;            /* chosen device type survives transfers/disconnects */
-    int shared_used;              /* a controller was explicitly borrowed during setup */
+    int shared_used;              /* a device was explicitly shared during setup */
 } MpSession;
 
 static void mp_reset(MpSession *s) {
@@ -52,7 +52,7 @@ static void mp_begin_campaign(MpSession *s, int players, int shared, unsigned re
     s->required = required;        /* identify players when their original turn needs them */
     mp_next(s);
 }
-/* Restore only known, connected choices. A shared pad can move from an idle
+/* Restore only known, connected choices. A shared device can move from an idle
  * player, but never from another required fighter. Temporary duel assignments
  * remain in device[] until that fight/loot ends; chosen[] remains unchanged. */
 static void mp_use_choices(MpSession *s, int owner, int combat) {
@@ -71,19 +71,19 @@ static void mp_use_choices(MpSession *s, int owner, int combat) {
     mp_next(s);
 }
 /* Shared devices may pass between turns, but two simultaneous fighters must
- * always own distinct devices. Personal assignments are never stolen. */
+ * always own distinct devices. Temporary loans preserve normal assignments. */
 static int mp_can_claim(const MpSession *s, int device) {
     int owner = mp_owner(s, device);
     if (device == MP_KEYBOARD) {
-        /* Keep a personal keyboard reserved, including while its owner is idle.
-         * An otherwise unused keyboard may be explicitly borrowed when two
-         * required fighters chose the same connected pad. This cannot recover
-         * a lost chosen controller, or change anyone's remembered choice. */
-        if (owner >= 0) return 0;
-        for (int p = 0; p < s->players; p++)
-            if (s->chosen[p] == MP_KEYBOARD) return 0;
+        /* Campaign players may explicitly share the keyboard between turns.
+         * A required player's keyboard stays reserved even without an active
+         * binding. Later loans cannot recover a lost pad or change choices. */
         unsigned player = 1u << s->claim;
-        if (!(s->enrolled & player)) return 1;
+        int first = !(s->enrolled & player);
+        if (owner >= 0 && (!s->shared || (s->required & (1u << owner)))) return 0;
+        for (int p = 0; p < s->players; p++)
+            if (s->chosen[p] == MP_KEYBOARD && (!s->shared || (s->required & (1u << p)))) return 0;
+        if (first) return 1;
         if (!s->shared || !(s->required & player) || (s->disconnected & player)
             || s->chosen[s->claim] < 0) return 0;
         int other = mp_owner(s,s->chosen[s->claim]);
@@ -107,7 +107,13 @@ static int mp_claim(MpSession *s, int device) {
     if (former >= 0) s->shared_used = 1;
     if (former >= 0) s->device[former] = MP_NONE;
     s->device[s->claim] = device;
-    if (first) s->chosen[s->claim] = device;
+    if (first) {
+        /* A remembered choice still counts if its active binding was cleared
+         * by a load or a turn boundary during enrollment. */
+        for (int p = 0; p < s->players; p++)
+            if (p != s->claim && s->chosen[p] == device) s->shared_used = 1;
+        s->chosen[s->claim] = device;
+    }
     else if (s->disconnected & (1u << s->claim)) {
         /* One explicit reconnect restores the shared group's choice. Other
          * players do not need to identify the same physical pad again. */
@@ -119,7 +125,7 @@ static int mp_claim(MpSession *s, int device) {
     }
     s->enrolled |= 1u << s->claim;
     /* Three players choosing two pads plus keyboard have personal devices.
-     * Choosing to pass a pad instead retains shared turns. Decide once, after
+     * Choosing to share any device retains shared turns. Decide once, after
      * everyone has chosen, so reconnects/hotplug cannot change sharing mode. */
     if (first && s->enrolled == (1u << s->players)-1 && !s->shared_used)
         s->shared = 0;

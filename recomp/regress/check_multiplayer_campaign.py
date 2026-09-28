@@ -18,13 +18,15 @@ def main():
     ap.add_argument('--output', type=Path, required=True)
     ap.add_argument('--menu', type=Path, required=True)
     ap.add_argument('--case', default='2:1,2:2,3:3,4:4,4:2,4:1',
-                    help='players:pads[:keyboard-player], comma separated; keyboard player is 1-based')
+                    help='players:pads[:keyboard-players], comma separated; 1-based keyboard players joined with +')
+    ap.add_argument('--shared-controller', action='store_true',
+                    help='All non-keyboard players explicitly choose the first pad, even with spares connected')
     ap.add_argument('--duel-fixture', type=Path)
     ap.add_argument('--duel-after-setup', action='store_true',
                     help='Test both duel roles after actual device choices, names and turns')
     ap.add_argument('--duel-opponent',type=int,help='1-based opponent of P1; defaults to last player')
     ap.add_argument('--duel-keyboard',action='store_true',
-                    help='P1/P2 initially share a pad; explicitly borrow unused keyboard for their duel')
+                    help='P1/P2 share a pad; explicitly borrow an unused or idle player keyboard for their duel')
     ap.add_argument('--restore-context', type=int)
     args = ap.parse_args()
     out = args.output.resolve()
@@ -39,10 +41,21 @@ def main():
         for case in args.case.split(','):
             parts = case.split(':')
             players, pads = parts[:2]
-            keyboard_player = parts[2] if len(parts) == 3 else '0'
+            keyboard_players = parts[2] if len(parts) == 3 else '0'
+            keyboard_mask = 0
+            if '+' in keyboard_players:
+                for player in keyboard_players.split('+'):
+                    assert 1 <= int(player) <= int(players)
+                    keyboard_mask |= 1 << (int(player)-1)
+                keyboard_player = '0'
+            else:
+                keyboard_player = keyboard_players
+                assert 0 <= int(keyboard_player) <= int(players)
+            assert 2 <= int(players) <= 4 and 0 <= int(pads) <= 4
+            assert int(pads) or keyboard_mask == (1 << int(players))-1
             name = f'campaign-{players}p-{pads}pads'
-            if keyboard_player != '0':
-                name += f'-kb{keyboard_player}'
+            if keyboard_players != '0':
+                name += f'-kb{keyboard_players}'
             command = [str(exe), '--os', '--sdl', '--scale', '2',
                        '--mod', str(data / 'nb'), '--dataset', str(data), '--diskdir', str(data),
                        '--loadstate', str((args.duel_fixture or args.menu).resolve())]
@@ -58,10 +71,14 @@ def main():
                     assert 2<=args.duel_opponent<=int(players)
                     mode += ['--probe-duel-opponent',str(args.duel_opponent)]
                 if args.duel_keyboard:
-                    assert args.duel_after_setup and args.duel_opponent==2 and keyboard_player=='0'
+                    assert args.duel_after_setup and args.duel_opponent==2 and int(keyboard_player) not in (1,2) and not keyboard_mask
                     mode += ['--probe-duel-keyboard']
+                if args.shared_controller:
+                    assert int(pads)>0
+                    mode += ['--probe-shared-controller']
                 result = subprocess.run(command + mode + [
                     '--probe-keyboard-player', keyboard_player,
+                    '--probe-keyboard-mask', str(keyboard_mask),
                     '--probe-campaign-save', str(out / (run_name + '.sav')),
                     '--probe-menu-fixture', str(args.menu.resolve()),
                     '--probe-image', str(out / run_name), '--log', str(out / (run_name + '.log'))],

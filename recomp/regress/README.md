@@ -323,8 +323,14 @@ all four possible campaign keyboard owners with extra pads, rejected Enter durin
 controller recovery, hotplug without replacing keyboard, and simultaneous claims.
 
 Use `--case 3:2:3,4:4:1` to choose keyboard for P3 in a three-player/two-pad game
-and P1 in a four-player/four-pad game. The optional third number is one-based;
-omitting it prefers available controllers. All players' typed custom names are
+and P1 in a four-player/four-pad game. The optional third field lists one-based
+players joined with `+`: `3:1:1+2` shares the keyboard between P1/P2, and
+`4:0:1+2+3+4` starts with keyboard only. For keyboard-only duels the test waits at
+the connect-controller prompt, warm-loads it, then connects a virtual controller.
+`--shared-controller` makes non-keyboard players choose the same pad even when
+spares are connected. These shared-device duels finish loot and verify every
+player's normal choice on their next map turn. Omitting the third field prefers
+available controllers. All players' typed custom names are
 asserted in the original name buffers. Add `--duel-after-setup` to retain actual
 device choices through selection, a full turn rotation, both original duel roles,
 warm F9, lethal attacks and winner-owned loot. This distinguishes a warm session
@@ -336,9 +342,19 @@ actual knight selection, and P3 chooses the second. The driver checks the
 Start/Enter prompt, uses Return or Numpad Enter, retains normal choices across
 warm pending/combat/loot saves, exits the original loot menu, and confirms the
 shared controller resumes on the map. Both attacking/defending roles run, so
-the keyboard player both wins and loses. The host suite also checks reserved
-keyboards, background/held Enter, input isolation and controller loss; the
+the keyboard player both wins and loses. Use `--case 3:1:3,4:1:3,4:1:4` with
+the same duel options to test borrowing P3/P4's keyboard with only one controller.
+These cases also return through the original turn sequence until the keyboard
+owner plays again. The host suite covers all seven three/four-player keyboard
+owner positions in both duel roles, focus, loot, AI return, and a pad disconnect
+during the loan. Explicit initial keyboard sharing is allowed; keyboards needed by a current
+fighter (including missing active bindings), and disconnected-pad recovery
+remain protected. The host suite also checks background/held Enter and input isolation; the
 campaign ownership matrix covers temporary keyboard duels across all slots.
+It also checks all336 keyboard/three-pad layouts across2–4 players,3,744 turns
+and3,488 duels, including both loot outcomes, all next owners and temporary-pad
+loss. The SDL suite exercises31 shared-keyboard/controller layouts with zero
+or four connected controllers, including held/background identification.
 
 Duel cases arrange an encounter with the original active-actor preconditions,
 then call the original encounter handler. They check both combat ports,
