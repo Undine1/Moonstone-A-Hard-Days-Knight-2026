@@ -1,6 +1,14 @@
 # Moonstone 2026 — Changes from the 1991 Amiga game
 
-_Last updated: 2026-09-28._
+_Last updated: 2026-10-03._
+
+## v1.4.1
+
+Added full screen mode.
+
+1. **F11:** toggle fullscreen on/off.
+2. **Escape in fullscreen:** return to windowed mode.
+3. **Escape in windowed mode:** quit as before.
 
 ## v1.4.0 (+ Local Multiplayer)
 

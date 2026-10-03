@@ -628,6 +628,21 @@ devices rejected and one native action per press. P3 uses the exact specimen;
 other owners use explicitly derived scratch saves. All logs/saves stay in the
 output folder; never deploy the probe. Evidence: `build/p3-endturn-20260928/`.
 
+## Fullscreen
+
+Build test-only `fullscreen_probe.c` with the normal build.sh compiler inputs.
+Run `check_fullscreen.py --probe-exe <absolute probe.exe> --menu <menu.sav>
+--practice <fresh practice.sav> --map <solo map.sav> --output <scratch>`.
+Every launch uses a temporary installation and an explicit scratch log.
+
+The 12 real SDL scenarios check F11/Escape and repeats, window size/position,
+maximized restoration, aspect ratio, entry/exit failures, remapped Escape,
+reserved F11, intro/map/combat, identification and disconnect/reconnect.
+Minimize/restore uses Windows; focus events are injected because Windows can
+deny automated foreground activation. This is not a physical Alt+Tab test.
+Menu runs compare full guest RAM against a windowed control, and returning to
+windowed mode must reproduce the same game pixels. Never deploy this probe.
+
 ## Adding a golden
 
 1. Get the state into a save (e.g. F5 the win screen) under `dist/MoonstoneNative/`.

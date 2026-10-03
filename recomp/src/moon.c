@@ -47,7 +47,7 @@
 
 /* Project identity / attribution.  Printed at startup (to the log) and via
  * --version; also serves as the binary's attribution string. */
-#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.4.0 (+ Local Multiplayer) - " \
+#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.4.1 - " \
     "no-emulator port of the Amiga 1991 original - (C) 2026 Undine1, " \
     "github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026 - GPL-3.0"
 /* Compile timestamp, shown in the window title + log so it's unambiguous WHICH
@@ -1723,7 +1723,8 @@ static void controls_load(void) {
                 if (!*token || count >= CONTROL_MAX_BINDINGS) { valid = 0; break; }
                 if (section == CONTROL_SECTION_KEYBOARD) {
                     SDL_Scancode sc = control_key_from_name(token);
-                    if (sc == SDL_SCANCODE_UNKNOWN || sc == SDL_SCANCODE_F10 || sc == SDL_SCANCODE_F12) { valid = 0; break; }
+                    if (sc == SDL_SCANCODE_UNKNOWN || sc == SDL_SCANCODE_F10 ||
+                        sc == SDL_SCANCODE_F11 || sc == SDL_SCANCODE_F12) { valid = 0; break; }
                     int duplicate = 0; for (int i=0;i<count;i++) if (keys[i] == sc) duplicate = 1;
                     if (!duplicate) keys[count++] = sc;
                 } else {
@@ -7630,6 +7631,20 @@ static void sdl_log_output(void *userdata, int category, SDL_LogPriority priorit
     }
 }
 
+static void sdl_set_fullscreen(SDL_Window *win, int enabled) {
+    /* SDL retains the windowed rectangle and Windows maximization state.
+     * Desktop fullscreen keeps the display mode and logical 320x256 scaling. */
+    int rc = SDL_SetWindowFullscreen(win, enabled ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+    if (g_log) {
+        int w, h;
+        SDL_GetWindowSize(win, &w, &h);
+        fprintf(g_log, "DISPLAY requested=%s result=%s size=%dx%d%s%s\n",
+                enabled ? "fullscreen" : "windowed", rc == 0 ? "ok" : "failed", w, h,
+                rc == 0 ? "" : " error=", rc == 0 ? "" : SDL_GetError());
+        fflush(g_log);
+    }
+}
+
 static int run_sdl(int scale) {
     g_sdl_mode = 1;   /* live play: crash reporter may show a dialog box */
     SDL_SetMainReady();
@@ -7733,6 +7748,7 @@ static int run_sdl(int scale) {
     int kb_u=0, kb_d=0, kb_l=0, kb_r=0, kb_fire=0;
     int m_fire=0, m_rmb=0;
     int mp_focused = 1, mp_audio_hold = 0;
+    int fullscreen_escape_down = 0;
     int running = 1;
     int status_frames = 0;   /* >0: a SAVED/LOADED title flash is up; restore g_wintitle at 0 */
     char savepath[1100];
@@ -7798,6 +7814,19 @@ static int run_sdl(int scale) {
                 int d = (e.type == SDL_KEYDOWN);
                 int sym = e.key.keysym.sym;
                 SDL_Scancode sc = e.key.keysym.scancode;
+                /* Window shortcuts work even while player identification or
+                 * reconnect pauses the game. Neither press reaches gameplay. */
+                if (sc == SDL_SCANCODE_F11) {
+                    if (d && !e.key.repeat)
+                        sdl_set_fullscreen(win, !(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN));
+                    continue;
+                }
+                if (sc == SDL_SCANCODE_ESCAPE && (fullscreen_escape_down ||
+                    (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN))) {
+                    if (d && !e.key.repeat && !fullscreen_escape_down) sdl_set_fullscreen(win, 0);
+                    fullscreen_escape_down = d;
+                    continue; /* holding Escape after leaving fullscreen must not quit */
+                }
                 if (mp_active() && (g_mp.phase != MP_PLAY || !mp_focused)) {
                     if (d && !e.key.repeat) {
                         if (sym == SDLK_ESCAPE) running = 0;
@@ -7928,6 +7957,17 @@ static int run_sdl(int scale) {
          * key-up/down event.  With multiple bindings, releasing one key must not
          * cancel another key that is still held. */
         const Uint8 *keyboard = SDL_GetKeyboardState(NULL);
+        Uint8 window_keyboard[SDL_NUM_SCANCODES];
+        if (fullscreen_escape_down) {
+            /* Also consume a held Escape remapped to a gameplay action. This
+             * masks only this window shortcut, not any other player's controls. */
+            if (!keyboard[SDL_SCANCODE_ESCAPE]) fullscreen_escape_down = 0;
+            else {
+                memcpy(window_keyboard, keyboard, sizeof(window_keyboard));
+                window_keyboard[SDL_SCANCODE_ESCAPE] = 0;
+                keyboard = window_keyboard;
+            }
+        }
         kb_u = control_keyboard_down(CONTROL_UP, keyboard);
         kb_d = control_keyboard_down(CONTROL_DOWN, keyboard);
         kb_l = control_keyboard_down(CONTROL_LEFT, keyboard);

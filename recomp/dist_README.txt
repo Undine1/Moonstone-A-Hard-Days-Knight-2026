@@ -2,7 +2,7 @@
   MOONSTONE - A Hard Days Knight         native Windows port
 ================================================================
 
-Moonstone 2026 v1.4.0 (+ Local Multiplayer).
+Moonstone 2026 v1.4.1.
 ADF files are not included. This release supports two-player Practice and
 campaigns with up to four players, including shared controllers.
 
@@ -159,7 +159,8 @@ Start/Enter press. Existing saves work.
     Connecting the first pad during
     keyboard-only Practice opens Player 1 setup. Adding a pad during a round
     keeps the current assignments; start Practice again from the menu to use it.
-    Losing window focus also pauses multiplayer. Esc can quit while waiting.
+    Losing window focus also pauses multiplayer. F11 works while waiting;
+    Esc leaves fullscreen, or quits if already windowed.
 
     Original combat pause: Start on either assigned pad or Space on keyboard.
     Host shortcuts (pause, save/load, quit, diagnostics) remain keyboard-accessible.
@@ -184,7 +185,8 @@ Start/Enter press. Existing saves work.
     E ..................... rest / end the current turn
     Q ..................... abandon the current quest / return to setup
     V ..................... toggle the version/revision credit on the map
-    Esc ................... quit
+    F11 ................... toggle fullscreen (also works during setup prompts)
+    Esc ................... leave fullscreen; quit if already windowed
 
   MOUSE (optional)
     Mouse movement ........ move the pointer
