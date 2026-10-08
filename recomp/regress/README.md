@@ -46,6 +46,23 @@ Pass `--output recomp/build/choke-review` to retain frame dumps for visual revie
 movement, attack, released controls, damage, and save/reload for the second human
 knight. Disabled-fix comparisons must reproduce the former input leakage.
 
+## Inventory stat numbers
+
+`stat_display_probe.c` and `check_stat_display.py` verify the inherited stale-
+text-width bug (CON1 could print as257). Build the probe with the production
+compiler recipe, substituting its source and output name; never deploy it.
+Pass `--images` a local directory containing the original `port.ram` and
+`retail.ram`, `--before-exe` a frozen prior engine, and `--output` a scratch
+directory. The controlled inventory entry defaults to the existing local
+`recomp/build/item-action-20260923/checked-entry.sav` fixture (`--entry` overrides).
+
+The suite checks1,440 native original/fixed cases,18 scope/flags guards,32 panels
+across all four knights, both knight-loot columns, eight cold/warm save replays
+and a real CON purchase/redraw. It preserves actual stats, items, XP and HP;
+`--nostatdisplayfix` must reproduce the prior engine's complete RAM. This is a
+display bug in both originals, independent of `--noretailparity`. The full13/13
+regression suite is also required. Fixtures, images and private EXEs stay local.
+
 ## Manual armour loot
 
 `check_manual_armour.py` executes the retail transfer/stat instructions as an
@@ -642,6 +659,42 @@ Minimize/restore uses Windows; focus events are injected because Windows can
 deny automated foreground activation. This is not a physical Alt+Tab test.
 Menu runs compare full guest RAM against a windowed control, and returning to
 windowed mode must reproduce the same game pixels. Never deploy this probe.
+
+## Inventory exit shortcut
+
+Build test-only `inventory_exit_probe.c` with the normal build.sh compiler
+inputs. Run `check_inventory_exit.py --modules <original flat RAM directory>
+--fixtures <stat-cap final-checks directory> --output <scratch directory>`.
+The module directory must contain the original `port.ram` and `retail.ram`;
+fixture names are `s{0,3,10}-p{1..4}-con-allowed-wait.sav`.
+
+The native oracle compares full cleanup against the existing Exit button in
+retail and both host-supported lineages, including active cursors and pending
+Wyrm targets. Drawing/wait/audio leaves are substituted. The 35 real SDL cases
+exercise inventory, offerings and loot for all four owners, solo play, inactive
+devices, held buttons/key repeat, focus, warm load, remapping, unbinding and
+older controls files. They assert unchanged stats/items at native return.
+These are controlled panel tests, not complete scroll casts. All logs/saves
+stay under the scratch output; never deploy the probe.
+
+## Inventory scroll transitions
+
+Build test-only `inventory_flow_probe.c` and `inventory_flow_sdl_probe.c` with
+the normal build.sh inputs. Run `check_inventory_flow.py --fixtures <original
+scroll-review directory> --output <scratch>`. The private fixture directory
+contains original `port.ram`/`retail.ram`, `p{1..4}-inventory.sav` and the old
+scroll captures documented in `notes-handoff/moonstone-scroll-return-review.md`.
+Use `--only native|fresh|legacy|boundaries` for a focused run; `--only pending`
+checks saved transitions with A/B options changed after the boundary run.
+
+The native oracle compares complete Acquisition/Wyrm casts, repeated casts,
+knight-loot transitions, caller stack depth and all four owners with retail.
+It includes the old behavior as an A/B control and validates instruction/stack
+guards and CPU flags. SDL tests exercise real drawing/input, item consumption,
+transfers, dragon targets, keyboard/controller ownership, single cleanup,
+existing nested saves, and warm/cold saves during entry/re-entry/exit.
+Fixtures use a controlled caller; these are not full campaign playthroughs.
+Every run uses copied saves and an explicit scratch log. Never deploy probes.
 
 ## Adding a golden
 

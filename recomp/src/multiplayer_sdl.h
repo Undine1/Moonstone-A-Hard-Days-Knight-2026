@@ -143,6 +143,7 @@ static void mp_clear_host_input(void) {
     g_ji_up = g_ji_dn = g_ji_lf = g_ji_rt = g_fire = g_fire2 = 0;
     g_mouse_dx = g_mouse_dy = g_rmb = g_kdigit = 0;
     g_pause_request = g_rest_request = g_inv_request = 0;
+    g_inventory_close_request = 0;
     g_quest_quit_request = g_ver_request = 0;
     g_keyq_head = g_keyq_tail = 0;
 }
@@ -259,6 +260,8 @@ static int mp_update(const Uint8 *keyboard, int keyboard_claim, int focused, int
             if (pad->edge[CONTROL_QUICKSAVE]) *do_save = 1;
             if (pad->edge[CONTROL_QUICKLOAD]) *do_load = 1;
             if (pad->edge[CONTROL_QUIT]) *running = 0;
+            if (g_mp_campaign && p==g_mp_ui_player && g_inventory_menu_active
+                && pad->edge[CONTROL_CLOSE_INVENTORY]) g_inventory_close_request=1;
             if (g_mp_campaign && p==g_mp_ui_player && g_mp_context==MP_CAM_MAP
                 && !g_in_inventory && g_map_live && (g_cur_frame-g_map_live)<3) {
                 if (pad->edge[CONTROL_INVENTORY]) g_inv_request=1;

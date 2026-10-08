@@ -31,7 +31,10 @@ overland	framesha	moonstone_prebug_backup.sav	0	66646f883aac4567
 # to the frozen old EXE reproduces its complete pictures/audio and gameplay RAM;
 # --nocursorrng restores all three previous hashes exactly. See check_cursor_rng.py
 # and notes-handoff/moonstone-rng.md. Parity-off goldens remain unchanged.
-combatrunP	p+savefnv	moonstone_combatrun.sav	600	737fa07f
+# Oct7 CON/END limit mapping: six inventory bytes change (the two captions,
+# plus each cached hotspot's label pointer and action). All 600 rendered frames
+# and audio match the prior build; --nostatcapfix restores all RAM exactly.
+combatrunP	p+savefnv	moonstone_combatrun.sav	600	4be95d83
 vanishrunP	p+savefnv	moonstone_bug.sav	600	81b317c7
 # Sep23 restored city Exit click: only native audio state changes (channel
 # selector at 3aa7a and channel record at 43068). 340 paired town captures match;

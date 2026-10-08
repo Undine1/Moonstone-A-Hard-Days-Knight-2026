@@ -26,11 +26,10 @@ with local multiplayer. No external emulator or Kickstart ROM required.
 | Attack / select | Ctrl / Enter | A |
 | Pass turn | E | Back / Select |
 | Open inventory | I / Space | Y |
+| Close inventory | X | B |
 | Pause combat | Space | Start |
 | Quicksave / quickload | F5 / F9 | Use keyboard |
 | Toggle fullscreen | F11 | Use keyboard |
-
-**Esc** leaves fullscreen; in windowed mode it quits the game.
 
 Check [controls.ini](recomp/controls.ini) for all bindings and detailed setup.
 

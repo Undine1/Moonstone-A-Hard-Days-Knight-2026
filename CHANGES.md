@@ -1,6 +1,17 @@
 # Moonstone 2026 — Changes from the 1991 Amiga game
 
-_Last updated: 2026-10-03._
+_Last updated: 2026-10-08._
+
+## v1.4.2
+
+- Fixed incorrect inventory stat numbers after certain messages, such as
+  Constitution displaying as 257 instead of 1.
+- Restored the inventory exit shortcut: **X** on keyboard or **B** on controller,
+  configurable in `controls.ini`.
+- Restored retail inventory transitions for Acquisition and Wyrm scrolls.
+- Restored retail Constitution/Endurance upgrade checks: each stat uses its
+  own limit of 5. Existing stats above 5 are preserved but cannot be upgraded
+  further.
 
 ## v1.4.1
 

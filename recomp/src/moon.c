@@ -47,7 +47,7 @@
 
 /* Project identity / attribution.  Printed at startup (to the log) and via
  * --version; also serves as the binary's attribution string. */
-#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.4.1 - " \
+#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.4.2 - " \
     "no-emulator port of the Amiga 1991 original - (C) 2026 Undine1, " \
     "github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026 - GPL-3.0"
 /* Compile timestamp, shown in the window title + log so it's unambiguous WHICH
@@ -121,6 +121,8 @@ static int mp_practice_snapshot(void);
 static int mp_pad_count(void);
 static int g_kdigit = 0;        /* SDL number key 1-9 held (1..9), else 0 (menu selection) */
 static int g_inv_request = 0;   /* host pressed the configured inventory action; injected at the map poll */
+static int g_inventory_menu_active = 0; /* native inventory loop, including loot/Stonehenge */
+static int g_inventory_close_request = 0; /* fresh owned-device press; never saved */
 static int g_in_inventory = 0;  /* 1 while the inventory screen is open (so the open-key can't re-open it in a loop) */
 static int g_rest_request = 0;  /* host pressed configured REST/skip-turn; injects scancode 0x12 ('E') at the map poll */
 static int g_rest_pending = 0;  /* 1 for the one poll AFTER injecting 'E', to re-clear [0x3bf74] so one press = exactly one skipped turn */
@@ -1444,6 +1446,7 @@ typedef enum {
     CONTROL_FIRE, CONTROL_INVENTORY, CONTROL_PAUSE, CONTROL_END_TURN,
     CONTROL_ABANDON_QUEST, CONTROL_SHOW_VERSION, CONTROL_QUIT,
     CONTROL_QUICKSAVE, CONTROL_QUICKLOAD, CONTROL_SKIP_INTRO,
+    CONTROL_CLOSE_INVENTORY,
     CONTROL_COUNT
 } ControlAction;
 typedef enum { CONTROL_PAD_BUTTON = 0, CONTROL_PAD_AXIS = 1 } ControlPadKind;
@@ -1462,7 +1465,7 @@ static ControlBinding g_controls[CONTROL_COUNT];
 static const char *g_control_names[CONTROL_COUNT] = {
     "up", "down", "left", "right", "attack_select", "inventory", "pause",
     "end_turn", "abandon_quest", "show_version", "quit", "quicksave",
-    "quickload", "skip_intro"
+    "quickload", "skip_intro", "close_inventory"
 };
 
 static void control_add_key(ControlAction action, SDL_Scancode key) {
@@ -1490,6 +1493,7 @@ static void controls_set_defaults(void) {
     CONTROL_DEFAULT_KEY(CONTROL_FIRE, SDLK_KP_ENTER);
     CONTROL_DEFAULT_KEY(CONTROL_INVENTORY, SDLK_SPACE);
     CONTROL_DEFAULT_KEY(CONTROL_INVENTORY, SDLK_i);
+    CONTROL_DEFAULT_KEY(CONTROL_CLOSE_INVENTORY, SDLK_x);
     CONTROL_DEFAULT_KEY(CONTROL_PAUSE, SDLK_SPACE);
     CONTROL_DEFAULT_KEY(CONTROL_END_TURN, SDLK_e);
     CONTROL_DEFAULT_KEY(CONTROL_ABANDON_QUEST, SDLK_q);
@@ -1517,6 +1521,7 @@ static void controls_set_defaults(void) {
     control_add_pad(CONTROL_FIRE, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 0);
     control_add_pad(CONTROL_FIRE, CONTROL_PAD_AXIS, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, +1);
     control_add_pad(CONTROL_INVENTORY, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_Y, 0);
+    control_add_pad(CONTROL_CLOSE_INVENTORY, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_B, 0);
     control_add_pad(CONTROL_PAUSE, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_START, 0);
     control_add_pad(CONTROL_END_TURN, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_BACK, 0);
     control_add_pad(CONTROL_SKIP_INTRO, CONTROL_PAD_BUTTON, SDL_CONTROLLER_BUTTON_A, 0);
@@ -3799,6 +3804,8 @@ static int g_lair_setup_fix = 1;  /* --nolairsetupfix: A/B the three retail init
 static int g_ai_xp_fix = 1;       /* --noaixpfix: A/B periodic AI XP and native victory XP */
 static int g_life_icons_fix = 1;  /* --nolifeiconsfix: A/B negative-lives display only */
 static int g_danu_fix = 1;       /* --nodanufix: A/B Stonehenge offering routing */
+static int g_stat_cap_fix = 1;   /* --nostatcapfix: A/B retail's CON/END menu mapping */
+static int g_stat_display_fix = 1; /* --nostatdisplayfix: isolate byte-sized stat formatting */
 static uint8_t g_lair_xp_awarded[24]; /* retail node+14 words; shared by all players, save v5 */
 
 /* The earlier node records are 20 bytes, retail's are 22. Keep the extra word
@@ -4149,13 +4156,123 @@ static void danu_hook(uint32_t pc) {
     }
 }
 
+/* Retail's stat entries follow the actor fields: STR(+46), CON(+47), END(+48).
+ * The earlier builder assigns CON action8 and END action4, so each button uses
+ * the other stat's eligibility entry. Correct the hotspot, not the stat or
+ * XP routine. The same correction on hover/click covers already drawn saves;
+ * guest instruction bytes and unrelated menus remain unchanged. */
+static uint32_t stat_cap_hotspot(uint32_t hotspot) {
+    if (!hotspot || (hotspot & 1u) || hotspot > RAM_SIZE - 0x18u) return 0;
+    unsigned field = r16(hotspot + 0x16u), kind = r16(hotspot + 0x14u);
+    if (field != 0x47u && field != 0x48u) return 0;
+    if (kind != 3u && !(kind == 12u && g_danu_fix && r32(0x2fb1cu) == 3u)) return 0;
+    uint32_t action = r32(hotspot + 0x10u), label = r32(hotspot + 8u), table;
+    if (action != 4u && action != 8u) return 0;
+    if (label == 0x2fe52u || label == 0x2fe60u) table = 0x2fe44u;
+    else if (label == 0x2ffccu || label == 0x2ffdau) table = 0x2ffbeu;
+    else return 0;
+    unsigned index = field - 0x46u;
+    uint32_t entry = table + index * 14u, caption = r32(entry);
+    /* Retail reorders the ordinary and "Increase ..." text vectors too.
+     * Preserve other scene captions (e.g. Stonehenge's blank invalid offers). */
+    if (caption == 0x395b5u || caption == 0x395bfu)
+        w32(entry, field == 0x47u ? 0x395bfu : 0x395b5u);
+    else if (caption == 0x39583u || caption == 0x39596u)
+        w32(entry, field == 0x47u ? 0x39596u : 0x39583u);
+    w32(hotspot + 0x10u, index * 4u);
+    w32(hotspot + 8u, entry);
+    return table;
+}
+static void stat_cap_hook(uint32_t pc) {
+    if (pc != 0x2c92eu && pc != 0x2a564u && pc != 0x2d0c2u && pc != 0x2d0e6u) return;
+    if (!g_os || !g_retail_parity || !g_stat_cap_fix || g_lineage != LIN_CRACKED
+        || r16(0x2c0eau) != 0x23fcu || r32(0x2c0ecu) != 4u || r32(0x2c0f0u) != 0x2faf8u
+        || r16(0x2c136u) != 0x23fcu || r32(0x2c138u) != 8u || r32(0x2c13cu) != 0x2faf8u) return;
+    if (pc == 0x2c92eu && r16(pc) == 0x4eb9u && r32(pc + 2u) == 0x2a480u) {
+        stat_cap_hotspot(m68k_get_reg(NULL, M68K_REG_A1));
+    } else if (pc == 0x2a564u && r32(pc) == 0x2f082068u && r16(pc + 4u) == 8u) {
+        stat_cap_hotspot(m68k_get_reg(NULL, M68K_REG_A0));
+    } else if ((pc == 0x2d0c2u && r32(pc) == 0x08000006u)
+               || (pc == 0x2d0e6u && r32(pc) == 0x06300001u && r16(pc + 4u) == 0x1000u)) {
+        uint32_t hotspot = m68k_get_reg(NULL, M68K_REG_A2);
+        uint32_t table = stat_cap_hotspot(hotspot);
+        if (!table) return;
+        if (pc == 0x2d0c2u) {
+            /* D0 may already contain the old entry's flags in a mid-click save.
+             * Let the original BTST/branch and transaction use the right entry. */
+            uint32_t flags = m68k_get_reg(NULL, M68K_REG_D0);
+            flags = (flags & ~0x40u) | (r16(r32(hotspot + 8u) + 8u) & 0x40u);
+            m68k_set_reg(M68K_REG_D0, flags);
+        } else if (table == 0x2fe44u) {
+            /* An older save may be past that branch, inside the click sound.
+             * Reject an invalid purchase BEFORE either stat or XP is changed.
+             * Never recheck after the increment: reaching5 is a valid purchase. */
+            uint32_t actor = r32(0x2fb08u);
+            unsigned field = r16(hotspot + 0x16u);
+            if (actor && !(actor & 1u) && actor <= RAM_SIZE - 0x84u
+                && m68k_get_reg(NULL, M68K_REG_A0) == actor
+                && (m68k_get_reg(NULL, M68K_REG_D1) & 0xffffu) == field
+                && (r8(actor + field) >= 5u || (int16_t)r16(actor + 0x4eu) < (int16_t)r16(0x30528u)))
+                m68k_set_reg(M68K_REG_PC, 0x2d15cu);
+        }
+    }
+}
+
+/* Both original editions load only a byte for STR/CON/END, then pass all of
+ * D0 to the decimal formatter. The preceding text renderer returns a cached
+ * line width: a width of256 makes CON1 print as257. Zero-extend only this
+ * stat argument at its native call site, including old saves just before the
+ * call. Other numeric fields and the shared text/number routines are intact.
+ * This repairs an inherited retail bug; it is independent of parity mode. */
+static void stat_display_hook(uint32_t pc) {
+    if (pc != 0x2c24eu && pc != 0x2c146u) return;
+    if (!g_os || !g_stat_display_fix
+        || (g_lineage != LIN_CRACKED && g_lineage != LIN_RETAIL)) return;
+    unsigned retail = g_lineage == LIN_RETAIL;
+    if (pc != (retail ? 0x2c146u : 0x2c24eu)
+        || r32(pc - 20u) != 0x10301000u  /* move.b (a0,d1.w),d0 */
+        || r16(pc) != 0x4eb9u || r32(pc + 2u) != (retail ? 0x2a286u : 0x2a3cau)) return;
+    m68k_set_reg(M68K_REG_D0, m68k_get_reg(NULL, M68K_REG_D0) & 0xffu);
+}
+
 #include "numbered_menu.h"
 #include "multiplayer_campaign.h"
+#include "inventory_flow.h"
+
+/* Retail X bypasses pointer selection and takes the normal inventory cleanup.
+ * Apply the configurable host action at that same boundary. Do not synthesize
+ * a click: it could buy/use whichever item the cursor currently highlights.
+ * Native cleanup retains cursor-task safety and pending Wyrm-scroll handling.
+ * This scope includes loot and offerings; g_in_inventory covers map entry only. */
+static void inventory_close_hook(unsigned pc) {
+    if (!g_os || (g_lineage != LIN_CRACKED && g_lineage != LIN_RETAIL)) return;
+    unsigned entry = mp_addr(0x2bbec,0x2bac4);
+    unsigned loop = mp_addr(0x2bc30,0x2bb0a);
+    unsigned cleanup = mp_addr(0x2bc6c,0x2bb64);
+    if (pc == entry || pc == cleanup) {
+        g_inventory_menu_active = g_inventory_close_request = 0;
+    } else if (pc == loop
+        && r16(pc) == (g_lineage == LIN_RETAIL ? 0x3039u : 0x7000u)
+        && r16(cleanup) == 0x4eb9u
+        && r32(cleanup+2) == mp_addr(0x29b26,0x299da)
+        && (g_lineage == LIN_RETAIL ? r32(cleanup+6) == 0x61001856u
+            : r16(cleanup+6) == 0x4eb9u && r32(cleanup+8) == 0x2d5f4u)) {
+        g_inventory_menu_active = 1;
+        if (g_inventory_close_request) {
+            g_inventory_menu_active = g_inventory_close_request = 0;
+            m68k_set_reg(M68K_REG_PC, cleanup);
+        }
+    }
+}
 
 void moon_instr_hook(unsigned int pc) {
     int sfx_resumed = retail_sfx_resume(pc);
     mp_campaign_hook(pc);
+    inventory_flow_hook(pc);
+    inventory_close_hook(pc);
     danu_hook(pc);
+    stat_cap_hook(pc);
+    stat_display_hook(pc);
     cursor_rng_hook(pc);
     /* The human fighter's input selector uses JOY0 for player two (selector 1).
      * Practice explicitly assigns the green knight to that port in both disk
@@ -7806,6 +7923,7 @@ static int run_sdl(int scale) {
             else if (e.type == SDL_WINDOWEVENT && e.window.windowID == SDL_GetWindowID(win)) {
                 if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
                     mp_focused = 0;
+                    g_inventory_close_request = 0;
                     m_fire = m_rmb = 0;
                     if (mp_active()) mp_clear_host_input();
                 } else if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) mp_focused = 1;
@@ -7868,6 +7986,8 @@ static int run_sdl(int scale) {
                     if (control_key_matches(CONTROL_QUIT, sc)) running = 0;
                     if (control_key_matches(CONTROL_QUICKSAVE, sc)) do_save = 1;
                     if (control_key_matches(CONTROL_QUICKLOAD, sc)) do_load = 1;
+                    if (mp_focused && mp_keyboard_gameplay() && g_inventory_menu_active
+                        && control_key_matches(CONTROL_CLOSE_INVENTORY, sc)) g_inventory_close_request = 1;
                     if (mp_keyboard_gameplay() && control_key_matches(CONTROL_INVENTORY, sc) && !g_blt_busy_scope && !g_in_inventory
                         && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
                     if (control_key_matches(CONTROL_PAUSE, sc) && !g_blt_busy_scope
@@ -7929,6 +8049,7 @@ static int run_sdl(int scale) {
         if (pad_edge[CONTROL_QUIT]) running = 0;
         if (pad_edge[CONTROL_QUICKSAVE]) do_save = 1;
         if (pad_edge[CONTROL_QUICKLOAD]) do_load = 1;
+        if (pad_edge[CONTROL_CLOSE_INVENTORY] && g_inventory_menu_active) g_inventory_close_request = 1;
         if (pad_edge[CONTROL_INVENTORY]
             && !g_blt_busy_scope && !g_in_inventory && g_map_live && (g_cur_frame - g_map_live) < 3) g_inv_request = 1;
         if (pad_edge[CONTROL_PAUSE]
@@ -8865,9 +8986,10 @@ static const int SAVE_REGS[] = {
  *   2. RESET ON LOAD: reconstructable protocol gates -> paula_sidecar_reset()
  *      (adding to the blob would break save-version compat).
  *   3. HOST-INPUT state (the g_rest_, g_inv_, g_pause_ families, plus
- *      g_popup_injected / keyq / g_numbered): scoped by liveness stamps
+ *      g_popup_injected / keyq / g_numbered / g_inventory_close_request): scoped by liveness stamps
  *      (g_map_live, g_combat_pause_live) with scene-change retracts -- self-healing
- *      across loads, keep it that way.
+ *      across loads, keep it that way. Inventory-close scope/request reset on
+ *      load and native entry/cleanup; the next native poll restores the scope.
  *   4. DIAG-ONLY (watch counters, log dedup state): stale values only cost log
  *      noise; never let one feed an emulation decision.
  * Known benign exceptions (audited): g_snd_loaded (cold load -> guard disarmed
@@ -9109,6 +9231,7 @@ static int load_state(const char *path) {
         g_loadbuf = staged_stream;
         staged_stream = NULL;
         gameplay_watches_reset(g_snd_loaded); /* warm F9 stays armed; cold --loadstate waits for dispatcher */
+        g_inventory_menu_active = g_inventory_close_request = 0;
         if (g_sdl_mode || g_mp_script) {
             int campaign=g_mp_campaign;
             mp_campaign_clear();
@@ -9258,6 +9381,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--bootboost")&&i+1<argc) g_bootboost=atoi(argv[++i]); /* boot loader CPU boost (1=authentic) */
         else if (!strcmp(argv[i],"--nogoldfix")) g_gold_fix=0;   /* A/B: restore the cracked-build knife-restock gold corruption */
         else if (!strcmp(argv[i],"--noretailparity")) g_retail_parity=0;   /* A/B: disable the retail-parity data/code patches (keeps the cracked-baseline behaviour + goldens) */
+        else if (!strcmp(argv[i],"--nostatcapfix")) g_stat_cap_fix=0;
+        else if (!strcmp(argv[i],"--nostatdisplayfix")) g_stat_display_fix=0;
         else if (!strcmp(argv[i],"--noratspawnfix")) g_rat_spawn_fix=0;   /* A/B: retain recycled rats' stale jump/grapple state */
         else if (!strcmp(argv[i],"--nomanualarmorfix")) g_manual_armor_fix=0; /* A/B: retain the earlier manual armor loot routine */
         else if (!strcmp(argv[i],"--noswordfix")) g_sword_fix=0;
@@ -9272,6 +9397,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--nokofix")) g_ko_fix=0;
         else if (!strcmp(argv[i],"--noretailsfx")) g_retail_sfx=0;   /* A/B: disable the B15 retail UI-feedback-sound sites (parity stays otherwise on) */
         else if (!strcmp(argv[i],"--nocursorrng")) g_cursor_rng_fix=0; /* A/B: suppress the B15 menu RNG tick */
+        else if (!strcmp(argv[i],"--noinventoryflow")) g_inventory_flow=0; /* A/B: earlier nested scroll menus */
         else if (!strcmp(argv[i],"--norngseedfix")) g_rngseed_fix=0;     /* A/B: keep the deterministic RNG seeding (same loot every run) */        /* A/B: disable the canopy-choke off-screen-haul fix (0x272a8) */
         else if (!strcmp(argv[i],"--trumpetmode")&&i+1<argc) g_trumpetmode=atoi(argv[++i]);  /* 0=off 1=mute-echo 2=unison (intro trumpet diag) */
         else if (!strcmp(argv[i],"--lpf")&&i+1<argc) { double fc=atof(argv[++i]); g_lpf_a = fc>0.0 ? (int)(65536.0/(44100.0/(6.2831853*fc)+1.0)+0.5) : 0; }  /* Amiga output RC filter cutoff Hz (0=off) */
