@@ -9,9 +9,7 @@ static int saved_marker=0x42;
 static const char *mode, *expected, *other_fixture, *initial_fixture, *result_path;
 static const Uint8 *profile_keyboard(int *n) { if(n) *n=SDL_NUM_SCANCODES; return keys; }
 static SDL_bool no_controllers(int index) { (void)index; return SDL_FALSE; }
-static SDL_Window *hidden_window(const char *t,int x,int y,int w,int h,Uint32 f) {
-    return SDL_CreateWindow(t,x,y,w,h,f|SDL_WINDOW_HIDDEN);
-}
+static SDL_Window *hidden_window(const char *t,int x,int y,int w,int h,Uint32 f);
 static void present(SDL_Renderer *ren);
 static void title(SDL_Window *win,const char *text);
 #define SDL_GetKeyboardState profile_keyboard
@@ -28,6 +26,15 @@ static void title(SDL_Window *win,const char *text);
 #undef SDL_IsGameController
 #undef SDL_GetKeyboardState
 #define CHECK(x) do { if(!(x)) { fprintf(stderr,"FAIL frame %d line %d: %s\n",presents,__LINE__,#x); exit(2); } } while(0)
+static SDL_Window *hidden_window(const char *t,int x,int y,int w,int h,Uint32 f) {
+#if !MOON_DEVELOPER
+    /* Test-owned fixture loading; the public engine has no --loadstate switch. */
+    g_bootphase=0; g_sdl_mode=0;
+    CHECK(initial_fixture && load_state(initial_fixture));
+    g_sdl_mode=1;
+#endif
+    return SDL_CreateWindow(t,x,y,w,h,f|SDL_WINDOW_HIDDEN);
+}
 #ifdef _WIN32
 static HANDLE locked = INVALID_HANDLE_VALUE;
 #endif
@@ -108,7 +115,16 @@ int main(int argc,char **argv) {
         else if(!strcmp(argv[i],"--probe-result") && i+1<argc) result_path=argv[++i];
     }
     if(!log || !mode || !expected || !initial_fixture || !result_path) return 2;
-    int rc=moonstone_main(argc,argv);
+    char **engine_argv=calloc((size_t)argc+1,sizeof(char *)); CHECK(engine_argv);
+    int engine_argc=0;
+    for(int i=0;i<argc;i++) {
+        if(!strncmp(argv[i],"--probe-",8)) { i++; continue; }
+#if !MOON_DEVELOPER
+        if(!strcmp(argv[i],"--loadstate")) { i++; continue; }
+#endif
+        engine_argv[engine_argc++]=argv[i];
+    }
+    int rc=moonstone_main(engine_argc,engine_argv); free(engine_argv);
     CHECK(rc==0 && presents==26);
     FILE *out=fopen(result_path,"w"); CHECK(out);
     fprintf(out,"PASS %s %s: saves=%d loads=%d failures=%d\n",expected,mode,saved,loaded,failed);

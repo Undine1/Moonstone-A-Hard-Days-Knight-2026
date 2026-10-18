@@ -7,7 +7,6 @@ typedef struct {
     int start, start_edge, solo, solo_edge;
 } MpPad;
 static MpPad g_mp_pads[MP_MAX_PADS];
-static SDL_JoystickID g_primary_pad = MP_NONE;
 static void host_draw_text(SDL_Renderer *, const char *, int, int);
 static void controller_notice_show(ControllerNotice *, SDL_GameController *);
 
@@ -30,6 +29,7 @@ static void mp_try_begin_practice(void) {
 }
 static void controller_set_primary(SDL_JoystickID id, const char *reason) {
     if (g_primary_pad == id) return;
+    tavern_input_reset();
     g_primary_pad = id;
     MpPad *pad = mp_pad(id);
     const char *name = pad ? SDL_GameControllerName(pad->handle) : NULL;
@@ -139,6 +139,7 @@ static uint16_t mp_action_word(const int *down) {
            | (down[CONTROL_FIRE] ? 16 : 0));
 }
 static void mp_clear_host_input(void) {
+    tavern_input_reset();
     memset(g_mp_input,0,sizeof(g_mp_input));
     g_ji_up = g_ji_dn = g_ji_lf = g_ji_rt = g_fire = g_fire2 = 0;
     g_mouse_dx = g_mouse_dy = g_rmb = g_kdigit = 0;

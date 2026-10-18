@@ -34,6 +34,7 @@
 #endif
 #include "m68k.h"
 #include "loader.h"
+#include "build_profile.h"
 #include "multiplayer.h"
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
@@ -42,18 +43,18 @@
 #endif
 #include "moon_icon.h"   /* embedded credit-scene moon, set as the SDL window/taskbar icon */
 #include "splash_image.h" /* embedded boot splash, shown during the black disk-load */
-#include "qoi_dec.h"      /* ~60-line QOI decoder for the splash (no external image lib) */
+_Static_assert(sizeof(splash_rgb) == SPLASH_W*SPLASH_H*3, "Boot splash must contain complete RGB24 pixels");
 #define SPLASH_BOOT_NZ 2000  /* nonzero display bytes that mean "intro is up" -> hand off the splash */
 
 /* Project identity / attribution.  Printed at startup (to the log) and via
  * --version; also serves as the binary's attribution string. */
-#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.4.2 - " \
+#define MOON_ATTRIB "Moonstone: A Hard Days Knight (2026 native port) v1.5 - " \
     "no-emulator port of the Amiga 1991 original - (C) 2026 Undine1, " \
     "github.com/Undine1/Moonstone-A-Hard-Days-Knight-2026 - GPL-3.0"
 /* Compile timestamp, shown in the window title + log so it's unambiguous WHICH
  * build is actually running (no more "did my change take effect?" guesswork). */
 #define MOON_BUILD (__DATE__ " " __TIME__)
-#define MOON_REVISION "v1.4 - 2026 revision - Undine"
+#define MOON_REVISION "v1.5 - 2026 revision - Undine"
 
 /* Directory containing the executable (filled in main() from the OS), used to
  * resolve the player-supplied `data/` folder so the game runs by double-click
@@ -115,6 +116,7 @@ static MpSession g_mp = {MP_OFF, 0, {MP_NONE, MP_NONE}, 0};
 static int g_mp_practice;        /* original Practice entry, cleared at original menu */
 static int g_mp_script;          /* opt-in second-player headless replay */
 static uint16_t g_mp_input[MP_MAX_PLAYERS]; /* original action words per logical player */
+static SDL_JoystickID g_primary_pad = MP_NONE;
 static void mp_clear_host_input(void); /* host-only transient input, never guest RAM */
 static void mp_begin_practice(void);
 static int mp_practice_snapshot(void);
@@ -169,8 +171,9 @@ static double   g_dbg_coh = 0.0;        /* diag: last scene-9 delivery-window bi
  * fire-wait, then starts the next overland-map palette tween at 0x413b8 in the common
  * cracked build.  Original footage enters this transition through black and never exposes
  * the map under the reward palette; the native capture otherwise does so for about 30
- * frames.  Bracket that one tween by guest PCs/state rather than by image heuristics. */
-static int g_guardian_return_fade = 0;  /* 0=idle, 1=reward dismissed, 2=map tween started */
+ * frames.  The map redraw after 0x4014e also overwrites the displayed reward buffer
+ * BEFORE that tween starts. Bracket the redraw and tween by guest PCs/state. */
+static int g_guardian_return_fade = 0;  /* 0=idle, 1=reward dismissed, 2=tween, 3=map redraw */
 static int g_guardian_fade_seen = 0;    /* [0x417b4] has gone nonzero since the map tween started */
 static int g_guardian_fade_deadline = -1; /* bounded failsafe in displayed frames */
 
@@ -650,6 +653,7 @@ static inline void blt_setptr(uint32_t hi_off, uint32_t p) {
 }
 
 static void blitter_line(void);   /* fwd */
+static int mudman_spawn_blit_hidden(void);
 
 static void blitter_run(void) {
     uint16_t con0 = g_custom[0x040>>1];
@@ -690,6 +694,7 @@ static void blitter_run(void) {
     int16_t  dmod = (int16_t)g_custom[0x066>>1];
 
     int step = desc ? -2 : 2;
+    int hide_spawn = mudman_spawn_blit_hidden();
 
     if (g_bltlog && g_log && g_icount>=g_bltlog_from && g_icount<=g_bltlog_to)
         fprintf(g_log, "BLIT ic=%llu con0=%04x con1=%04x %dx%d A=%06x B=%06x C=%06x D=%06x amod=%d cmod=%d dmod=%d pc=%06x\n",
@@ -791,7 +796,7 @@ static void blitter_run(void) {
                 d = out;
             }
 
-            if (used) blt_w16(dpt, d);
+            if (used && !hide_spawn) blt_w16(dpt, d);
             bzero |= d;
 
             /* advance pointers one word */
@@ -2094,7 +2099,7 @@ static void paula_tick_one(int ch) {
          * = the "death sound twice" doubling.  A correctly-silenced one-shot reloads
          * len<=1; long music leads are excluded by the <3000-word SFX gate.  Logs the
          * sample + ic so the operator's "I heard a double" can be pinned.  In-game; capped. */
-        if (c->len > 1 && (int)c->len == g_play_len0[ch] && c->loc == g_play_loc0[ch] &&
+        if (MOON_DEVELOPER && c->len > 1 && (int)c->len == g_play_len0[ch] && c->loc == g_play_loc0[ch] &&
             c->loc >= 0x080000 && c->loc < 0x0a0000 &&   /* SFX bank only (not music / low-RAM loops) */
             g_play_len0[ch] > 16 && g_play_len0[ch] < 3000 &&
             g_os && !g_blt_busy_scope && g_log && g_double_n < 400) {
@@ -2111,7 +2116,7 @@ static void paula_tick_one(int ch) {
          * throttled (~1s) so a continuous loop doesn't spam; bounded. */
         {
             uint32_t vol = g_custom[(0x0a8 + ch*0x10)>>1] & 0x7f;
-            if (vol >= 48 && c->len >= 0x0800 && g_os && !g_blt_busy_scope && g_log &&
+            if (MOON_DEVELOPER && vol >= 48 && c->len >= 0x0800 && g_os && !g_blt_busy_scope && g_log &&
                 g_screechrel_n < 300 && (g_icount - g_lastscreech_ic[ch]) > 500000ull) {
                 uint32_t per = g_custom[(0x0a6 + ch*0x10)>>1];
                 fprintf(g_log, "SCREECH-RELOAD AUD%d loc=%06x len=%u per=%u vol=%u ic=%llu\n",
@@ -2129,7 +2134,7 @@ static void paula_tick_one(int ch) {
          * identical loc=00c2a4 lines).  A distinct loc still logs immediately. */
         {
             uint32_t vol = g_custom[(0x0a8 + ch*0x10)>>1] & 0x7f;
-            if (g_log && g_os && !g_blt_busy_scope && g_audtrace_n < 6000
+            if (MOON_DEVELOPER && g_log && g_os && !g_blt_busy_scope && g_audtrace_n < 6000
                 && vol >= 24 && c->loc != g_audtrace_loc[ch]) {
                 uint32_t per = g_custom[(0x0a6 + ch*0x10)>>1];
                 fprintf(g_log, "AUDTRACE-RL AUD%d loc=%06x len=%u per=%u vol=%u ic=%llu\n",
@@ -2145,7 +2150,7 @@ static void paula_tick_one(int ch) {
      * IFF 'FORM' header is reading sample-bank HEADER bytes as audio = the "memory-
      * error" screech the operator hears.  Log it (throttled, deduped) with the
      * offending channel / pointer / length / PC so the cause can be pinned. */
-    if (c->enabled && c->wordhalf == 0 && g_log
+    if (MOON_DEVELOPER && c->enabled && c->wordhalf == 0 && g_log
         && g_ram[a]==0x46 && g_ram[(a+1u)&(RAM_SIZE-1u)]==0x4F
         && g_ram[(a+2u)&(RAM_SIZE-1u)]==0x52 && g_ram[(a+3u)&(RAM_SIZE-1u)]==0x4D) {
         static int over_n = 0; static uint32_t over_last = 0;
@@ -2275,7 +2280,7 @@ static void paula_update_dma(void) {
              * vol>=48 AND len>=0x1000 words (~1s) so normal short SFX / short music
              * loops are excluded.  Logs the sample + the PC that triggered the enable
              * (tells music-sequencer vs SFX path) so the next occurrence is captured. */
-            if (g_log && g_os && !g_blt_busy_scope && g_screech_n < 400) {
+            if (MOON_DEVELOPER && g_log && g_os && !g_blt_busy_scope && g_screech_n < 400) {
                 uint32_t b   = 0x0a0 + ch*0x10;
                 uint32_t loc = (((uint32_t)g_custom[b>>1]<<16)|g_custom[(b+2)>>1])&(RAM_SIZE-2);
                 uint32_t len = g_custom[(b+4)>>1], per = g_custom[(b+6)>>1];
@@ -2314,7 +2319,7 @@ static void paula_update_dma(void) {
             }
             /* COMBAT AUDIO TRACE (enable edge) -- see g_audtrace_* decl. Catches the
              * short/pitched combat screech that SCREECH-WATCH's len>=0x800 gate misses. */
-            if (g_log && g_os && !g_blt_busy_scope && g_audtrace_n < 6000) {
+            if (MOON_DEVELOPER && g_log && g_os && !g_blt_busy_scope && g_audtrace_n < 6000) {
                 uint32_t b   = 0x0a0 + ch*0x10;
                 uint32_t loc = (((uint32_t)g_custom[b>>1]<<16)|g_custom[(b+2)>>1])&(RAM_SIZE-2);
                 uint32_t len = g_custom[(b+4)>>1], per = g_custom[(b+6)>>1];
@@ -2332,7 +2337,7 @@ static void paula_update_dma(void) {
              * ~0.6s (on this or another voice) = the game re-fired it = a perceived
              * "double" that is NOT the reload-replay class (which the guard handles).
              * Distinguishes a game re-fire from a reload double.  In-game; SFX bank only. */
-            if (g_log && g_os && !g_blt_busy_scope) {
+            if (MOON_DEVELOPER && g_log && g_os && !g_blt_busy_scope) {
                 uint32_t loc = g_paula[ch].loc;
                 if (loc >= 0x080000 && loc < 0x0a0000) {
                     for (int k = 0; k < 8; k++) {
@@ -2358,7 +2363,7 @@ static void paula_update_dma(void) {
              * g_first_pass excludes normal completions (which end via underflow ->
              * silent loop) and looping music (which has underflowed at least once).
              * In-game only; logs sample/length/how-much-was-left/PC; bounded. */
-            if (g_first_pass[ch] && g_play_len0[ch] > 16 &&
+            if (MOON_DEVELOPER && g_first_pass[ch] && g_play_len0[ch] > 16 &&
                 (int)g_paula[ch].len > g_play_len0[ch]/4 &&
                 g_os && !g_blt_busy_scope && g_log && g_cutoff_n < 400) {
                 int total = g_play_len0[ch], rem = (int)g_paula[ch].len;
@@ -2436,7 +2441,7 @@ static void paula_generate(int16_t *out, int nframes) {
                 samp = ((int32_t)c->sample * (int32_t)(0x10000u - c->acc) + (int32_t)s_next * (int32_t)c->acc) >> 16;
             }
             /* --- BEEP-OUT detector (see g_beepout_* decl): zero-crossing pitch estimate --- */
-            if (g_log && g_os && !g_blt_busy_scope && vol >= 24) {
+            if (MOON_DEVELOPER && g_log && g_os && !g_blt_busy_scope && vol >= 24) {
                 if (samp > 4)      { if (g_bo_prevsign[ch] < 0) g_bo_cross[ch]++; g_bo_prevsign[ch] = 1; }
                 else if (samp < -4){ if (g_bo_prevsign[ch] > 0) g_bo_cross[ch]++; g_bo_prevsign[ch] = -1; }
                 if (++g_bo_win[ch] >= 220) {            /* ~5ms @44100 */
@@ -2558,6 +2563,7 @@ static int32_t  g_a_min = 0, g_a_max = 0;
 static uint64_t g_a_nonzero = 0, g_a_total = 0;
 static double   g_a_sumsq = 0.0;
 
+#if MOON_DEVELOPER
 static void wav_write_header(FILE *f, uint32_t data_bytes) {
     uint32_t srate = HOST_RATE, brate = HOST_RATE*2*2;
     uint16_t chans = 2, bits = 16, balign = 4;
@@ -2567,6 +2573,7 @@ static void wav_write_header(FILE *f, uint32_t data_bytes) {
     fwrite(&srate,4,1,f); fwrite(&brate,4,1,f); fwrite(&balign,2,1,f); fwrite(&bits,2,1,f);
     fwrite("data",1,4,f); fwrite(&data_bytes,4,1,f);
 }
+#endif
 
 /* Base window title (set in run_sdl); used to restore the title after a [REC] tag. */
 static char g_wintitle[160] = "Moonstone (native)";
@@ -2575,6 +2582,7 @@ static char g_wintitle[160] = "Moonstone (native)";
  * exe so the operator can record an exact glitch and hand back the real waveform
  * (closes the "I can't hear it" gap for audio debugging).  Reuses the g_wav sink
  * that audio_flush() already writes each frame. */
+#if MOON_DEVELOPER
 static void toggle_record(SDL_Window *win) {
     static int n = 0;
     static int saved_audlog = 0;
@@ -2610,6 +2618,8 @@ static void toggle_record(SDL_Window *win) {
         }
     }
 }
+
+#endif
 
 /* Per-frame sample buffer + how many of this frame's 882 samples are already
  * generated.  Audio is generated INCREMENTALLY, interleaved with the CPU bursts
@@ -2753,7 +2763,9 @@ static void audio_flush(void) {
         g_a_sumsq += (double)s * (double)s;
         g_a_total++;
     }
+#if MOON_DEVELOPER
     if (g_wav) { fwrite(buf, sizeof(int16_t), SMP_PER_FRAME*2, g_wav); g_wav_bytes += SMP_PER_FRAME*2*sizeof(int16_t); }
+#endif
     if (g_audio_dev && !g_audio_mute) {
         const Uint32 frame_bytes = (Uint32)(SMP_PER_FRAME*2*sizeof(int16_t));
         /* Hold the device PAUSED (playing only the primed silence cushion) until the
@@ -2773,7 +2785,7 @@ static void audio_flush(void) {
              * across these lines the open-paused assumption is broken (or something cleared
              * the queue); if it starts at 0 the prime never landed.  Bounded + log-only. */
             static int aqp_n = 0;
-            if (g_log && (aqp_n % 100) == 0 && aqp_n < 10000) {
+            if (MOON_DEVELOPER && g_log && (aqp_n % 100) == 0 && aqp_n < 10000) {
                 fprintf(g_log, "AQ-PAUSED fr=%d q=%.2ff\n", g_cur_frame,
                         (double)SDL_GetQueuedAudioSize(g_audio_dev)/(double)frame_bytes);
                 fflush(g_log);
@@ -2993,6 +3005,7 @@ static int  save_state(const char *path);                          /* fwd (derai
  * fix the overflow at its source (why the list ever ends without a terminator) rather than
  * bounding the consumer (the dispatcher).  Exercised by any screen-effect task registration. */
 static inline void corrupt_watch(uint32_t a, uint32_t v, int sz) {
+    if (!MOON_DEVELOPER) return;
     if (!g_snd_loaded || a < 0x3c096u || a >= 0x3c0bau) return;
     static uint32_t seen[24]; static int sn = 0;
     uint32_t pc = (unsigned)m68k_get_reg(NULL, M68K_REG_PC);
@@ -3014,6 +3027,7 @@ static inline void corrupt_watch(uint32_t a, uint32_t v, int sz) {
 static int g_gameplay_watches_armed = 0; /* armed only once Mog's live dispatcher has run */
 static int g_lives_wn = 0;
 static inline void lives_watch(uint32_t a, uint32_t v, int sz) {
+    if (!MOON_DEVELOPER) return;
     if (!g_os || !g_gameplay_watches_armed) return;
     uint32_t end = a + (uint32_t)sz;
     for (int i = 0; i < 4; i++) {
@@ -3040,6 +3054,7 @@ static inline void lives_watch(uint32_t a, uint32_t v, int sz) {
  * this roster watch; LOOT-TOKEN traces its transfers separately. */
 static int g_mswatch_n = 0;
 static inline void moonstone_watch(uint32_t a, uint32_t v, int sz) {
+    if (!MOON_DEVELOPER) return;
     if (!g_os || !g_gameplay_watches_armed || v == 0u) return;
     if (a < 0x2e7dcu || a >= 0x2eb00u) return;          /* records + quest-struct region only */
     uint32_t end = a + (uint32_t)sz;
@@ -3070,6 +3085,7 @@ static inline void moonstone_watch(uint32_t a, uint32_t v, int sz) {
  * capped, off the hot path via the address early-out.  Grep the log for INVLINK-SET. */
 static int g_invlink_n = 0;
 static inline void invlink_watch(uint32_t a, uint32_t v, int sz) {
+    if (!MOON_DEVELOPER) return;
     if (!g_os || !g_gameplay_watches_armed || v == 0u || g_invlink_n >= 40 || !g_log) return;
     uint32_t end = a + (uint32_t)sz;
     if (end <= 0x2fe44u || a >= 0x37456u) return;         /* fast reject */
@@ -3096,6 +3112,7 @@ static inline void invlink_watch(uint32_t a, uint32_t v, int sz) {
  * 0x18 bytes each, contiguous) with the writing PC.  Read-only, capped, cheap range check. */
 static int g_aiitem_n = 0;
 static inline void aiitem_watch(uint32_t a, uint32_t v, int sz) {
+    if (!MOON_DEVELOPER) return;
     if (!g_os || !g_gameplay_watches_armed || v == 0u || g_aiitem_n >= 60 || !g_log) return;
     uint32_t end = a + (uint32_t)sz;
     if (end <= 0x2ea88u || a >= 0x2ead0u) return;
@@ -3106,6 +3123,7 @@ static inline void aiitem_watch(uint32_t a, uint32_t v, int sz) {
     fflush(g_log); g_aiitem_n++;
 }
 static void gameplay_watches_reset(int armed) {
+    if (!MOON_DEVELOPER) return;
     g_gameplay_watches_armed = armed;
     g_lives_wn = g_mswatch_n = g_invlink_n = g_aiitem_n = 0;
 }
@@ -3117,6 +3135,7 @@ static void gameplay_watches_reset(int armed) {
  * arith?) instead of guessing.  g_os-gated, bounded; off the hot path for normal values. */
 static int g_rotwatch_n = 0;
 static inline void rotwatch(uint32_t a, uint32_t v, int sz) {
+    if (!MOON_DEVELOPER) return;
     if (!g_os || !g_log || g_rotwatch_n >= 1000) return;
     const char *what = 0;
     /* NOTE: [0x2ebd0] (active-player ptr) legitimately cycles through every combat actor
@@ -3140,7 +3159,7 @@ static inline void w8(uint32_t a, uint8_t v)  {
     if (sndcode_guard(a, v, 1)) return;
     g_ram[a] = v; }
 static inline void w16(uint32_t a, uint16_t v){ a &= (RAM_SIZE-1); corrupt_watch(a, v, 2); lives_watch(a, v, 2); moonstone_watch(a, v, 2); rotwatch(a, v, 2); invlink_watch(a, v, 2); aiitem_watch(a, v, 2);
-    if (a == 0x392d4u) { g_curwr_pc = (uint32_t)m68k_get_reg(NULL,M68K_REG_PPC); g_curwr_n++; }
+    if (MOON_DEVELOPER && a == 0x392d4u) { g_curwr_pc = (uint32_t)m68k_get_reg(NULL,M68K_REG_PPC); g_curwr_n++; }
     if (g_watch && a>=(g_watch-2) && a<=(g_watch+4))
         fprintf(g_log?g_log:stderr,"  WATCH16 @%06x <= %04x pc=%06x ic=%llu\n", a, v, (unsigned)m68k_get_reg(NULL,M68K_REG_PC), (unsigned long long)g_icount);
     if (sndcode_guard(a, v, 2)) return;
@@ -3150,7 +3169,7 @@ static int g_pollonly = 0;     /* --pollonly: never inject VERTB (pure polling, 
 static int g_forcevblank = 0;  /* --forcevblank: inject VERTB every frame (debug) */
 static inline void w32(uint32_t a, uint32_t v){
     a &= (RAM_SIZE-1); corrupt_watch(a, v, 4); lives_watch(a, v, 4); moonstone_watch(a, v, 4); rotwatch(a, v, 4); invlink_watch(a, v, 4); aiitem_watch(a, v, 4);
-    if (a == 0x392d4u) { g_curwr_pc = (uint32_t)m68k_get_reg(NULL,M68K_REG_PPC); g_curwr_n++; }
+    if (MOON_DEVELOPER && a == 0x392d4u) { g_curwr_pc = (uint32_t)m68k_get_reg(NULL,M68K_REG_PPC); g_curwr_n++; }
     if (g_watch && a==g_watch && g_log) fprintf(g_log,"  WATCH w32 @%06x <= %08x pc=%06x ic=%llu\n", a, v, (unsigned)m68k_get_reg(NULL,M68K_REG_PC), (unsigned long long)g_icount);
     if (sndcode_guard(a, v, 4)) return;
     g_ram[a]=(uint8_t)(v>>24);
@@ -3768,6 +3787,7 @@ static void dump_derail(const char *why, unsigned pc, int force) {
     g_derail_n++;
     uint32_t sp = m68k_get_reg(NULL, M68K_REG_SP);
     fprintf(g_log, "=== DERAIL (%s) pc=%06x ic=%llu ===\n", why, pc, (unsigned long long)g_icount);
+#if MOON_DEVELOPER
     fprintf(g_log, "  D %08x %08x %08x %08x %08x %08x %08x %08x\n",
         (unsigned)m68k_get_reg(NULL,M68K_REG_D0),(unsigned)m68k_get_reg(NULL,M68K_REG_D1),(unsigned)m68k_get_reg(NULL,M68K_REG_D2),(unsigned)m68k_get_reg(NULL,M68K_REG_D3),
         (unsigned)m68k_get_reg(NULL,M68K_REG_D4),(unsigned)m68k_get_reg(NULL,M68K_REG_D5),(unsigned)m68k_get_reg(NULL,M68K_REG_D6),(unsigned)m68k_get_reg(NULL,M68K_REG_D7));
@@ -3779,6 +3799,11 @@ static void dump_derail(const char *why, unsigned pc, int force) {
     fprintf(g_log, "\n  pcring(old->new):");
     for (int k=0;k<128;k++) fprintf(g_log, " %06x", g_pcring[(g_pcring_i + k) & 127]);
     fprintf(g_log, "\n"); fflush(g_log);
+#else
+    fprintf(g_log, "  sp=%08x sr=%04x\n", (unsigned)sp,
+            (unsigned)m68k_get_reg(NULL, M68K_REG_SR));
+    fflush(g_log);
+#endif
 }
 
 /* ===================== RETAIL PARITY (data + same-size code) =====================
@@ -4238,6 +4263,11 @@ static void stat_display_hook(uint32_t pc) {
 #include "numbered_menu.h"
 #include "multiplayer_campaign.h"
 #include "inventory_flow.h"
+#include "trogg_movement.h"
+#include "knight_fall.h"
+#include "spear_death.h"
+#include "mudman_spawn.h"
+#include "tavern_input.h"
 
 /* Retail X bypasses pointer selection and takes the normal inventory cleanup.
  * Apply the configurable host action at that same boundary. Do not synthesize
@@ -4273,7 +4303,11 @@ void moon_instr_hook(unsigned int pc) {
     danu_hook(pc);
     stat_cap_hook(pc);
     stat_display_hook(pc);
+    trogg_movement_hook(pc);
+    knight_fall_hook(pc);
+    spear_death_hook(pc);
     cursor_rng_hook(pc);
+    tavern_input_hook(pc);
     /* The human fighter's input selector uses JOY0 for player two (selector 1).
      * Practice explicitly assigns the green knight to that port in both disk
      * lineages. Our host binds one player and mirrors directions/fire into the
@@ -4333,7 +4367,7 @@ void moon_instr_hook(unsigned int pc) {
     if (g_os && (g_icount & 0x1fffu) == 0) apply_retail_parity();
     /* record recent PCs (derail forensics), but SKIP the line-245 raster-wait spin
      * (0x3fe12..0x3fe26) so the ring shows the surrounding loop, not just the wait. */
-    if (pc < 0x3fe12u || pc > 0x3fe26u) { g_pcring[g_pcring_i & 127] = pc; g_pcring_i++; }
+    if (MOON_DEVELOPER && (pc < 0x3fe12u || pc > 0x3fe26u)) { g_pcring[g_pcring_i & 127] = pc; g_pcring_i++; }
     /* "wait for fire" routine (0x22fd0) -- the Stonehenge moonstone-DELIVERY overview spins here
      * while it shows the map with a wrong (delivery) palette; the normal map turn-loop never does.
      * Flag it so render suppresses that garbled-map frame.  Cleared per-frame in capture_frame. */
@@ -4360,7 +4394,19 @@ void moon_instr_hook(unsigned int pc) {
             if (g_log) fprintf(g_log, "GUARDIAN-RETURN arm fr=%d ic=%llu\n",
                                g_cur_frame, (unsigned long long)g_icount);
         }
-        if (g_lineage == LIN_CRACKED && g_guardian_return_fade == 1 && pc == 0x413b8u) {
+        /* The map is copied over the reward bitmap before its palette task
+         * starts. Waiting for 0x413b8 exposes one partly drawn, wrongly coloured
+         * frame. Keep the acknowledged reward visible while the map master is
+         * decoded, then cover the visible-buffer redraw and palette transition. */
+        if (g_lineage == LIN_CRACKED && g_guardian_return_fade == 1
+            && pc == 0x4014eu && r16(pc) == 0x4eb9u && r32(pc+2) == 0x29fc2u) {
+            g_guardian_return_fade = 3;
+            if (g_log) fprintf(g_log, "GUARDIAN-RETURN map-redraw fr=%d ic=%llu\n",
+                               g_cur_frame, (unsigned long long)g_icount);
+        }
+        if (g_lineage == LIN_CRACKED
+            && (g_guardian_return_fade == 1 || g_guardian_return_fade == 3)
+            && pc == 0x413b8u) {
             g_guardian_return_fade = 2;
             if (g_log) fprintf(g_log, "GUARDIAN-RETURN map-fade fr=%d ic=%llu\n",
                                g_cur_frame, (unsigned long long)g_icount);
@@ -4429,6 +4475,7 @@ void moon_instr_hook(unsigned int pc) {
             default: break;
         }
     }
+#if MOON_DEVELOPER
     /* FREEZE diag: a hang in the line-245 raster-wait (operator's frozen-inventory bug).
      * If we spin at 0x3fe12 absurdly long without leaving, log the beam state so we can
      * see whether the beam is stuck or cycling-but-never-245. */
@@ -4487,6 +4534,7 @@ void moon_instr_hook(unsigned int pc) {
         fflush(g_log);
         g_penaltyset_n++;
     }
+#endif
     /* === STOP the day-end life-drain (2026-06-26; REVISED 2026-07-02 audit) ===
      * REVISED UNDERSTANDING: +0x82 is a designed CURSE mechanic -- the swamp healer's
      * service code (0x2aeda) tests and CLEARS it for gold, with its own dialogue variant.
@@ -5340,7 +5388,7 @@ void moon_instr_hook(unsigned int pc) {
     if (g_os && pc == 0x2886cu && r16(pc) == 0x0a6eu) {
         uint32_t a6  = (uint32_t)m68k_get_reg(NULL, M68K_REG_A6);
         uint32_t ret = r32((uint32_t)m68k_get_reg(NULL, M68K_REG_A7));
-        if (g_log) { static int ht = 0; if (ht < 120) {
+        if (MOON_DEVELOPER && g_log) { static int ht = 0; if (ht < 120) {
             fprintf(g_log, "HIDE-TOG own=%06lx pre=%u caller=%06lx fr=%d ic=%llu\n",
                     (unsigned long)r32(a6 + 0x18u), (unsigned)r16(a6 + 0x30u),
                     (unsigned long)ret, g_cur_frame, (unsigned long long)g_icount);
@@ -5464,7 +5512,7 @@ void moon_instr_hook(unsigned int pc) {
      * is corrupt -> A2 goes garbage -> address error.  Ring the entries A2 visits; the instant A2
      * is bad, dump the trail WITH each entry's item-NAME string -> names the leaked moonstone entry
      * + its bad link.  Inert in normal play (valid menus never hit a bad entry).  Read-only. */
-    if (g_os && pc == 0x2a1aeu && r16(pc) == 0x2479u && g_log) {   /* opcode-guarded: `movea.l $37444.l,A2` resident */
+    if (MOON_DEVELOPER && g_os && pc == 0x2a1aeu && r16(pc) == 0x2479u && g_log) {   /* opcode-guarded: `movea.l $37444.l,A2` resident */
         static uint32_t ring[32]; static int ri = 0, dumped = 0; static uint32_t lastpush = 0xffffffffu;
         uint32_t e = r32(0x37444);
         int bad = (e >= RAM_SIZE) || (e & 1u) || (e != 0 && e < 0x21000u);
@@ -5537,7 +5585,7 @@ void moon_instr_hook(unsigned int pc) {
      * placement only: stale rat state could overwrite it on the first tick (see A5 above).
      * Log each placement (record, X written, toggle) at the coord-copy
      * instruction, and each death-bookkeeping pass, to catch the real mechanism.  Read-only, capped. */
-    if (g_os && g_log && pc == 0x24fb2u && r16(pc) == 0x3358u && r16(pc + 2u) == 0x0004u) {
+    if (MOON_DEVELOPER && g_os && g_log && pc == 0x24fb2u && r16(pc) == 0x3358u && r16(pc + 2u) == 0x0004u) {
         static int sn = 0; if (sn < 30) {
             uint32_t a0 = m68k_get_reg(NULL, M68K_REG_A0), a1 = m68k_get_reg(NULL, M68K_REG_A1);
             fprintf(g_log, "WAVE-SPAWN rec=%06x X=%d tog=%u e1e8=%u fr=%d ic=%llu\n",
@@ -5546,7 +5594,7 @@ void moon_instr_hook(unsigned int pc) {
             fflush(g_log); sn++;
         }
     }
-    if (g_os && g_log && pc == 0x2135au && r16(pc) == 0x2079u && r32(pc + 2u) == 0x0002e1f6u) {
+    if (MOON_DEVELOPER && g_os && g_log && pc == 0x2135au && r16(pc) == 0x2079u && r32(pc + 2u) == 0x0002e1f6u) {
         static int dn = 0; if (dn < 30) {   /* death bookkeeping head (`movea.l $2e1f6,A0` resident) */
             fprintf(g_log, "WAVE-DEATH e1e4=%u e1e6=%u e1e8=%u fr=%d ic=%llu\n",
                     r16(0x2e1e4u), r16(0x2e1e6u), r16(0x2e1e8u),
@@ -5554,7 +5602,7 @@ void moon_instr_hook(unsigned int pc) {
             fflush(g_log); dn++;
         }
     }
-    if (g_os && g_log && pc == 0x28084u && r16(pc) == 0x4eb9u && r32(pc + 2u) == 0x00024f7au) {
+    if (MOON_DEVELOPER && g_os && g_log && pc == 0x28084u && r16(pc) == 0x4eb9u && r32(pc + 2u) == 0x00024f7au) {
         static int cn = 0; if (cn < 40) {   /* generic actor-create head (`jsr $24f7a` resident) */
             uint32_t sp = m68k_get_reg(NULL, M68K_REG_A7);
             fprintf(g_log, "ACTOR-CREATE X=%d Y=%d kind=%02x face=%u ret=%06x fr=%d ic=%llu\n",
@@ -5699,7 +5747,7 @@ void moon_instr_hook(unsigned int pc) {
             return;
         }
     }
-    if (g_os && !g_blt_busy_scope && g_derail_n < 6) {
+    if (MOON_DEVELOPER && g_os && !g_blt_busy_scope && g_derail_n < 6) {
         /* PC executing from a region that is NEVER normal code -> LOG-ONLY forensics (do NOT halt).
          * The old blanket "fatal low-RAM HALT" kept false-positiving on legit code that lives all
          * over low RAM -- exec/setup at 0x400 & 0x800, the music driver [0x500,0x800), overlays at
@@ -5728,11 +5776,13 @@ void moon_instr_hook(unsigned int pc) {
         uint32_t a2 = (uint32_t)m68k_get_reg(NULL, M68K_REG_A2);
         if (a2 >= RAM_SIZE || (a2 & 1u)) {
             dump_derail("MOONSTONE-CRASH (garbage menu entry A2)", pc, 1);
+#if MOON_DEVELOPER
             { char p[1280]; snprintf(p, sizeof(p), "%s%sderail.sav", g_exedir[0]?g_exedir:".", g_exedir[0]?"/":"");
               save_state(p);
               if (g_log) { fprintf(g_log, "=== MOONSTONE-CRASH trap: A2=%08x garbage; froze pre-runaway -> derail.sav ic=%llu ===\n",
                                    a2, (unsigned long long)g_icount); fflush(g_log); } }
-            halt("moonstone menu over-walk trapped (frozen pre-corruption)");
+#endif
+            halt("moonstone menu over-walk trapped before corruption");
             return;
         }
     }
@@ -6380,6 +6430,7 @@ void moon_instr_hook(unsigned int pc) {
             g_pools_relocated++;
         }
     }
+#if MOON_DEVELOPER
     /* --poke (DEBUG-ONLY, g_os-gated): apply each requested memory write ONCE
      * when PC first reaches its gate address.  Used purely to fast-forward to
      * end-game state for verification (e.g. set XP, the Valley
@@ -6415,6 +6466,7 @@ void moon_instr_hook(unsigned int pc) {
         }
         halt("dumpat reached");
     }
+#endif
     /* JUMP-TO-LOW = control transfer into the exception-vector table / very low
      * scratch (< 0x400).  This is the stack-corruption signature (an `rts` that
      * popped a 0 / garbage return address).  NOTE: the running game legitimately
@@ -6423,7 +6475,12 @@ void moon_instr_hook(unsigned int pc) {
      * via `jsr $400`/`jsr (a1)` from its VBlank ISR -- those are NOT bugs, so the
      * threshold is 0x400, below the installed-handler region. */
     if (pc < 0x400u && g_prev_pc >= 0x1000u && g_log) {
-        char dis[256]; m68k_disassemble(dis, g_prev_pc, M68K_CPU_TYPE_68000);
+        char dis[256];
+#if MOON_DEVELOPER
+        m68k_disassemble(dis, g_prev_pc, M68K_CPU_TYPE_68000);
+#else
+        snprintf(dis, sizeof(dis), "opcode %04x", r16(g_prev_pc));
+#endif
         fprintf(g_log, "*** JUMP-TO-LOW pc=%06x from prev=%06x (%s) a7=%06x sr=%04x\n",
                 pc, g_prev_pc, dis, (unsigned)m68k_get_reg(NULL,M68K_REG_SP), (unsigned)m68k_get_reg(NULL,M68K_REG_SR));
     }
@@ -6664,6 +6721,7 @@ void moon_instr_hook(unsigned int pc) {
     }
     g_prev_pc = pc;
     g_icount++;
+#if MOON_DEVELOPER
     if (g_flow) {
         uint32_t page = pc >> 12;
         if (page != g_last_page) {
@@ -6697,10 +6755,15 @@ void moon_instr_hook(unsigned int pc) {
         g_trace--;
     }
     if (g_run_budget && g_icount > g_run_budget) halt("instruction budget exhausted");
+#endif
 }
 int moon_illegal_hook(int opcode) {
     char dis[256]; uint32_t pc=m68k_get_reg(NULL,M68K_REG_PC);
+#if MOON_DEVELOPER
     m68k_disassemble(dis, pc, M68K_CPU_TYPE_68000);
+#else
+    snprintf(dis, sizeof(dis), "opcode %04x", opcode & 0xffff);
+#endif
     /* The Mog engine probes the CPU for 68010+ features by EXECUTING a privileged
      * control instruction -- movec (opcode 0x4e7a read, 0x4e7b write) -- after
      * pointing the illegal vector ($10) at its own recovery stub.  On a real
@@ -7367,7 +7430,7 @@ static void capture_frame(void) {
           }
         }
         if (g_delivery_win > 0) g_delivery_win--;   /* delivery window counts down per displayed frame */
-        int dlog = (g_delivery_win > 0 && g_log);   /* CAPFRAME diag: which branch does capture take live? */
+        int dlog = (MOON_DEVELOPER && g_delivery_win > 0 && g_log);   /* CAPFRAME diag: which branch does capture take live? */
         int tfill = 0;                              /* per-mille nonzero of the fresh render (body, not row0) */
         if (g_delivery_win > 0) { long nz=0,tot=0; for (int k=0;k<FB_W*FB_H*3;k+=48){ tot++; if (g_cap_tmp[k]) nz++; } tfill=(int)(tot?nz*1000/tot:0); }
         unsigned dsc = dlog ? (unsigned)r32(0x2fb1cu) : 0;
@@ -7383,11 +7446,13 @@ static void capture_frame(void) {
             else if (sc == 0u && g_disp_base == 0x6bdfau && tfill > 20)
                 g_delivery_win = 0;                 /* cutscene is compositing -> delivery over */
         }
-        /* GUARDIAN RETURN display policy: black only the exact post-reward map tween.
+        /* GUARDIAN RETURN display policy: black the post-reward map redraw/tween.
          * [0x417b4] is the guest's live palette-task pointer; wait until it has actually
          * become nonzero before allowing a zero to mean completion.  --rawcapture keeps
          * the unfiltered transition available for deterministic A/B verification. */
-        if (g_guardian_return_fade == 2) {
+        if (g_guardian_return_fade == 3) {
+            if (!g_rawcapture) g_render_garbled = 2;
+        } else if (g_guardian_return_fade == 2) {
             uint32_t fade_task = r32(0x417b4u);
             if (fade_task != 0) {
                 if (!g_guardian_fade_seen) g_garble_hold = 0;
@@ -7446,6 +7511,7 @@ static void capture_frame(void) {
     g_cap_w = w; g_cap_h = h; g_cap_valid = 1;
 }
 
+#if MOON_DEVELOPER
 static int write_ppm(const char *path, const uint8_t *fb, int w, int h) {
     FILE *f=fopen(path,"wb"); if(!f) return -1;
     fprintf(f,"P6\n%d %d\n255\n",w,h);
@@ -7465,11 +7531,13 @@ static int dump_captured(const char *path) {
     if (!g_cap_valid) return dump_ppm(path);
     return write_ppm(path, g_cap, g_cap_w, g_cap_h);
 }
+#endif
 
 /* --------------------------------------------------------- frame stepping */
 #define CYCLES_PER_FRAME 141876   /* PAL 7.09 MHz / 50 Hz */
 
 static void autoswap_tick(void);   /* fwd: seamless disk-swap auto-confirm (defined below) */
+#if MOON_DEVELOPER
 static void apply_script(int fr);  /* fwd: scripted input (allows --script under --sdl for repro) */
 static void poke_tick(void) {      /* --poke8 F:A:V one-shot RAM byte pokes (diag, see decl) */
     int i;
@@ -7485,6 +7553,7 @@ static void poke_tick(void) {      /* --poke8 F:A:V one-shot RAM byte pokes (dia
     }
 }
 static int  g_nscript;             /* fwd (tentative): script event count, defined with parse_script below */
+#endif
 static int  save_state(const char *path);   /* fwd: quicksave  (F5; defined near main) */
 static int  load_state(const char *path);   /* fwd: quickload  (F9; defined near main) */
 static int  load_in_progress(void);         /* fwd: 1 while a disk/file load is mid-flight (defined below) */
@@ -7550,7 +7619,9 @@ static void run_one_frame(void) {
     if (vertb_gate()) { g_custom[0x09c>>1] |= 0x0020; }  /* VERTB */
     update_ipl();
     audio_flush();   /* finish + emit one PAL frame of Paula audio to the host sink */
+#if MOON_DEVELOPER
     poke_tick();   /* --poke8 one-shot (diag) */
+#endif
     /* --watch frame-boundary POLL (2026-07-03): the write-watch instruments w8/w16/w32
      * and blt_w16, yet a watched byte was seen changing with NO logged writer (the town
      * hotspot-table zeroing) -- some path still bypasses the watch.  Poll the watched
@@ -7602,27 +7673,6 @@ static LONG WINAPI moon_crash_filter(EXCEPTION_POINTERS *ep) {
     return EXCEPTION_EXECUTE_HANDLER;  /* terminate */
 }
 #endif
-
-/* Minimal base64 decoder for the embedded boot splash (output-only asset).
- * Skips any non-base64 chars (newlines etc.); '=' padding is a no-op. */
-static inline int b64val(int c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
-    return -1;
-}
-static int b64decode(const char *s, uint8_t *out, int cap) {
-    int acc = 0, bits = 0, n = 0;
-    for (; *s; s++) {
-        int v = b64val((unsigned char)*s);
-        if (v < 0) continue;
-        acc = (acc << 6) | v; bits += 6;
-        if (bits >= 8) { bits -= 8; if (n < cap) out[n++] = (uint8_t)((acc >> bits) & 0xff); }
-    }
-    return n;
-}
 
 /* ----------------------------------------------------------- SDL host loop */
 /* Host-only notification, drawn after the game/splash texture. It never enters
@@ -7837,21 +7887,13 @@ static int run_sdl(int scale) {
         SDL_DestroyRenderer(ren); SDL_DestroyWindow(win); SDL_Quit(); return 1;
     }
     SDL_RenderSetLogicalSize(ren, 320, 256);
-    /* Boot splash: decode the embedded RLE image once into a static texture.  Shown
+    /* Boot splash: upload the embedded RGB pixels once into a static texture.  Shown
      * during the (black) disk-load until the intro composes its first frame -- see the
      * present block below.  Output-only; never touches game state. */
     SDL_Texture *splash_tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_RGB24, SDL_TEXTUREACCESS_STATIC, SPLASH_W, SPLASH_H);
     if (splash_tex) {
         SDL_SetTextureScaleMode(splash_tex, SDL_ScaleModeLinear);  /* smooth if the window is resized off 1:1 */
-        int b64len = (int)strlen(splash_b64), cap = SPLASH_W*SPLASH_H*3;
-        uint8_t *qoi = (uint8_t*)malloc((size_t)b64len);           /* >= decoded QOI size */
-        uint8_t *sb  = (uint8_t*)malloc((size_t)cap);              /* RGB24 pixels */
-        if (qoi && sb) {
-            int qn = b64decode(splash_b64, qoi, b64len);           /* base64 -> QOI bytes */
-            if (qoi_decode_rgb(qoi, qn, sb, cap) == cap)           /* QOI -> RGB24 */
-                SDL_UpdateTexture(splash_tex, NULL, sb, SPLASH_W*3);
-        }
-        free(qoi); free(sb);
+        SDL_UpdateTexture(splash_tex, NULL, splash_rgb, SPLASH_W*3);
     }
     int boot_splash_done = 0;
     /* Register all attached pads. Fresh input chooses the primary controller;
@@ -7923,10 +7965,15 @@ static int run_sdl(int scale) {
             else if (e.type == SDL_WINDOWEVENT && e.window.windowID == SDL_GetWindowID(win)) {
                 if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
                     mp_focused = 0;
+                    g_tavern_focused = 0;
+                    tavern_input_reset();
                     g_inventory_close_request = 0;
                     m_fire = m_rmb = 0;
                     if (mp_active()) mp_clear_host_input();
-                } else if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) mp_focused = 1;
+                } else if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+                    mp_focused = 1;
+                    g_tavern_focused = 1;
+                }
             }
             else if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) {
                 int d = (e.type == SDL_KEYDOWN);
@@ -7960,6 +8007,7 @@ static int run_sdl(int scale) {
                  * same keys still drive fire/menu where those screens are active. */
                 if (d && !g_mp_practice) { uint8_t ix = keysym_to_idx(sym); if (ix) keyq_push(ix); }
                 switch (sym) {
+#if MOON_DEVELOPER
                     case SDLK_F10: if (d) { g_livedump = !g_livedump;  /* toggle live frame recorder (diagnostics) */
                         if (win) SDL_SetWindowTitle(win, g_livedump ? "Moonstone - RECORDING FRAMES (F10 to stop)" : g_wintitle); } break;
                     case SDLK_F12: if (d) toggle_record(win); break;  /* toggle audio->WAV capture (capture-N.wav next to exe + reg-log into moonstone.log); re-bound 2026-06-25 for the combat-screech hunt */
@@ -7967,6 +8015,7 @@ static int run_sdl(int scale) {
                      * dump_derail() still auto-fires on a derail/wild-PC/A7-smash; the task-list
                      * fix (g_tasklist_fix, default ON, --notaskfix to A/B headless) remains -- just
                      * no longer bound to F-keys.  (F12 re-bound to audio capture, above.) */
+#endif
                     case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5:
                     case SDLK_6: case SDLK_7: case SDLK_8: case SDLK_9:
                     case SDLK_KP_1: case SDLK_KP_2: case SDLK_KP_3: case SDLK_KP_4: case SDLK_KP_5:
@@ -8232,7 +8281,9 @@ static int run_sdl(int scale) {
         }
 
         Uint64 t_w0 = SDL_GetPerformanceCounter();   /* frame-time watch: start of host work */
+#if MOON_DEVELOPER
         { static int sdlfr = 0; if (g_nscript) apply_script(sdlfr); sdlfr++; }  /* allow --script under --sdl (dummy-video repro) */
+#endif
         autoswap_tick();   /* seamless disk swap: auto-confirm any "insert disk" prompt */
         run_one_frame();
         g_mouse_dx = g_mouse_dy = 0;   /* consume this frame's mouse delta */
@@ -8340,6 +8391,7 @@ static int run_sdl(int scale) {
                        / (double)SDL_GetPerformanceFrequency();
             fprintf(g_log, "AVLOG-V fr=%d disp=%d t=%.2f\n", g_cur_frame, disp_fr, tms);
         }
+#if MOON_DEVELOPER
         if (g_livedump) {   /* diagnostics: record each displayed frame next to the exe (F10 toggles) */
             static int ld_n = 0;
             static FILE *ldlog = NULL;
@@ -8363,13 +8415,14 @@ static int run_sdl(int scale) {
                 ld_n++;
             }
         }
+#endif
         if (status_frames > 0 && --status_frames == 0 && win)
             SDL_SetWindowTitle(win, g_wintitle);   /* SAVED/LOADED flash expired -> restore title */
         /* ALWAYS-ON FRAME-TIME WATCH (in-game only): how long the host took to make
          * this frame (emulate CPU + render), BEFORE the pacing sleep.  >20ms means the
          * host can't hit 50fps = a real perf bug in this port; staying low while the
          * action still drags = faithful CPU-bound slowdown from the original game. */
-        if (g_os && !g_blt_busy_scope) {
+        if (MOON_DEVELOPER && g_os && !g_blt_busy_scope) {
             static int    fs_n = 0, fs_over = 0, slow_logged = 0;
             static double fs_sum = 0.0, fs_max = 0.0;
             double work_ms = ((double)SDL_GetPerformanceCounter() - (double)t_w0) * 1000.0 / (double)pf;
@@ -8756,6 +8809,7 @@ static int vertb_gate(void) {
     return 1;
 }
 
+#if MOON_DEVELOPER
 /* ---- scripted input timeline (--script) ------------------------------------
  * Drives the game's input from a frame-keyed script so we can walk it from the
  * intro to gameplay without a live window.  Syntax: comma-separated events
@@ -8925,6 +8979,7 @@ static void parse_poke(const char *s) {
         if (*s==',') s++;
     }
 }
+#endif
 /* Per-frame driver for the seamless auto-swap: count down the "settle" window so
  * the newly-inserted disk gets re-read + validated before we synthesise a fire.
  * The actual fire press/release is driven by PC in moon_instr_hook (when the game
@@ -8936,6 +8991,7 @@ static void autoswap_tick(void) {
 }
 
 static int g_diskev_done[16];
+#if MOON_DEVELOPER
 static void apply_diskat(int fr) {
     for (int i=0;i<g_ndiskev;i++) {
         if (!g_diskev_done[i] && fr >= g_diskev[i].frame) {
@@ -8949,6 +9005,10 @@ static void apply_diskat(int fr) {
         }
     }
 }
+
+#endif
+/* Keep g_diskev_done above in BOTH builds: it occupies a legacy save-format
+ * slot even though release builds have no scripted disk-swap tool. */
 
 /* ===================== save-state (quicksave / quickload) =====================
  * This port is a whole-machine emulator, so "save progress" = freeze the entire
@@ -9221,6 +9281,7 @@ static int load_state(const char *path) {
         g_ew_armed = 0;          /* edge-walk fix trajectory capture: transient per-turn state, drop on load */
         g_ver_request = g_version_visible = 0;
         numbered_menu_reset(); /* Reconstruct the cursor if this save is inside a popup. */
+        tavern_input_reset(); /* Never replay a pending tap from the previous timeline. */
         g_popup_injected = g_kdigit = 0;
         /* Host-only Guardian transition state is deliberately not serialized.  A warm F9 during
          * the reward/map handoff must not carry its palette blackout into an unrelated save. */
@@ -9264,6 +9325,7 @@ int main(int argc, char **argv) {
     uint32_t sr = 0x2000; /* supervisor, mask 0 (got the loader chain furthest) */
     const char *logpath = NULL;   /* default: <exedir>/moonstone.log (set after exedir) */
     int save_profile_error = 0;
+    const char *argument_error = NULL;
     const char *dumppath = NULL;
     const char *ramdump = NULL;
     int frames = 600;
@@ -9283,8 +9345,9 @@ int main(int argc, char **argv) {
 
     /* Double-click default: no args => play the game (SDL window + OS HLE),
      * which is what a distributable user wants.  Any explicit flag is honoured. */
-    if (argc <= 1) { sdl = 1; g_os = 1; g_oslog = 1; }
+    if (!MOON_DEVELOPER || argc <= 1) { sdl = 1; g_os = 1; g_oslog = 1; }
 
+#if MOON_DEVELOPER
     for (int i=1;i<argc;i++){
         if (!strcmp(argv[i],"--mod")&&i+1<argc) modarg=argv[++i];
         else if (!strcmp(argv[i],"--base")&&i+1<argc) base=(uint32_t)strtoul(argv[++i],0,0);
@@ -9310,6 +9373,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--dumpevery")&&i+1<argc) dumpevery=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--sdl")) sdl=1;
         else if (!strcmp(argv[i],"--version")||!strcmp(argv[i],"-v")) { printf("%s\n", MOON_ATTRIB); return 0; }
+        else if (!strcmp(argv[i],"--build-info")) { puts(MOON_BUILD_PROFILE); return 0; }
         else if (!strcmp(argv[i],"--scale")&&i+1<argc) scale=atoi(argv[++i]);
         else if (!strcmp(argv[i],"--memlog")) g_memlog=1;
         else if (!strcmp(argv[i],"--hardpan")) g_xfeed=0;
@@ -9425,6 +9489,42 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"--loadstate-at")&&i+2<argc) { loadstate_at=atoi(argv[++i]); loadstate_path=argv[++i]; }
         else if (!strcmp(argv[i],"--disasm")&&i+2<argc) { disasm_addr=(uint32_t)strtoul(argv[++i],0,0); disasm_len=atoi(argv[++i]); }
     }
+#else
+    /* Public command-line allowlist. New development switches belong above,
+     * never here. Unknown/missing arguments fail before disk extraction or play. */
+    int show_version = 0, show_build = 0;
+    for (int i = 1; i < argc; i++) {
+        const char *arg = argv[i];
+        if (!strcmp(arg, "--log") && i + 1 < argc) logpath = argv[++i];
+        else if (!strcmp(arg, "--save-profile")) {
+            if (i + 1 < argc && !strcmp(argv[i+1], "singleplayer")) { g_multiplayer_save=0; i++; }
+            else if (i + 1 < argc && !strcmp(argv[i+1], "multiplayer")) { g_multiplayer_save=1; i++; }
+            else {
+                save_profile_error = 1;
+                /* Consume an invalid value without mistaking it for another
+                 * option; keep --log and other following switches intact. */
+                if (i + 1 < argc && strncmp(argv[i+1], "--", 2)) i++;
+            }
+        }
+        else if (!strcmp(arg, "--os") || !strcmp(arg, "--sdl")) { /* launcher compatibility */ }
+        else if (!strcmp(arg, "--version") || !strcmp(arg, "-v")) show_version = 1;
+        else if (!strcmp(arg, "--build-info")) show_build = 1;
+        else if (!strcmp(arg, "--scale") && i + 1 < argc) scale = atoi(argv[++i]);
+        else if (!strcmp(arg, "--hardpan")) g_xfeed = 0;
+        else if (!strcmp(arg, "--audioblend") && i + 1 < argc) {
+            g_xfeed = atoi(argv[++i]); if (g_xfeed < 0) g_xfeed=0; if (g_xfeed > 50) g_xfeed=50;
+        }
+        else if (!strcmp(arg, "--dataset") && i + 1 < argc) {
+            snprintf(g_dataset_buf, sizeof(g_dataset_buf), "%s", argv[++i]); dataset_set=1;
+        }
+        else if (!strcmp(arg, "--diskdir") && i + 1 < argc) { g_diskdir=argv[++i]; diskdir_set=1; }
+        else if (!argument_error) argument_error = arg;
+    }
+    if (!argument_error && !save_profile_error && (show_version || show_build)) {
+        puts(show_build ? MOON_BUILD_PROFILE : MOON_ATTRIB);
+        return 0;
+    }
+#endif
 
     /* ---- resolve data paths (exe-relative player-supplied `data/`) ----
      * Pick the dataset directory: an explicit --dataset wins; otherwise prefer
@@ -9440,8 +9540,10 @@ int main(int argc, char **argv) {
         } else {
             snprintf(cand, sizeof(cand), "%s/data", g_exedir);
             if (dir_has_data(cand))                       dd = cand;
+#if MOON_DEVELOPER
             else if (dir_has_data("../portable/moonstone_hdd")) dd = "../portable/moonstone_hdd";
             else if (dir_has_data("data"))                dd = "data";
+#endif
             else                                          dd = cand;
             snprintf(g_dataset_buf, sizeof(g_dataset_buf), "%s", dd);
         }
@@ -9475,8 +9577,16 @@ int main(int argc, char **argv) {
 #endif
     fprintf(g_log, "%s\n", MOON_ATTRIB);
     fprintf(g_log, "build: %s\n", MOON_BUILD);
+    fprintf(g_log, "%s\n", MOON_BUILD_PROFILE);
     host_log_system_info();
     fprintf(g_log, "exedir=%s dataset=%s diskdir=%s mod=%s\n", g_exedir, g_dataset, g_diskdir, mod);
+    if (argument_error) {
+        host_report_issue(0, NULL, SDL_MESSAGEBOX_ERROR,
+                          "Unknown option or missing argument in this release build.",
+                          argument_error, "The game was not started.");
+        if (g_log != stderr) fclose(g_log);
+        return 2;
+    }
     if (save_profile_error) {
         host_report_issue(sdl, NULL, SDL_MESSAGEBOX_ERROR,
                           "Choose --save-profile singleplayer or --save-profile multiplayer.",
@@ -9502,6 +9612,7 @@ int main(int argc, char **argv) {
             g_lineage == LIN_CRACKED ? "cracked-common (earlier engine build; known repairs active)" :
             "UNKNOWN (fixes inert where code layout differs; prefer SPS IPF-derived data)");
 
+#if MOON_DEVELOPER
     /* --wav: headless capture of the generated Paula mix (enables audio gen on
      * the non-SDL path).  A placeholder 44-byte header is written now and
      * patched with the real data length on close. */
@@ -9513,6 +9624,7 @@ int main(int argc, char **argv) {
                                wavpath, strerror(errno));
     }
 
+#endif
     Module m;
     char module_error[512];
     if (load_hunk(g_ram, RAM_SIZE, mod, base, 8, &m, module_error, sizeof(module_error)) != 0) {
@@ -9550,6 +9662,7 @@ int main(int argc, char **argv) {
      * shared now so a live window can boot straight into a save -- e.g. straight into
      * a mid-combat repro without hand-navigating the menus.  The warmed variant
      * (--loadstate-at FRAME) stays headless-only. */
+#if MOON_DEVELOPER
     if (loadstate_path && loadstate_at < 0) {
         if (!load_state(loadstate_path)) {
             host_report_issue(sdl, NULL, SDL_MESSAGEBOX_ERROR,
@@ -9560,7 +9673,9 @@ int main(int argc, char **argv) {
         fprintf(g_log, "--- loadstate %s -> ic=%llu pc=%06x ---\n",
                 loadstate_path, (unsigned long long)g_icount, (unsigned)m68k_get_reg(NULL,M68K_REG_PC));
     }
+#endif
     if (sdl) { int rc = run_sdl(scale); if (g_log!=stderr) fclose(g_log); return rc; }
+#if MOON_DEVELOPER
     LARGE_INTEGER pf; QueryPerformanceFrequency(&pf);
     double pf_ms = 1000.0 / (double)pf.QuadPart;
     double emu_max=0, emu_sum=0, ren_max=0, ren_sum=0; int ftn=0;
@@ -9700,4 +9815,7 @@ int main(int argc, char **argv) {
     printf("done: stop=%s pc=%06x icount=%llu unmapped=%u (see %s)\n",
            g_stop_reason, pc, (unsigned long long)g_icount, g_unmapped, logpath);
     return g_data_read_failed ? 1 : 0;
+#else
+    return 1; /* Release startup always selects the normal SDL game loop. */
+#endif
 }

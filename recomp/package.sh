@@ -1,39 +1,4 @@
 #!/usr/bin/env bash
-# Build Moonstone and assemble a clean runtime-only release folder.
-#
-# Original game data is deliberately NEVER copied. Players place their own
-# Disk1.adf, Disk2.adf, and Disk3.adf in data/ after extracting the release.
+# Always build and validate the public profile; never copy the development build.
 set -euo pipefail
-cd "$(dirname "$0")"
-
-ROOT=".."
-OUT="${1:-$ROOT/dist/release-staging/Moonstone-2026-Windows-x64}"
-
-if [ -e "$OUT" ]; then
-  echo "refusing to reuse existing staging folder: $OUT" >&2
-  echo "move or remove that generated folder, then run this script again" >&2
-  exit 1
-fi
-
-echo "[1/3] building moonstone.exe ..."
-"${BASH:-bash}" build.sh moonstone
-
-echo "[2/3] assembling clean runtime-only folder ..."
-
-mkdir -p "$OUT/data" "$OUT/saves/Singleplayer" "$OUT/saves/Multiplayer"
-cp build/moonstone.exe "$OUT/"
-cp "build/Moonstone Singleplayer.exe" "build/Moonstone Multiplayer.exe" "$OUT/"
-cp build/SDL2.dll "$OUT/"
-cp dist_README.txt "$OUT/README.txt"
-cp "$ROOT/RELEASE-NOTES.md" "$OUT/"
-cp controls.ini "$OUT/"
-cp "$ROOT/LICENSE" "$OUT/LICENSE.txt"
-cp "$ROOT/THIRD-PARTY-NOTICES.txt" "$OUT/"
-cp PLACE_ADF_FILES_HERE.txt "$OUT/data/"
-
-echo "[3/3] release folder ready: $OUT"
-echo "Contents:"
-( cd "$OUT" && find . -maxdepth 2 -type f | sort )
-echo
-echo "No ADFs, extracted game modules, saves, logs, or source files were copied."
-echo "Compress the Moonstone-2026-Windows-x64 folder as Moonstone-2026-Windows-x64.zip."
+exec python "$(dirname "$0")/package.py" "$@"

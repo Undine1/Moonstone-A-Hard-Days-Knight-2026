@@ -1,46 +1,4 @@
 #!/usr/bin/env bash
-# Build the Moonstone native harness with zig cc (no MSVC needed).
-set -e
-cd "$(dirname "$0")"
-ZIG="./tools/zig-x86_64-windows-0.16.0/zig.exe"
-MUS="vendor/Musashi-master"
-
-# regenerate Musashi opcode tables if missing
-if [ ! -f "$MUS/m68kops.c" ]; then
-  "$ZIG" cc -O2 -o "$MUS/m68kmake.exe" "$MUS/m68kmake.c"
-  ( cd "$MUS" && ./m68kmake.exe )
-fi
-
-TARGET="${1:-moonstone}"
-SDL="vendor/SDL2"
-mkdir -p build
-
-# Embed the application icon (Explorer/taskbar/window) if present.  zig rc compiles
-# the .rc (referencing icon/moonstone.ico) to a COFF .res that the linker bakes in.
-RES=""
-if [ -f icon/app.rc ] && [ -f icon/moonstone.ico ]; then
-  ( cd icon && "../$ZIG" rc app.rc app.res )
-  RES="icon/app.res"
-fi
-
-# A GUI subsystem executable opens only the game window when double-clicked.
-# Redirected stdout/stderr still work for the headless regression harness.
-"$ZIG" cc -O2 -g -std=c11 -Wl,--subsystem,windows \
-  -I"$MUS" -I"$MUS/softfloat" -Isrc -I"$SDL/include" \
-  -Wno-unused-parameter -Wno-unused-but-set-variable -Wno-unused-function \
-  -Wno-date-time \
-  src/moon.c src/loader.c \
-  "$MUS/m68kcpu.c" "$MUS/m68kops.c" "$MUS/m68kdasm.c" "$MUS/softfloat/softfloat.c" \
-  "$SDL/lib/libSDL2.dll.a" \
-  $RES \
-  -o "build/$TARGET.exe"
-cp -f "$SDL/bin/SDL2.dll" build/ 2>/dev/null || true
-# Small portable launch entries, both using the existing executable icon.
-for profile in Singleplayer Multiplayer; do
-  MULTI=0
-  if [ "$profile" = Multiplayer ]; then MULTI=1; fi
-  "$ZIG" cc -O2 -std=c11 -municode -Wl,--subsystem,windows \
-    -DMOON_MULTIPLAYER="$MULTI" src/save_launcher.c $RES -luser32 \
-    -o "build/Moonstone $profile.exe"
-done
-echo "built build/$TARGET.exe (+ SDL2.dll and both save launchers)"
+# Same recipe on Windows and Bash; profile flags have one source of truth.
+set -euo pipefail
+exec python "$(dirname "$0")/build.py" "$@"

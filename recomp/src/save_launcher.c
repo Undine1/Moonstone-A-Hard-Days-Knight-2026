@@ -3,47 +3,88 @@
  * Resolve siblings from this EXE, never a shortcut's working directory. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <wchar.h>
-#include <stdio.h>
 
 #ifndef MOON_MULTIPLAYER
 #error Define MOON_MULTIPLAYER as 0 or 1
 #endif
 
 static int launch_error(DWORD code) {
-    wchar_t detail[512] = L"", message[1024];
+    wchar_t detail[512], message[1024];
+    DWORD_PTR inserts[] = {code, (DWORD_PTR)detail};
+    detail[0] = 0;
     FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
                    NULL, code, 0, detail, 512, NULL);
-    swprintf(message, 1024,
-             L"Moonstone could not start. Keep this launcher beside moonstone.exe "
-             L"and extract the complete game folder.\n\nWindows error %lu: %ls",
-             (unsigned long)code, detail);
-    MessageBoxW(NULL, message, L"Moonstone", MB_OK | MB_ICONERROR);
+    const wchar_t *fallback = L"Moonstone could not start. Keep this launcher beside "
+                              L"moonstone.exe and extract the complete game folder.";
+    DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_ARGUMENT_ARRAY,
+        L"Moonstone could not start. Keep this launcher beside moonstone.exe "
+        L"and extract the complete game folder.%n%nWindows error %1!u!: %2",
+        0, 0, message, 1024, (va_list *)inserts);
+    MessageBoxW(NULL, length ? message : fallback, L"Moonstone", MB_OK | MB_ICONERROR);
     return 1;
 }
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR args, int show) {
-    (void)instance; (void)previous; (void)show;
+/* Preserve wWinMain's raw argument tail. Only the executable name is skipped;
+ * quotes/backslashes in the remaining arguments must reach the game unchanged. */
+static const wchar_t *argument_tail(const wchar_t *line) {
+    BOOL quoted = FALSE;
+    while (*line > L' ' || (*line && quoted)) {
+        if (*line == L'"') quoted = !quoted;
+        ++line;
+    }
+    while (*line && *line <= L' ') ++line;
+    return line;
+}
+
+static BOOL append_text(wchar_t *buffer, DWORD capacity, DWORD *used, const wchar_t *text) {
+    while (*text) {
+        if (*used >= capacity - 1) {
+            buffer[*used] = 0;
+            return FALSE;
+        }
+        buffer[(*used)++] = *text++;
+    }
+    buffer[*used] = 0;
+    return TRUE;
+}
+
+static int launch_game(void) {
     static wchar_t directory[32768], exe[32768], command[32768];
     DWORD n = GetModuleFileNameW(NULL, directory, 32768);
     if (!n) return launch_error(GetLastError());
     if (n >= 32768) return launch_error(ERROR_FILENAME_EXCED_RANGE);
-    wchar_t *slash = wcsrchr(directory, L'\\');
+    wchar_t *slash = NULL;
+    for (DWORD i = 0; i < n; ++i)
+        if (directory[i] == L'\\') slash = directory + i;
     if (!slash) return launch_error(ERROR_PATH_NOT_FOUND);
-    *slash = 0;
-    int length = swprintf(exe, 32768, L"%ls\\moonstone.exe", directory);
-    if (length < 0 || length >= 32768) return launch_error(ERROR_FILENAME_EXCED_RANGE);
+    /* Keep the final separator, including for an installation at a drive root. */
+    slash[1] = 0;
+    DWORD length = 0;
+    if (!append_text(exe, 32768, &length, directory) ||
+        !append_text(exe, 32768, &length, L"moonstone.exe"))
+        return launch_error(ERROR_FILENAME_EXCED_RANGE);
     /* Forward optional diagnostic flags verbatim (including quoted --log paths).
      * Explicit SDL/OS flags retain normal play despite main's no-argument default. */
-    length = swprintf(command, 32768, L"\"%ls\" --os --sdl --save-profile %ls %ls",
-                      exe, MOON_MULTIPLAYER ? L"multiplayer" : L"singleplayer", args ? args : L"");
-    if (length < 0 || length >= 32768) return launch_error(ERROR_FILENAME_EXCED_RANGE);
-    STARTUPINFOW startup = {0};
-    PROCESS_INFORMATION process = {0};
-    startup.cb = sizeof(startup);
+    length = 0;
+    if (!append_text(command, 32768, &length, L"\"") ||
+        !append_text(command, 32768, &length, exe) ||
+        !append_text(command, 32768, &length, L"\" --os --sdl --save-profile ") ||
+        !append_text(command, 32768, &length,
+                     MOON_MULTIPLAYER ? L"multiplayer " : L"singleplayer ") ||
+        !append_text(command, 32768, &length, argument_tail(GetCommandLineW())))
+        return launch_error(ERROR_FILENAME_EXCED_RANGE);
+    static STARTUPINFOW startup = {.cb = sizeof(STARTUPINFOW)};
+    PROCESS_INFORMATION process;
     if (!CreateProcessW(exe, command, NULL, NULL, FALSE, 0, NULL, directory, &startup, &process))
         return launch_error(GetLastError());
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     return 0;
+}
+
+/* No CRT, constructors, stdio or heap allocation: Windows initializes the
+ * static buffers, and the launcher only calls Windows APIs. The engine keeps
+ * its normal runtime. This entry point is selected explicitly in build.sh. */
+void WINAPI launcher_start(void) {
+    ExitProcess((UINT)launch_game());
 }

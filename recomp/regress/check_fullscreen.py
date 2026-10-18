@@ -22,6 +22,7 @@ def main():
     ap.add_argument('--map', type=Path, required=True)
     ap.add_argument('--output', type=Path, required=True)
     ap.add_argument('--case', action='append', help='Run only the named scenario (repeatable)')
+    ap.add_argument('--public', action='store_true', help='Expect F10/F12 recorders to be absent')
     args = ap.parse_args()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -29,7 +30,8 @@ def main():
     cases = [('control', args.menu), ('window', args.menu), ('maximized', args.menu),
              ('focus', args.practice), ('failure', args.menu), ('remap', args.menu),
              ('reserved', args.menu), ('map', args.map), ('combat', args.practice),
-             ('prompt', args.practice), ('reconnect', args.practice), ('intro', None)]
+             ('prompt', args.practice), ('reconnect', args.practice), ('intro', None),
+             ('diagnostics', args.menu)]
     if args.case:
         assert set(args.case) <= {name for name, _ in cases}
         cases = [(name, fixture) for name, fixture in cases if name in args.case or name == 'control']
@@ -60,6 +62,13 @@ def main():
             (folder / 'stdout.txt').write_text(r.stdout + r.stderr)
             assert r.returncode == 0, (name, r.stdout, r.stderr)
             log = (folder / 'game.log').read_text()
+            if name == 'diagnostics':
+                recorded = list(install.glob('livedump*')) + list(install.glob('capture-*.wav'))
+                assert bool(recorded) == (not args.public), 'Wrong recorder availability for build profile'
+                if args.public: assert 'RECORDING' not in log and 'audio capture' not in log
+                else:
+                    assert (install / 'capture-1.wav').stat().st_size > 44
+                    assert list(install.glob('livedump_*.ppm'))
             assert log.count('result=failed') == (2 if name == 'failure' else 0)
             assert 'CONTROLS-WARN' not in log or name == 'reserved'
             state = (folder / 'final.sav').read_bytes()[104:104+0x200000]

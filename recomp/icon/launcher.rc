@@ -1,0 +1,44 @@
+// Independent component identity: keep this version while launcher code is unchanged.
+// Game releases have their own version. Exact launcher hashes are release-gated.
+// The existing game icon is linked from app.res, unchanged.
+#ifndef MOON_MULTIPLAYER
+#error Define MOON_MULTIPLAYER as 0 or 1
+#endif
+
+#if MOON_MULTIPLAYER
+#define LAUNCHER_DESCRIPTION "Moonstone Multiplayer save launcher\0"
+#define LAUNCHER_NAME "Moonstone Multiplayer\0"
+#define LAUNCHER_FILENAME "Moonstone Multiplayer.exe\0"
+#else
+#define LAUNCHER_DESCRIPTION "Moonstone Singleplayer save launcher\0"
+#define LAUNCHER_NAME "Moonstone Singleplayer\0"
+#define LAUNCHER_FILENAME "Moonstone Singleplayer.exe\0"
+#endif
+
+1 VERSIONINFO
+FILEVERSION 1,4,2,0
+PRODUCTVERSION 1,4,2,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Undine1\0"
+            VALUE "FileDescription", LAUNCHER_DESCRIPTION
+            VALUE "FileVersion", "1.4.2.0\0"
+            VALUE "InternalName", LAUNCHER_NAME
+            VALUE "OriginalFilename", LAUNCHER_FILENAME
+            VALUE "ProductName", "Moonstone: A Hard Day's Knight - 2026\0"
+            VALUE "ProductVersion", "1.4.2\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

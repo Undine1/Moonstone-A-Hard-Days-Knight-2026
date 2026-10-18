@@ -5,6 +5,22 @@
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include "../src/build_profile.h"
+#if !MOON_DEVELOPER
+#include <windows.h>
+/* Observe the public error path without leaving a modal test dialog open. */
+static int WINAPI probe_message(HWND owner,LPCSTR text,LPCSTR title,UINT type) {
+    (void)owner; (void)type;
+    fprintf(stderr,"TEST DIALOG %s: %s\n",title,text);
+    return IDOK;
+}
+static SDL_Renderer *probe_renderer(SDL_Window *win,int index,Uint32 flags) {
+    (void)index; (void)flags;
+    return SDL_CreateRenderer(win,-1,SDL_RENDERER_SOFTWARE);
+}
+#define MessageBoxA probe_message
+#define SDL_CreateRenderer probe_renderer
+#endif
 
 static int probe_data_failure;
 static FILE *probe_data_output;
@@ -59,6 +75,18 @@ int main(int argc, char **argv) {
             probe_data_failure = !strcmp(argv[i + 1], "write") ? 1 : 2;
     }
     if (!log) return 2; /* every probe must use an explicit scratch log */
+#if !MOON_DEVELOPER
+    if (record_dir) return 2; /* public builds contain no recording function */
+    char **engine_argv=calloc((size_t)argc+1,sizeof(char *));
+    if (!engine_argv) return 2;
+    int engine_argc=0;
+    for (int i=0;i<argc;i++) {
+        if (!strcmp(argv[i],"--frames") || !strcmp(argv[i],"--probe-data-failure")) { i++; continue; }
+        engine_argv[engine_argc++]=argv[i];
+    }
+    int rc=moonstone_main(engine_argc,engine_argv); free(engine_argv);
+    return rc;
+#else
     if (!record_dir) return moonstone_main(argc, argv);
     g_log_path = log;
     g_log = fopen(log, "w");
@@ -92,4 +120,5 @@ int main(int argc, char **argv) {
     SDL_Quit();
     fclose(g_log); g_log = NULL;
     return rc;
+#endif
 }

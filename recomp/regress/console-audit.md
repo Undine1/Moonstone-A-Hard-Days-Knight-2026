@@ -1,5 +1,12 @@
 # Console-removal audit (2026-09-05)
 
+**2026-10-16 update:** Developer recording, trace, script, memory and disassembly
+tools below now exist only in the development profile. Public builds retain
+error dialogs, startup/OS/architecture diagnostics, `moonstone.log` and normal
+save/load feedback. Use `build.py` / `package.py` and the mandatory release gate;
+see [BUILDING.md](../BUILDING.md). The historical diagnostic-command checks below
+must use a development engine, never a public package.
+
 Scope: the executable's complete `src/` tree, its linked Musashi translation
 units/configuration, SDL's log callback, and build/package entry points.
 This is a host/UI change; guest CPU, graphics, audio synthesis, and save formats
@@ -56,7 +63,7 @@ $probeSources = @(
   'vendor/Musashi-master/m68kcpu.c', 'vendor/Musashi-master/m68kops.c',
   'vendor/Musashi-master/m68kdasm.c', 'vendor/Musashi-master/softfloat/softfloat.c'
 )
-& $compiler cc -O2 -g -std=c11 '-Wl,--subsystem,windows' `
+& $compiler cc -DMOON_DEVELOPER=1 -O2 -g -std=c11 '-Wl,--subsystem,windows' `
   -Ivendor/Musashi-master -Ivendor/Musashi-master/softfloat -Isrc -Ivendor/SDL2/include `
   -Wno-unused-parameter -Wno-unused-but-set-variable -Wno-unused-function -Wno-date-time `
   @probeSources vendor/SDL2/lib/libSDL2.dll.a -o build/host_error_probe.exe

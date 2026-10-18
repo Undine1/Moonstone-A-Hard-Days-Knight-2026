@@ -37,7 +37,10 @@ def main():
     ap.add_argument('--output', type=Path, required=True)
     ap.add_argument('--other-fixture', type=Path, required=True,
                     help='A copied multiplayer save; verifies profile is host-only')
+    ap.add_argument('--build', type=Path, default=BUILD, help='Directory holding engine, launchers and save_profile_probe.exe')
+    ap.add_argument('--public', action='store_true', help='Use the release parser; diagnostic CLI tests are development-only')
     args = ap.parse_args()
+    build = args.build.resolve()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     other = args.other_fixture.resolve()
@@ -53,8 +56,8 @@ def main():
             case = out/(profile+'-'+mode)
             case.mkdir()
             exe = case/'moonstone.exe'
-            shutil.copyfile(BUILD/'save_profile_probe.exe', exe)
-            shutil.copyfile(BUILD/'SDL2.dll', case/'SDL2.dll')
+            shutil.copyfile(build/'save_profile_probe.exe', exe)
+            shutil.copyfile(build/'SDL2.dll', case/'SDL2.dll')
             shutil.copyfile(ROOT/'recomp/controls.ini', case/'controls.ini')
             for name in NAMES: shutil.copyfile(other, case/name)
             target = slot(case,selected)
@@ -115,8 +118,8 @@ def main():
     package = out/'Assembled game'
     package.mkdir()
     for name in ('Moonstone Singleplayer.exe','Moonstone Multiplayer.exe','SDL2.dll'):
-        shutil.copyfile(BUILD/name,package/name)
-    shutil.copyfile(BUILD/'save_profile_probe.exe',package/'moonstone.exe')
+        shutil.copyfile(build/name,package/name)
+    shutil.copyfile(build/'save_profile_probe.exe',package/'moonstone.exe')
     shutil.copyfile(ROOT/'recomp/controls.ini',package/'controls.ini')
     moved = out/'Moved Game with spaces'
     package.rename(moved)
@@ -136,22 +139,22 @@ def main():
         print(results[-1],flush=True)
 
     # Invalid selectors must not reach game-data extraction or modify a slot.
-    for index, flags in enumerate((['--save-profile'],['--save-profile','typo'],
+    for index, flags in enumerate(() if args.public else (['--save-profile'],['--save-profile','typo'],
                                    ['--save-profile','--frames','1'])):
         log = out/f'invalid-{index}.log'
-        result = subprocess.run([str(BUILD/'moonstone.exe'),*flags,'--log',str(log)],
+        result = subprocess.run([str(build/'moonstone.exe'),*flags,'--log',str(log)],
                                 cwd=unrelated,capture_output=True,text=True,timeout=10,creationflags=FLAGS)
         assert result.returncode == 2, result.stdout+result.stderr
         assert 'Missing or invalid save profile' in log.read_text()
         assert 'LINEAGE:' not in log.read_text()
-    print('PASS 3 invalid/missing selectors rejected before data loading',flush=True)
+    if not args.public: print('PASS 3 invalid/missing selectors rejected before data loading',flush=True)
 
     # Diagnostic paths still replace only the explicitly requested target;
     # selected save profile has no effect on RAM, audio or v5 state bytes.
     reference = None
-    for selected in ('singleplayer','multiplayer'):
+    for selected in (() if args.public else ('singleplayer','multiplayer')):
         folder = out/('explicit-'+selected); folder.mkdir()
-        run([BUILD/'moonstone.exe','--os','--dataset',DATA,'--diskdir',DATA,
+        run([build/'moonstone.exe','--os','--dataset',DATA,'--diskdir',DATA,
              '--save-profile',selected,'--loadstate-at','0',solo,'--frames','3',
              '--savestate-at','2',folder/'diagnostic.sav','--dumpram',folder/'ram.bin',
              '--wav',folder/'audio.wav','--log',folder/'game.log'],unrelated)
@@ -161,11 +164,11 @@ def main():
         results.append('PASS explicit diagnostic paths '+selected+': identical save/RAM/audio')
         print(results[-1],flush=True)
     for name in ('moonstone.exe','Moonstone Singleplayer.exe','Moonstone Multiplayer.exe'):
-        binary = (BUILD/name).read_bytes()
+        binary = (build/name).read_bytes()
         pe = struct.unpack_from('<I',binary,0x3c)[0]
         assert struct.unpack_from('<H',binary,pe+24+68)[0] == 2, name
     print('PASS all three production executables use Windows GUI subsystem',flush=True)
-    (out/'results.json').write_text(json.dumps(dict(cases=results,invalid_profiles=3,
+    (out/'results.json').write_text(json.dumps(dict(cases=results,invalid_profiles=0 if args.public else 3,
         gui_executables=3,save_format=5),indent=2)+'\n')
 
 if __name__ == '__main__': main()

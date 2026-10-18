@@ -2,6 +2,35 @@
 
 A tripwire so fixes that quietly come undone are caught here in seconds, not mid-playthrough.
 
+## Build profiles and release gate
+
+`python recomp/build.py` is the canonical recipe (`build.sh` calls it).
+It explicitly enables developer tools for the regression engine in `build/`.
+`python recomp/package.py NEW_FOLDER` always compiles the stripped public engine
+in `build/release/` and enforces `release_gate.py` before and after packaging.
+Never publish the default development engine. See [BUILDING.md](../BUILDING.md).
+
+Build a test source with `python recomp/build.py NAME --probe recomp/regress/NAME.c`.
+Existing manual compiler commands must define `MOON_DEVELOPER=1`; the source now
+defaults to release. Tests are never package inputs.
+
+`check_build_profiles.py --output NEW_FOLDER [--baseline-probe OLD_PROBE]`
+compares eight combat/map/town/boot replays across the development/public
+`build_profile_probe` builds, including every frame/PCM sample, full save bytes,
+cross-profile loads and invalid-load atomicity. It also tests actual public CLI
+rejection and rejects stale provenance, a swapped dev engine and a new debug
+switch; `--package FOLDER` additionally checks the package allowlist.
+
+`save_profile_probe.c`, `fullscreen_probe.c` and `host_error_probe.c` can be built
+with `--profile release` to test real public paths without exposing test switches
+in the actual public engine. The first two runners take `--public` (save tests
+also take `--build recomp/build/release`). Fullscreen now includes F10/F12:
+recorders must work in development and produce no files in release. The public
+startup probe captures dialog text and stops after initialization; run the data
+suite against it with `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy`.
+
+The original 13/13 golden suite still uses the DEVELOPMENT engine below.
+
 ```sh
 bash recomp/build.sh                 # build the engine
 python recomp/regress/check.py       # run all goldens -> PASS / FAIL
@@ -45,6 +74,49 @@ Pass `--output recomp/build/choke-review` to retain frame dumps for visual revie
 `python recomp/regress/check_practice_input.py` boots into Practice and checks
 movement, attack, released controls, damage, and save/reload for the second human
 knight. Disabled-fix comparisons must reproduce the former input leakage.
+
+## Guardian reward map transition
+
+`check_guardian_return.py --before OLD_EXE --fixture REWARD_WAIT_SAVE --data DATA
+--output SCRATCH [--control OTHER_SAVE ...]` compares the current development
+engine with a frozen pre-fix engine. Five dismissal timings must remove the
+corrupt pre-tween picture while preserving complete RAM, saves, audio and all
+other pictures. Raw capture, waiting and supplied unrelated scenes must agree.
+Keep SDL2.dll beside the frozen executable. Fixtures/evidence are private.
+
+Build `guardian_return_probe.c` in both profiles with `build.py --probe`.
+It drives the real SDL loop with `--fixture SAVE --output SCRATCH`, plus normal
+`--os --sdl --dataset DATA --diskdir DATA --log ABSOLUTE_SCRATCH_LOG` arguments.
+Do not pass the developer-only `--mod` argument to the public-profile probe.
+Add `--full` for fullscreen, or `--reload 3 OTHER_SAVE` / `--reload 2 OTHER_SAVE`
+to test clearing the redraw/tween blackout on load. Compare `frames.txt` and
+`final.sav` across profiles and window modes. Never deploy this test executable.
+See `notes-handoff/moonstone-guardian-transition.md` for evidence and limits.
+
+## Axe-Trogg recoil movement
+
+`trogg_movement_probe.c` runs the original earlier/retail movement and animation
+routines. It compares the correction with native standing-pose bounds, including
+two enemies, both facings, all directions/walk phases, scenery, arena edges and
+wrapped coordinates. It checks complete CPU/RAM agreement with that oracle,
+preserved body obstruction, no newly blocked directions and all four knight
+records. Build it in both development and release profiles; never deploy probes.
+
+`trogg_movement_fight_probe.c` and `check_trogg_movement.py` replay the original
+saved fights against a frozen prior engine. The suite checks actual contact to
+movement timing, unchanged other monsters, damage/animation/audio controls,
+and cold/warm loads of old and newly written mid-recoil saves. All logs and
+generated saves go to `--output`; existing specimens are read-only.
+
+```powershell
+python recomp/build.py trogg_movement_probe --probe recomp/regress/trogg_movement_probe.c
+python recomp/build.py trogg_movement_fight_probe --probe recomp/regress/trogg_movement_fight_probe.c
+python recomp/regress/check_trogg_movement.py --observations recomp/build/hit-delay-full-20261017 --native-images recomp/build/trogg-recoil-fix-20261017/native --before-exe recomp/build/trogg-recoil-fix-20261017/before.exe --output recomp/build/trogg-movement-check
+```
+
+The observation/native images are private fixtures, not distributable game data.
+Their preparation and the actual SDL keyboard/controller checks are recorded in
+`notes-handoff/moonstone-hit-recovery.md`. The full 13/13 suite is also required.
 
 ## Inventory stat numbers
 
@@ -233,7 +305,7 @@ $probeSources = @(
   'vendor/Musashi-master/m68kcpu.c', 'vendor/Musashi-master/m68kops.c',
   'vendor/Musashi-master/m68kdasm.c', 'vendor/Musashi-master/softfloat/softfloat.c'
 )
-& $compiler cc -O2 -g -std=c11 `
+& $compiler cc -DMOON_DEVELOPER=1 -O2 -g -std=c11 `
   -Ivendor/Musashi-master -Ivendor/Musashi-master/softfloat -Isrc -Ivendor/SDL2/include `
   -Wno-unused-parameter -Wno-unused-but-set-variable -Wno-unused-function -Wno-date-time `
   @probeSources vendor/SDL2/lib/libSDL2.dll.a -o build/multiplayer_probe.exe
@@ -286,6 +358,23 @@ physical controllers can stay connected. Never package this probe. Real-pad
 playtesting remains necessary.
 
 ## Separate save profiles
+
+The save launchers use only Windows APIs, with an explicit entry point and no
+C runtime. `build.sh` keeps those flags separate from the engine's normal build.
+To check launcher paths, verbatim argument forwarding, errors and length bounds:
+
+```powershell
+python recomp/regress/check_launchers.py --output recomp/build/launcher-check
+```
+
+Use `--launchers PATH` to select another build and optionally `--previous PATH`
+to compare an older pair of launchers. This runner builds test-only observers
+with the existing Zig compiler, exercises both actual launchers from moved,
+Unicode and long folder names, and requires a new scratch output directory.
+It never starts the game or opens personal saves/logs. Native source tests
+cover missing/invalid children, errors, drive/UNC paths, handle cleanup and
+command/buffer limits; error dialogs are captured without user interaction.
+Run the profile checks below as well to verify actual engine F5/F9 behavior.
 
 Build `regress/save_profile_probe.c` using the same source list and compiler
 flags as `multiplayer_probe.c` above, replacing that probe's source/output
@@ -695,6 +784,124 @@ transfers, dragon targets, keyboard/controller ownership, single cleanup,
 existing nested saves, and warm/cold saves during entry/re-entry/exit.
 Fixtures use a controlled caller; these are not full campaign playthroughs.
 Every run uses copied saves and an explicit scratch log. Never deploy probes.
+
+## Boot splash storage and rendering
+
+Build the test-only `splash_probe.c` with `build.py splash_probe --probe
+regress/splash_probe.c --profile release`. Run `check_splash.py --probe
+<absolute probe.exe> --output <new scratch directory>`. It compares the actual
+SDL texture upload with `icon/splash.png` and checks fullscreen/windowed return
+pixels. `--baseline-probe <old probe.exe>` additionally requires all three
+captures to match a probe built before the change. `--baseline-header <old
+header>` independently decodes a previous base64/QOI or raw-pixel header and
+verifies every original RGB pixel. The public splash uses raw RGB24, with no
+decoder or temporary image allocation; the source PNG and icon art stay intact.
+The probe has its own scratch log and never writes a player save. Do not ship it.
+
+## Interrupted knight fall
+
+Build test-only `knight_fall_probe.c` with `build.py knight_fall_probe --probe
+regress/knight_fall_probe.c`. Run `check_knight_fall.py --before-exe <frozen
+previous engine> --output <scratch>`. Its default read-only specimens are in
+`build/trogg-death-review-20261017/`; see the death-animation topic note.
+`--resume-saves` runs only the saved-boundary continuation checks.
+
+The native probe compares the fix against original pause expiry, including both
+editions/facings, four knights, repeat hits, sound calls, full RAM/CPU and scope
+guards. Full replays compare normal deaths, paired rat kills, knight decapitation
+and canopy escape/death; six instruction-boundary saves get cold/warm restores.
+The latter requires identical full saves/pictures and all PCM after the existing
+output filter's bounded settling. The warm test must refresh IRQ level after its
+test-only restore, because the calling loop sampled it before loading.
+
+`knight_fall_sdl_probe.c` exercises the same saved reproducer in the actual SDL
+loop in either compiled profile. Supply `--fixture <before-death.sav> --output
+<scratch> --log <absolute scratch log>` with the normal `--os --sdl --dataset
+<private data> --diskdir <private data>` arguments; `--full` tests fullscreen.
+It asserts no return to kneeling after the fall, one life lost and normal HP
+restoration. All probes/fixtures/logs are private and must never be packaged.
+
+## Mudman spawn pixels
+
+Build `mudman_spawn_probe.c` with the normal `build.py --probe` recipe. Its
+`--native <private evidence folder> --log <absolute scratch log>` mode tests both
+disk layouts against actual masked blits and unrelated-call/state guards.
+`check_mudman_spawn.py --before-probe <frozen observer> --before-exe <old engine>
+--evidence <private evidence> --output <scratch>` compares full fights, exact
+save/RAM/PCM, edge-only picture changes, other deaths and cold/warm restores.
+`--resume-fights` continues after already completed fight comparisons.
+
+`mudman_spawn_sdl_probe.c` runs the actual SDL loop in either profile. Supply
+`--fixture <first-pose.sav> --output <scratch> --log <absolute scratch log>` and
+`--os --sdl --dataset <private data> --diskdir <private data>`; add `--full` for
+fullscreen. Compare all captured pictures and final saves across profiles/modes.
+Read `notes-handoff/moonstone-mudman-spawn.md` for private fixture locations and
+scope. All probes and private evidence must stay out of public packages.
+
+## Tavern quick taps
+
+Build `tavern_input_probe.c` and `tavern_input_sdl_probe.c` with the canonical
+`build.py <probe-name> --probe regress/<probe-name>.c` recipe, in both profiles.
+`tavern_input_probe --native <port.ram> <retail.ram> --log <absolute scratch log>`
+executes original RNG/payout/hotspot code and input/register/scope checks.
+
+Run `check_tavern_input.py --fixture <private tavern-betting.sav> --before
+<frozen preceding engine> --output <scratch>` for105 complete replays. Add
+`--sdl-only` with a separate output folder for22 actual SDL cases: four owners,
+keyboard/virtual controllers, focus/load/disconnect/reconnect. All cases use
+absolute scratch logs and private save copies. The native acceptance time and
+RNG/results must match the old input path; identical-input before/after controls
+also require identical complete saves, RAM, PCM and pixels. Pending physical
+input is intentionally discarded on load, while an already accepted native
+transaction must survive cold/warm restores exactly once.
+
+See `notes-handoff/moonstone-tavern-input.md` for private reference paths and
+limits. Never distribute probes or their evidence/fixture folders.
+
+## Spear execution freeze
+
+Build `spear_death_probe.c` in both profiles using `build.py --probe`. Its
+`--native <port.ram> <retail.ram> --log <absolute scratch log>` mode compares
+actual native fatal contacts with an independent original-code installer
+oracle and checks unrelated contacts/recovery/CCR guards. Run
+`check_spear_death.py --evidence <private evidence> --output <scratch>` for
+the saved freeze, controlled pre-fatal contact, other deaths and reloads.
+`--saves-only` resumes completed fight checks. `--before-probe <frozen observer>`
+checks a preexisting cold/warm cumulative-counter difference against the old
+engine's exact full results; no new gameplay state differences are permitted.
+See `notes-handoff/moonstone-spear-death.md` for fixture/provenance details.
+
+`spear_death_sdl_probe.c` accepts `--fixture <stuck.sav> --output <scratch>
+--log <absolute scratch log>` plus `--os --sdl --dataset <private data>
+--diskdir <private data>`; `--full` selects fullscreen. Run in both profiles
+and compare full final saves and captured pixels. All probes/private inputs
+stay out of the public package.
+
+## Public executable metadata
+
+`check_pe_metadata.py --before <original-public-EXE-folder> --output <new-scratch>`
+checks `pe_metadata.py` with the independently installed `pefile` parser. It
+requires identical loaded code/data/resources and section permissions, an
+unspecified PE timestamp, no empty REPRO section, idempotence, and rejection of
+unexpected debug payloads, signatures and layouts. It also verifies the public
+package gate rejects unprocessed files. Originals are read-only; this test does
+not launch the game. Follow it with normal build-profile comparisons and startup
+checks of the exact packaged EXEs. No production dependency is added.
+
+The unchanged save launchers are independently versioned components. Run
+`check_launcher_components.py --output <new-scratch>` after building release.
+It accepts only their two approved exact hashes and rejects modified/wrong-slot
+launchers, stale source provenance, development engines and attempts to apply the
+launcher metadata exception to the game. `check_launchers.py` covers actual
+child-process arguments, paths, profile selection, buffer limits and errors.
+
+`check_engine_icons.py --before <PNG-icon-public-engine> --after <public-engine>
+--output <new-scratch>` independently checks all six icon sizes, every RGBA pixel
+and transparency-mask bit, original game payloads, imports/TLS/permissions,
+reproducible resource conversion and idempotence. It rejects compressed icons
+returning or resource processing changing executable code. It uses installed
+Pillow/pefile test tools; the production build helper uses only the standard
+library and Windows resource APIs. No engine is executed by this test.
 
 ## Adding a golden
 

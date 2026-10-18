@@ -48,7 +48,7 @@ def main():
             assert r.returncode == 0, (name, r.stdout, r.stderr)
             log = (folder / 'game.log').read_text()
             assert 'V-VERSION alert' not in log and 'VERSION recovered' not in log
-            assert log.count('VERSION shown: v1.4 - 2026 revision - Undine') == (0 if name == 'control' else 3)
+            assert log.count('VERSION shown: v1.5 - 2026 revision - Undine') == (0 if name == 'control' else 3)
             assert log.count('VERSION hidden:') == (0 if name == 'control' else 1)
             assert 'SAVESTATE ' in log and log.count('LOADSTATE ') >= 2
             state = (folder / 'final.sav').read_bytes()

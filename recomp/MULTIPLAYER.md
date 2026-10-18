@@ -1,4 +1,4 @@
-# Local multiplayer — v1.4.0
+# Local multiplayer — v1.5
 
 This release supports two-player **Practice**
 and two to four campaign players. It connects modern devices to the original
@@ -91,7 +91,7 @@ Scene changes handle disk confirmation automatically. Entering Math's tower or
 being attacked should no longer stop on a black screen until Player 1 presses a
 button. Restart this build and load your existing campaign to use the fix.
 
-On the campaign map, press V to show "v1.4 - 2026 revision - Undine"; press V
+On the campaign map, press V to show "v1.5 - 2026 revision - Undine"; press V
 again to hide it. The game and controls remain active. `show_version` in
 `controls.ini` changes this binding and can assign a controller button. In
 multiplayer, the active player's device controls it. Leaving the map or loading

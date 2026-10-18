@@ -7,13 +7,10 @@ static Uint8 keys[SDL_NUM_SCANCODES];
 static SDL_Window *window;
 static SDL_Joystick *pads[2];
 static int presents, fail_next, switches;
-static const char *scenario, *output;
+static const char *scenario, *output, *initial_fixture;
 static const Uint8 *probe_keyboard(int *n) { if (n) *n=SDL_NUM_SCANCODES; return keys; }
 static SDL_bool virtual_controller(int i) { return SDL_JoystickIsVirtual(i) && SDL_IsGameController(i); }
-static SDL_Window *probe_window(const char *t,int x,int y,int w,int h,Uint32 flags) {
-    window=SDL_CreateWindow(t,x,y,w,h,flags);
-    return window;
-}
+static SDL_Window *probe_window(const char *t,int x,int y,int w,int h,Uint32 flags);
 static int probe_fullscreen(SDL_Window *w,Uint32 flags) {
     switches++;
     if (fail_next) { fail_next=0; return SDL_SetError("Injected fullscreen failure"); }
@@ -34,6 +31,17 @@ static void present(SDL_Renderer *ren);
 #undef SDL_IsGameController
 #undef SDL_GetKeyboardState
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"FAIL %s frame %d line %d: %s (SDL: %s)\n",scenario,presents,__LINE__,#x,SDL_GetError()); exit(2); } } while (0)
+static SDL_Window *probe_window(const char *t,int x,int y,int w,int h,Uint32 flags) {
+#if !MOON_DEVELOPER
+    if (initial_fixture) {
+        g_bootphase=0; g_sdl_mode=0;
+        CHECK(load_state(initial_fixture));
+        g_sdl_mode=1;
+    }
+#endif
+    window=SDL_CreateWindow(t,x,y,w,h,flags);
+    return window;
+}
 static int is(const char *s) { return !strcmp(scenario,s); }
 static int fullscreen(void) { return !!(SDL_GetWindowFlags(window)&SDL_WINDOW_FULLSCREEN); }
 static SDL_Rect rect(void) {
@@ -108,6 +116,16 @@ static void present(SDL_Renderer *ren) {
     if (n==2 && (recovery || is("focus"))) start(1);
     if (n==3 && (recovery || is("focus"))) start(0);
     if (n==4 && is("maximized")) { normal=rect(); SDL_MaximizeWindow(window); }
+    if (n==4 && is("diagnostics")) { key(SDL_SCANCODE_F10,1,0); key(SDL_SCANCODE_F12,1,0); }
+    if (n==6 && is("diagnostics")) {
+        CHECK(g_livedump==MOON_DEVELOPER && !!g_wav==MOON_DEVELOPER);
+        key(SDL_SCANCODE_F10,0,0); key(SDL_SCANCODE_F12,0,0);
+    }
+    if (n==8 && is("diagnostics")) { key(SDL_SCANCODE_F10,1,0); key(SDL_SCANCODE_F12,1,0); }
+    if (n==9 && is("diagnostics")) {
+        CHECK(!g_livedump && !g_wav);
+        key(SDL_SCANCODE_F10,0,0); key(SDL_SCANCODE_F12,0,0);
+    }
     if (n==5 && recovery) { CHECK(g_mp.phase==MP_PLAY); detach_pad(&pads[1]); }
     if (n==5 && is("failure")) { fail_next=1; key(SDL_SCANCODE_F11,1,0); }
     if (n==6 && is("failure")) { CHECK(!fullscreen()); key(SDL_SCANCODE_F11,0,0); }
@@ -190,6 +208,7 @@ int main(int argc,char **argv) {
         if (!strcmp(argv[i],"--log") && i+1<argc) { log=1; i++; }
         else if (!strcmp(argv[i],"--probe-output") && i+1<argc) output=argv[++i];
         else if (!strcmp(argv[i],"--probe-case") && i+1<argc) scenario=argv[++i];
+        else if (!strcmp(argv[i],"--loadstate") && i+1<argc) initial_fixture=argv[++i];
     }
     if (!log || !output || !scenario) return 2;
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
@@ -197,7 +216,16 @@ int main(int argc,char **argv) {
         SDL_SetMainReady(); CHECK(SDL_Init(SDL_INIT_GAMECONTROLLER)==0);
         pads[0]=attach_pad(); pads[1]=attach_pad();
     }
-    int rc=moonstone_main(argc,argv);
+    char **engine_argv=calloc((size_t)argc+1,sizeof(char *)); CHECK(engine_argv);
+    int engine_argc=0;
+    for (int i=0;i<argc;i++) {
+        if (!strncmp(argv[i],"--probe-",8)) { i++; continue; }
+#if !MOON_DEVELOPER
+        if (!strcmp(argv[i],"--loadstate") || !strcmp(argv[i],"--mod")) { i++; continue; }
+#endif
+        engine_argv[engine_argc++]=argv[i];
+    }
+    int rc=moonstone_main(engine_argc,engine_argv); free(engine_argv);
     CHECK(presents==81 && rc==0);
     printf("PASS %s: real SDL fullscreen, Escape/F11, held input and window restoration\n",scenario);
     return rc;

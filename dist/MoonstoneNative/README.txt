@@ -162,7 +162,7 @@ Start/Enter press. Existing saves work.
     Losing window focus also pauses multiplayer. F11 works while waiting.
 
     Original combat pause: Start on either assigned pad or Space on keyboard.
-    Host shortcuts (pause, save/load, quit, diagnostics) remain keyboard-accessible.
+    Host shortcuts (pause, save/load, quit, fullscreen) remain keyboard-accessible.
 
   SKIP THE INTRO
     Press Space, Enter, or Ctrl on the keyboard, or A, B, LB, RB, or RT
@@ -230,7 +230,7 @@ make sure SDL2.dll is still next to moonstone.exe.
 
 If startup data or a requested save cannot be loaded, an error dialog names
 the file. Details are written to moonstone.log (or the path given by --log).
-Warnings also appear if sound, audio recording, or the log file is unavailable.
+Warnings also appear if sound or the log file is unavailable.
 
 For setup errors, the log lists the operating system and 32/64-bit architecture,
 disk paths and exact sizes, missing startup files, extraction failures, and
